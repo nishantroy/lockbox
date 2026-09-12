@@ -25,7 +25,7 @@ The requested reliability slices are also covered in the owned production paths:
 
 ## Validation
 
-- `swift test --scratch-path /tmp/phone-lockbox-overnight-reliability-tests-2`: **74 tests passed**.
+- `swift test --scratch-path /tmp/phone-lockbox-overnight-reliability-tests-3`: **75 tests passed**.
 - Simulator app/extension build, no signing: `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -configuration Debug -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build`: **passed**. This compiled `MonitorExtension.swift` and all shared runtime sources.
 - iOS Simulator unit tests on booted `iPhone 17` (`D7081409-96E5-4F3A-9F33-47288449EC3D`): `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'platform=iOS Simulator,id=D7081409-96E5-4F3A-9F33-47288449EC3D' -configuration Debug -derivedDataPath DerivedData test -only-testing:PhoneLockboxTests`: **15 tests passed**. The simulator was not authorized for Family Controls; the system emitted expected authorization errors during app test launch.
 - `git diff --check`: passed.
@@ -46,4 +46,5 @@ The tests include terminal manual clear with scheduled overlap, atomic natural e
 - App/monitor finite-route checks and sticky reconciliation errors: `232d2e2` (`fix: verify manual end routes before shielding`)
 - Deferred replacement route retention: `0115c85` (`fix: keep recurring route through deferred replacement`)
 - Stale disabled-route reconciliation: `e758547` (`fix: reconcile stale disabled daily routes`)
-- Review record updates: `91b1355`, `2f60b21` (documentation-only disposition and validation updates).
+- Reconciliation-error retention rule and regression: `1cdb3de` (`fix: preserve reconciliation errors across UI actions`)
+- Review record updates: `91b1355`, `2f60b21`, `3250258` (documentation-only disposition and validation updates).
