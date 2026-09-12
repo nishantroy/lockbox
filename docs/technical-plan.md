@@ -1,6 +1,6 @@
 # Phone Lockbox — technical plan
 
-Status: proposed architecture and experiments. No Xcode project, entitlement approval, build, or device test exists yet.
+Status: target architecture; a working device prototype now exists, but shared session/recovery integration and dependable automatic release remain unfinished. Paid-team development signing and immediate category shielding work on the owner's phone. Distribution entitlement approval is separate and has not been established. See [current evidence](status-and-qa.md), [execution roadmap](roadmap.md), and [Sol review](reviews/2026-09-10-sol.md) before implementing.
 
 Related: [product plan](product-plan.md), [interaction design](interaction-design.md).
 
@@ -8,7 +8,7 @@ Related: [product plan](product-plan.md), [interaction design](interaction-desig
 
 Use Swift and SwiftUI with Apple's Screen Time frameworks. Begin with a disposable feasibility slice before investing in UI or abstraction. No HTTP listener, database server, backend, or local port is needed.
 
-Deployment target is undecided. Individual authorization requires iOS 16 or later, but the practical minimum should follow the owner's device, installed SDK, and real-device results. Do not select an old minimum solely because an API is available there.
+The current project targets iOS 17 with Swift 6 and builds against the installed iOS 26.5 SDK. Oldest-supported-OS runtime/API compatibility still needs validation; the device prototype has only been exercised on the owner's newer OS. Do not infer compatibility from a deployment-target setting alone.
 
 ## Proposed targets and responsibilities
 
@@ -33,7 +33,7 @@ First inspect the available Xcode/SDK and developer tooling without changing glo
 
 - An iPhone and its iOS version for real-device tests.
 - The owner's participation in device connection, trust, Developer Mode, and authorization prompts as required.
-- An Apple signing team/account setup compatible with the required development capabilities.
+- An Apple signing team/account setup compatible with the required development capabilities. Personal Teams do not support the Family Controls (Development) capability; actual Screen Time enforcement therefore requires an eligible paid Apple Developer team (and distribution later requires the separate approval process).
 
 Never ask the owner to paste credentials or signing secrets into the repository. Choose bundle identifiers and App Group identifiers after a signing team is available. Verify development entitlement availability rather than assuming a free provisioning profile is sufficient.
 
@@ -54,7 +54,7 @@ Never ask the owner to paste credentials or signing secrets into the repository.
 
 Do not treat simulator success as sufficient proof of Screen Time enforcement. Unit tests and previews are useful in the simulator; critical enforcement gates require a physical device.
 
-Use short bounded test sessions and retain a known recovery route. Do not block required utilities overnight while exploring cleanup behavior. Device Activity has scheduling constraints; discover valid short test intervals rather than assuming arbitrary seconds-level callbacks.
+Use bounded scheduled test sessions and retain a known recovery route. The current immediate prototype test bypasses Device Activity and must be cleared manually; it is not a bounded production session. Do not block required utilities overnight while exploring cleanup behavior. Apple documents a **15-minute minimum** and one-week maximum Device Activity interval (verified 2026-09-10; see [platform research](reviews/2026-09-10-platform.md)). Use a 20-minute scheduled QA window for margin, rather than the previous hour/90-minute suggestions. Registration still may fail for other reasons; capture exact errors. Apple also documents callbacks as device-use-dependent, so don't promise exact wall-clock delivery while idle.
 
 Create a feasibility report when experiments start, with OS/device/build details, exact steps, expected/actual behavior, timing, and unresolved limitations. Reports must exclude sensitive app selections and personal identifiers by default.
 
@@ -159,7 +159,7 @@ Then run the seven-night personal trial from the product plan. Keep reflection l
 
 ## Reference starting points
 
-These are official documentation entry points to review against the installed SDK during implementation, not documentation verified as part of this planning-only change:
+These are official documentation entry points to review against the installed SDK during implementation. Not every platform constraint in the plan has been authoritatively verified; record specific references as feasibility work resolves them:
 
 - [FamilyControls](https://developer.apple.com/documentation/familycontrols)
 - [ManagedSettings](https://developer.apple.com/documentation/managedsettings)

@@ -1,6 +1,6 @@
 # Phone Lockbox — product plan
 
-Status: initial plan, not an implemented or device-validated product.
+Status: target product specification. A device-tested feasibility prototype exists; the dependable bedtime MVP is not complete. See [current evidence](status-and-qa.md) and [execution roadmap](roadmap.md) for actual progress.
 
 ## Purpose
 
@@ -34,7 +34,7 @@ Focus, notification settings, and Home Screen simplification are optional guided
 | --- | --- |
 | Authorization | Explain and request individual Screen Time authorization; expose missing authorization clearly. |
 | Recurring schedule | One daily local-time window, including overnight windows. Reject ambiguous equal start/end times. Weekday variations are deferred. |
-| Essentials selection | User selects available exceptions through supported system UI. Explain unavoidable exclusions and test critical access before commitment. |
+| Restriction selection | Support Block selected and Allow only selected through system app/category/website selection. Category allowance currently expands to individual token exceptions; explain coverage limits and test critical access before commitment. |
 | Scheduled lock | Apply restrictions without needing the main app to stay open; release at the scheduled end. Reliability must be tested. |
 | Lock now | Start immediately with a clearly confirmed future end. Provisional default: the next configured morning end; never create an indefinite session. |
 | Active-rule protection | Freeze the current session's baseline. Relaxations and schedule changes cannot shorten it through ordinary settings. |

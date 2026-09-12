@@ -1,6 +1,6 @@
 # Phone Lockbox — interaction design
 
-Status: low-fidelity behavior specification. Visual polish follows feasibility.
+Status: target behavior specification, not a description of the current Form-based prototype. Recovery UI, immutable active rules and bounded Lock now are not integrated yet. See [roadmap](roadmap.md) and [QA evidence](status-and-qa.md). Visual polish follows reliability.
 
 Related: [product plan](product-plan.md), [technical plan](technical-plan.md).
 

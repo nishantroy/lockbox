@@ -1,19 +1,23 @@
 # Phone Lockbox
 
-A planned native iPhone app that keeps essentials available while restricting nighttime app-hopping. Personal use first, with possible public release later.
+A native iPhone app to keep essentials available while restricting nighttime app-hopping. Personal use first; local-only, no accounts or backend.
 
-**Status:** planning only. No app, build, or real-device enforcement tests yet.
+**Status:** working device prototype. Build-2 settings migration, scheduled blocking/automatic release and relaunch persistence have owner-reported passes. Next is production session/recovery integration; overnight and reboot reliability remain unvalidated.
 
-## Plan
+## Start here
 
-- [Product plan](docs/product-plan.md): goals, scope, acceptance criteria, and phased delivery.
-- [Interaction design](docs/interaction-design.md): setup, lock states, rule changes, and deliberate recovery.
-- [Technical plan](docs/technical-plan.md): Apple framework integration, feasibility gates, architecture, and validation.
+- **[Execution roadmap / Luna handoff](docs/roadmap.md)** — next tasks, dependencies, acceptance gates.
+- **[Latest R1 progress and focused QA](docs/r1-progress.md)** — implementation, checks, and the next 20-minute device experiment.
+- [Historical status and QA evidence](docs/status-and-qa.md) — confirmed build-1 behavior versus assumptions.
+- [Independent Sol code review](docs/reviews/2026-09-10-sol.md) — prioritized findings.
+- [Developer runbook](docs/development.md) — source map, builds, wireless device deployment.
 
-Start with real-device blocking and scheduled-release experiments, then build the bedtime MVP. The schedule and essentials list are user-configurable. A minimalist launcher is deferred.
+## Specifications
 
-## Constraints
+- [Product plan](docs/product-plan.md): scope and success criteria.
+- [Interaction design](docs/interaction-design.md): target setup, active-lock and recovery experience.
+- [Technical plan](docs/technical-plan.md): intended architecture and platform-validation gates.
 
-This is a self-control tool, not a tamper-proof device lockdown. iOS system exclusions, authorization revocation, and uninstall remain limitations. Exact blocking coverage and reliability must be established on a physical iPhone.
+The SwiftUI app uses FamilyControls, ManagedSettings and DeviceActivity, with monitor and shield extensions. Generate the Xcode project using `xcodegen generate`; run core tests using `swift test`. Physical-device enforcement requires eligible Apple development signing. See the runbook for full commands.
 
-The planned app is local-only and requires no backend or HTTP listener. Development will require suitable Apple signing capabilities and a physical iPhone; setup commands will be documented once an Xcode project exists.
+This is a self-control tool, not tamper-proof lockdown. System exclusions, authorization revocation and uninstall remain limitations. Launcher/widgets, NFC and public distribution are deferred until bedtime reliability is proven.
