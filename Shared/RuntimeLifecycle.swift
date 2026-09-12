@@ -2,12 +2,9 @@ import Foundation
 
 /// Small, side-effect-free state mutations shared by app and monitor adapters.
 public enum RuntimeLifecycle {
-    /// Keep the repeating daily route for a still-enabled recurrence even
-    /// after the just-ended occurrence has become terminal. A manual-only
-    /// document has no recurring intent and therefore cannot keep that route.
-    /// A live scheduled session is retained as an end route after the user
-    /// disables recurrence; an activated pending replacement is explicitly
-    /// stopped by the adapter after this decision.
+    /// Keep the active model bounded without dropping a durable recovery
+    /// target or a current scheduled release marker. Terminal history may
+    /// exceed the normal target when those identities must be retained.
     public static func pruneTerminalSessions(
         _ document: inout RuntimeStoreDocument,
         keeping limit: Int = 32,
@@ -54,18 +51,27 @@ public enum RuntimeLifecycle {
         }
     }
 
+    /// Keep the repeating daily route for a still-enabled recurrence even
+    /// after the just-ended occurrence has become terminal. A manual-only
+    /// document has no recurring intent and therefore cannot keep that route.
+    /// A live scheduled session is retained as an end route after the user
+    /// disables recurrence. An activated pending replacement is explicitly
+    /// stopped by the adapter after this decision; a merely queued replacement
+    /// must not strand future recurrence while another session is still live.
     public static func scheduledRegistrationShouldRemain(
         _ document: RuntimeStoreDocument,
-        at date: Date
+        at date: Date,
+        replacementActivated: Bool = false
     ) -> Bool {
+        guard !replacementActivated else { return false }
         let scheduledIsLive = document.sessions.contains {
             $0.origin == .scheduled && $0.isEffective(at: date)
         }
-        // `pendingConfiguration` is an explicit replacement. The callback
-        // adapter stops the old route when it activates that replacement;
-        // otherwise an enabled recurrence retains its daily registration even
-        // after ordinary natural expiry.
-        return scheduledIsLive || (document.recurringEnabledIntent && document.pendingConfiguration == nil)
+        // Enabled recurrence retains its daily registration after ordinary
+        // natural expiry, including while a pending configuration waits for a
+        // manual overlap to finish. The callback that actually activates the
+        // replacement passes `replacementActivated` above.
+        return scheduledIsLive || document.recurringEnabledIntent
     }
 
     public static func shouldSuppressScheduledOccurrence(

@@ -157,8 +157,14 @@ final class MonitorExtension: DeviceActivityMonitor {
                     scheduleToRegister = context.document.configuration
                 }
                 let hasLiveScheduled = RuntimeLifecycle.scheduledRegistrationShouldRemain(context.document, at: now)
-                // A manual-only aggregate never keeps the daily OS route alive.
-                shouldStop = activated || !hasLiveScheduled
+                // With recurrence disabled, a manual-only aggregate never
+                // keeps the daily OS route alive. Enabled recurrence retains
+                // the route even after this occurrence expires.
+                shouldStop = activated || !RuntimeLifecycle.scheduledRegistrationShouldRemain(
+                    context.document,
+                    at: now,
+                    replacementActivated: activated
+                )
                 context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration?.start, requestedEnd: configuration?.end, revision: configuration?.revision, detail: expiredScheduled ? "intervalDidEnd; natural end wins over recovery." : "intervalDidEnd replayed idempotently; no natural scheduled expiry was required."), succeeded: true)
                 try replayCurrentPolicy(in: context, at: now, detail: "Scheduled-end reconciliation used the current aggregate.")
             }

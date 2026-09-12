@@ -229,7 +229,6 @@ final class RuntimeLifecycleTests: XCTestCase {
         var document = RuntimeStoreDocument()
         document.configuration = configuration
         document.recurringEnabledIntent = true
-        document.sessions = [ended]
         var expired = ended
         expired.state = .expired
         document.sessions = [expired]
@@ -241,6 +240,25 @@ final class RuntimeLifecycleTests: XCTestCase {
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let nextStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
         XCTAssertTrue(RuntimeScheduleDecision.accepts(.start, configuration: configuration, at: nextStart, calendar: calendar))
+    }
+
+    func testNaturalExpiryUsesInjectedCalendarForAbsoluteFence() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let end = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 7))!
+        var document = RuntimeStoreDocument()
+        document.sessions = [session(start: start, duration: end.timeIntervalSince(start))]
+
+        XCTAssertTrue(RuntimeLifecycle.expireNaturalSessions(&document, at: end, calendar: calendar))
+        XCTAssertEqual(document.scheduledActivationFence?.notBeforeOccurrenceStart, end)
+        let nextNight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(
+            document,
+            start: nextNight,
+            end: nextNight.addingTimeInterval(8 * 60 * 60),
+            calendar: calendar
+        ))
     }
 
     func testPendingReplacementIsTheOnlyNaturalEndRouteStop() {
@@ -260,9 +278,15 @@ final class RuntimeLifecycleTests: XCTestCase {
             selectionData: Data([2])
         )
 
-        XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: ended.end))
-        // If another route still owns the current scheduled session, retain
-        // its end callback even while a replacement waits to activate.
+        // A queued replacement alone must not strand recurrence while a
+        // manual overlap prevents activation. The adapter stops only after the
+        // replacement has actually activated.
+        XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: ended.end))
+        XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(
+            document,
+            at: ended.end,
+            replacementActivated: true
+        ))
         document.sessions = [ended]
         XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(
             document,
