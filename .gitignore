@@ -2,6 +2,7 @@
 .build-device/
 .swiftpm/
 DerivedData/
+DerivedData-*/
 *.xcuserstate
 xcuserdata/
 .pi/
