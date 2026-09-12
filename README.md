@@ -6,7 +6,7 @@ A native iPhone app to keep essentials available while restricting nighttime app
 
 ## Start here
 
-- **[Build-4 candidate](docs/build4-candidate.md)** — reviewed reliability fixes and standalone native demos; not yet deployed.
+- **[Build-4 candidate](docs/build4-candidate.md)** — reviewed reliability fixes and standalone native demos; installed for owner QA.
 - **[Execution roadmap / Luna handoff](docs/roadmap.md)** — next tasks, dependencies, acceptance gates.
 - **[Build-3 lifecycle QA](docs/r2-r3-qa.md)** — reported passes and remaining acceptance cases.
 - [Historical R1 progress](docs/r1-progress.md) — build-2 implementation and completed bounded experiment.

@@ -1,6 +1,6 @@
 # Build 4 — source-only device-QA candidate
 
-Prepared 2026-09-12. Installed phone remains build 3 unless a later deployment record says otherwise. No device schedules, authorization or notifications were changed during preparation.
+Prepared 2026-09-12. Build 4 was installed on the owner's paired iPhone at 11:41 PDT and launched successfully on explicit request. No notification permission or demo scheduling was requested by the agent. Physical-device QA of this build remains pending.
 
 ## Included
 
