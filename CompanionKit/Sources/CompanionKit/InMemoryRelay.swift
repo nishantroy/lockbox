@@ -28,6 +28,22 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         let snapshot: RelaySnapshot
         do { snapshot = try JSONDecoder().decode(RelaySnapshot.self, from: data) }
         catch { throw CompanionError.malformed("invalid relay snapshot") }
+        // Validate the complete graph before installing any decoded value.
+        // This keeps restore fail-closed and prevents a partially trusted
+        // snapshot from becoming relay state.
+        try Self.validateSnapshot(snapshot)
+        try self.init(owner: snapshot.owner, now: snapshot.currentTime)
+        self.invitations = Dictionary(uniqueKeysWithValues: snapshot.invitations.map { ($0.payload.inviteID, $0) })
+        self.usedInviteIDs = snapshot.usedInviteIDs
+        self.pendingAcceptances = Dictionary(uniqueKeysWithValues: snapshot.pendingAcceptances.map { ($0.acceptanceID, $0) })
+        self.pairings = Dictionary(uniqueKeysWithValues: snapshot.pairings.map { ($0.pairingID, $0) })
+        self.sessions = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.owner.identityID, $0) })
+        self.requests = Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.requestID, $0) })
+        self.approvals = Dictionary(uniqueKeysWithValues: snapshot.approvals.map { ($0.approvalID, $0) })
+        self.usedApprovalIDs = snapshot.usedApprovalIDs
+    }
+
+    private static func validateSnapshot(_ snapshot: RelaySnapshot) throws {
         guard snapshot.invitations.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.pairings.count <= CompanionLimits.maxSnapshotRecords,
@@ -38,42 +54,103 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
               snapshot.usedApprovalIDs.count <= CompanionLimits.maxSnapshotRecords else {
             throw CompanionError.malformed("relay snapshot too large")
         }
-        try snapshot.owner.validate()
-        for inviteID in snapshot.usedInviteIDs { try requireIdentifier(inviteID, name: "used invite ID") }
-        for approvalID in snapshot.usedApprovalIDs { try requireIdentifier(approvalID, name: "used approval ID") }
-        try self.init(owner: snapshot.owner, now: snapshot.currentTime)
+        guard snapshot.owner.role == .owner else { throw CompanionError.unauthorized }
+        try snapshot.owner.validate(); try requireTimestamp(snapshot.currentTime, name: "snapshot time")
+
+        var invitations: [String: Invitation] = [:]
         for invitation in snapshot.invitations {
-            try invitation.payload.validate(at: invitation.payload.issuedAt)
-            guard invitations[invitation.payload.inviteID] == nil else { throw CompanionError.malformed("duplicate invite") }
+            try invitation.validateSignature()
+            guard invitation.payload.owner == snapshot.owner,
+                  invitations[invitation.payload.inviteID] == nil else { throw CompanionError.malformed("invalid invitation ownership") }
             invitations[invitation.payload.inviteID] = invitation
         }
-        self.usedInviteIDs = snapshot.usedInviteIDs
+        for inviteID in snapshot.usedInviteIDs {
+            try requireIdentifier(inviteID, name: "used invite ID")
+            guard invitations[inviteID] != nil else { throw CompanionError.malformed("unknown used invite") }
+        }
+
+        var acceptances: [String: PairingAcceptance] = [:]
         for acceptance in snapshot.pendingAcceptances {
             try acceptance.validate()
-            guard pendingAcceptances[acceptance.acceptanceID] == nil else { throw CompanionError.malformed("duplicate acceptance") }
-            pendingAcceptances[acceptance.acceptanceID] = acceptance
+            guard acceptance.owner == snapshot.owner,
+                  !snapshot.usedInviteIDs.contains(acceptance.inviteID),
+                  let invitation = invitations[acceptance.inviteID], invitation.payload.owner == snapshot.owner,
+                  acceptance.issuedAt >= invitation.payload.issuedAt.addingTimeInterval(-60),
+                  acceptance.issuedAt < invitation.payload.expiresAt,
+                  acceptance.verificationCode == PairingAcceptance.code(invite: invitation.payload, approver: acceptance.approver),
+                  acceptances[acceptance.acceptanceID] == nil else {
+                throw CompanionError.malformed("invalid pending acceptance graph")
+            }
+            acceptances[acceptance.acceptanceID] = acceptance
         }
+
+        var pairings: [String: Pairing] = [:]
         for pairing in snapshot.pairings {
             try pairing.validate()
-            guard pairings[pairing.pairingID] == nil else { throw CompanionError.malformed("duplicate pairing") }
+            guard pairing.owner == snapshot.owner, pairings[pairing.pairingID] == nil else {
+                throw CompanionError.malformed("invalid pairing ownership")
+            }
             pairings[pairing.pairingID] = pairing
         }
+
+        var sessions: [String: ActiveSession] = [:]
         for session in snapshot.sessions {
             try session.validate()
-            guard sessions[session.owner.identityID] == nil else { throw CompanionError.malformed("duplicate session") }
+            guard session.owner == snapshot.owner, sessions[session.owner.identityID] == nil else {
+                throw CompanionError.malformed("invalid session ownership")
+            }
             sessions[session.owner.identityID] = session
         }
+
+        var requests: [String: TrustedRequest] = [:]
         for request in snapshot.requests {
             try request.validatePersisted()
-            guard requests[request.requestID] == nil else { throw CompanionError.malformed("duplicate request") }
+            guard request.owner == snapshot.owner,
+                  let session = sessions[snapshot.owner.identityID],
+                  session.sessionID == request.sessionID, session.activeSetID == request.activeSetID,
+                  requests[request.requestID] == nil else {
+                throw CompanionError.malformed("invalid request graph")
+            }
+            guard request.targetBindings.allSatisfy({ binding in
+                guard let pairing = pairings[binding.pairingID] else { return false }
+                return pairing.owner == snapshot.owner && pairing.approver.identityID == binding.approverIdentityID && pairing.epoch == binding.pairEpoch
+            }) else { throw CompanionError.malformed("request pairing mismatch") }
             requests[request.requestID] = request
         }
+
+        var approvals: [String: Approval] = [:]
+        var approvalTargets: [String: Set<String>] = [:]
         for approval in snapshot.approvals {
             try approval.validateSignature()
-            guard approvals[approval.approvalID] == nil else { throw CompanionError.malformed("duplicate approval") }
+            let targetWasUnique = approvalTargets[approval.requestID, default: []].insert(approval.approver.identityID).inserted
+            guard approvals[approval.approvalID] == nil,
+                  let request = requests[approval.requestID], request.owner == snapshot.owner,
+                  request.sessionID == approval.sessionID, request.activeSetID == approval.activeSetID,
+                  request.binding(for: approval.approver.identityID)?.pairingID == approval.pairingID,
+                  request.binding(for: approval.approver.identityID)?.pairEpoch == approval.pairEpoch,
+                  let pairing = pairings[approval.pairingID], pairing.owner == snapshot.owner,
+                  pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
+                  targetWasUnique,
+                  request.decisions[approval.approver.identityID] == approval.decision else {
+                throw CompanionError.malformed("invalid approval graph")
+            }
             approvals[approval.approvalID] = approval
         }
-        self.usedApprovalIDs = snapshot.usedApprovalIDs
+        for approvalID in snapshot.usedApprovalIDs { try requireIdentifier(approvalID, name: "used approval ID") }
+
+        // Decisions are durable relay outcomes. Do not restore an approved or
+        // declined decision without the corresponding accepted signed record.
+        for request in requests.values {
+            for target in request.targetedApproverIDs {
+                let records = approvals.values.filter { $0.requestID == request.requestID && $0.approver.identityID == target }
+                switch request.decisions[target] {
+                case .pending: guard records.isEmpty else { throw CompanionError.malformed("pending decision has approval") }
+                case .approved: guard records.count == 1, records[0].decision == .approved else { throw CompanionError.malformed("missing approval record") }
+                case .declined: guard records.count == 1, records[0].decision == .declined else { throw CompanionError.malformed("missing decline record") }
+                case nil: throw CompanionError.malformed("missing request decision")
+                }
+            }
+        }
     }
 
     public func advance(to time: Date) throws {
@@ -157,6 +234,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             let signed = try decode(SignedConfirmation.self, operation.body)
             guard operation.signer == owner, signed.confirmation.owner == owner else { throw CompanionError.unauthorized }
             try requireTimestamp(signed.confirmation.issuedAt, name: "confirmation time")
+            // The invite is a one-use capability at confirmation time, not at
+            // acceptance time. Check and consume it while holding the relay
+            // lock, and invalidate every competing pending acceptance below.
+            guard !usedInviteIDs.contains(signed.confirmation.inviteID) else { throw CompanionError.replay }
             guard let acceptance = pendingAcceptances[signed.confirmation.acceptanceID],
                   acceptance.inviteID == signed.confirmation.inviteID,
                   acceptance.approver.identityID == signed.confirmation.approverIdentityID,
@@ -166,7 +247,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard acceptance.verificationCode == signed.confirmation.verificationCode,
                   PairingAcceptance.code(invite: invitation.payload, approver: acceptance.approver) == signed.confirmation.verificationCode else { throw CompanionError.wrongVerificationCode }
             usedInviteIDs.insert(acceptance.inviteID)
-            pendingAcceptances.removeValue(forKey: acceptance.acceptanceID)
+            // Other receivers may have accepted the same link before the
+            // owner confirmation arrived. None may be confirmed later.
+            pendingAcceptances = pendingAcceptances.filter { $0.value.inviteID != acceptance.inviteID }
             let pairingID = base64URL(Data(SHA256.hash(data: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).pairing", fields: [acceptance.inviteID, acceptance.approver.identityID])))).prefix(32).description
             let pairing = Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver, epoch: 1, createdAt: currentTime, state: .active)
             pairings[pairingID] = pairing
@@ -205,7 +288,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             var currentRequest = request; updateExpiry(&currentRequest); requests[request.requestID] = currentRequest
             guard currentRequest.effectiveStatus(at: currentTime) == .pending,
                   currentRequest.sessionID == approval.sessionID, currentRequest.activeSetID == approval.activeSetID,
-                  currentRequest.targetedApproverIDs.contains(approval.approver.identityID),
+                  let target = currentRequest.binding(for: approval.approver.identityID),
+                  target.pairingID == approval.pairingID, target.pairEpoch == approval.pairEpoch,
                   let pairing = pairings[approval.pairingID], pairing.owner == owner,
                   pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
                   pairing.state == .active else { throw CompanionError.wrongTarget }
@@ -236,7 +320,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   acceptedApproval.requestID == currentRequest.requestID,
                   acceptedApproval.sessionID == currentRequest.sessionID,
                   acceptedApproval.activeSetID == currentRequest.activeSetID,
-                  currentRequest.targetedApproverIDs.contains(acceptedApproval.approver.identityID),
+                  currentRequest.binding(for: acceptedApproval.approver.identityID)?.pairingID == acceptedApproval.pairingID,
+                  currentRequest.binding(for: acceptedApproval.approver.identityID)?.pairEpoch == acceptedApproval.pairEpoch,
                   currentRequest.decisions[acceptedApproval.approver.identityID] == .approved,
                   !usedApprovalIDs.contains(acceptedApproval.approvalID),
                   !usedApprovalIDs.contains(use.useID),
@@ -282,11 +367,14 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     }
 
     private func validateRequestPairing(_ request: TrustedRequest, session: ActiveSession) throws {
-        guard let primary = pairings[request.pairingID], primary.owner == owner,
+        guard request.targetBindings.count == request.targetedApproverIDs.count,
+              let primary = pairings[request.pairingID], primary.owner == owner,
               primary.approver.identityID == request.targetedApproverIDs.first,
               primary.state == .active, primary.epoch == request.pairEpoch else { throw CompanionError.revokedPairing }
-        for target in request.targetedApproverIDs {
-            guard pairings.values.contains(where: { $0.owner == owner && $0.approver.identityID == target && $0.state == .active }) else {
+        for binding in request.targetBindings {
+            guard let pairing = pairings[binding.pairingID], pairing.owner == owner,
+                  pairing.approver.identityID == binding.approverIdentityID,
+                  pairing.epoch == binding.pairEpoch, pairing.state == .active else {
                 throw CompanionError.wrongTarget
             }
         }

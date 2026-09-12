@@ -49,12 +49,18 @@ public struct Invitation: Codable, Hashable, Sendable {
         self.payload = payload; self.signature = signature
     }
 
-    public func validate(at now: Date) throws {
-        try payload.validate(at: now)
-        guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: payload.owner.publicKey),
+    public func validateSignature() throws {
+        try payload.validate(at: payload.issuedAt)
+        guard signature.count == 64,
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: payload.owner.publicKey),
               key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())) else {
             throw CompanionError.invalidSignature
         }
+    }
+
+    public func validate(at now: Date) throws {
+        try payload.validate(at: now)
+        try validateSignature()
     }
 
     public var shareLink: String {
@@ -194,66 +200,119 @@ public enum TrustedRequestStatus: String, Codable, Sendable {
 
 public enum ApproverDecision: String, Codable, Sendable { case pending, approved, declined }
 
+/// The pairing selected for one target is part of the request, not inferred
+/// from the target's identity. This matters when one identity has multiple
+/// active pairings (for example, after a re-pair on another device).
+public struct RequestTargetBinding: Codable, Hashable, Sendable {
+    public let approverIdentityID: String
+    public let pairingID: String
+    public let pairEpoch: UInt64
+
+    public init(pairing: Pairing) throws {
+        try pairing.validate()
+        guard pairing.state == .active else { throw CompanionError.revokedPairing }
+        self.approverIdentityID = pairing.approver.identityID
+        self.pairingID = pairing.pairingID
+        self.pairEpoch = pairing.epoch
+    }
+
+    public init(approverIdentityID: String, pairingID: String, pairEpoch: UInt64) throws {
+        try requireIdentifier(approverIdentityID, name: "approver ID")
+        try requireIdentifier(pairingID, name: "pairing ID")
+        guard pairEpoch > 0 else { throw CompanionError.malformed("invalid pairing epoch") }
+        self.approverIdentityID = approverIdentityID; self.pairingID = pairingID; self.pairEpoch = pairEpoch
+    }
+
+    public func validateShape() throws {
+        try requireIdentifier(approverIdentityID, name: "approver ID")
+        try requireIdentifier(pairingID, name: "pairing ID")
+        guard pairEpoch > 0 else { throw CompanionError.malformed("invalid pairing epoch") }
+    }
+}
+
 public struct TrustedRequest: Codable, Hashable, Sendable {
     public let requestID: String
     public let owner: DeviceIdentity
+    /// Compatibility fields for the request's first target. All targets must
+    /// also be checked through `targetBindings`.
     public let pairingID: String
     public let pairEpoch: UInt64
     public let sessionID: String
     public let activeSetID: String
     public let targetedApproverIDs: [String]
+    public let targetBindings: [RequestTargetBinding]
     public let message: String?
     public let createdAt: Date
     public let expiresAt: Date
     public var status: TrustedRequestStatus
     public var decisions: [String: ApproverDecision]
 
+    /// Kept for source compatibility with the original one-target API. A
+    /// multi-target request must use the binding-aware initializer below.
     public init(requestID: String, owner: DeviceIdentity, pairing: Pairing, session: ActiveSession,
                 targets: [String], message: String?, createdAt: Date, expiresAt: Date) throws {
+        guard targets.count == 1, targets.first == pairing.approver.identityID else {
+            throw CompanionError.malformed("exact target pairing bindings required")
+        }
+        try self.init(requestID: requestID, owner: owner,
+                      targetBindings: [RequestTargetBinding(pairing: pairing)], session: session,
+                      message: message, createdAt: createdAt, expiresAt: expiresAt)
+    }
+
+    public init(requestID: String, owner: DeviceIdentity, targetBindings: [RequestTargetBinding],
+                session: ActiveSession, message: String?, createdAt: Date, expiresAt: Date) throws {
         try requireIdentifier(requestID, name: "request ID")
-        guard owner == pairing.owner, pairing.state == .active, session.owner == owner,
-              !targets.isEmpty, targets.count <= CompanionLimits.maxTargets,
-              Set(targets).count == targets.count,
-              targets.contains(pairing.approver.identityID),
-              targets.allSatisfy({ (try? requireIdentifier($0, name: "approver ID")) != nil }),
-              expiresAt > createdAt, expiresAt <= session.endsAt,
+        guard !targetBindings.isEmpty, targetBindings.count <= CompanionLimits.maxTargets,
+              Set(targetBindings.map(\.approverIdentityID)).count == targetBindings.count,
+              session.owner == owner, expiresAt > createdAt, expiresAt <= session.endsAt,
               expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime else {
             throw CompanionError.malformed("invalid trusted request")
         }
+        for binding in targetBindings { try binding.validateShape() }
         if let message { guard !message.isEmpty, message.utf8.count <= CompanionLimits.maxMessageBytes else { throw CompanionError.malformed("message too long") } }
-        try owner.validate()
-        self.requestID = requestID; self.owner = owner; self.pairingID = pairing.pairingID; self.pairEpoch = pairing.epoch
-        self.sessionID = session.sessionID; self.activeSetID = session.activeSetID; self.targetedApproverIDs = targets
+        try owner.validate(); try session.validate()
+        let targets = targetBindings.map(\.approverIdentityID)
+        self.requestID = requestID; self.owner = owner
+        self.pairingID = targetBindings[0].pairingID; self.pairEpoch = targetBindings[0].pairEpoch
+        self.sessionID = session.sessionID; self.activeSetID = session.activeSetID
+        self.targetedApproverIDs = targets; self.targetBindings = targetBindings
         self.message = message; self.createdAt = createdAt; self.expiresAt = expiresAt; self.status = .pending
         self.decisions = Dictionary(uniqueKeysWithValues: targets.map { ($0, .pending) })
     }
 
+    public func binding(for approverIdentityID: String) -> RequestTargetBinding? {
+        targetBindings.first { $0.approverIdentityID == approverIdentityID }
+    }
+
     public func validateShape() throws {
-        try requireIdentifier(requestID, name: "request ID"); try owner.validate()
-        try requireIdentifier(pairingID, name: "pairing ID"); try requireIdentifier(sessionID, name: "session ID")
-        try requireIdentifier(activeSetID, name: "active set ID")
-        guard pairEpoch > 0, !targetedApproverIDs.isEmpty, targetedApproverIDs.count <= CompanionLimits.maxTargets,
-              Set(targetedApproverIDs).count == targetedApproverIDs.count,
-              expiresAt > createdAt, expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime,
-              status == .pending, Set(decisions.keys) == Set(targetedApproverIDs),
-              decisions.values.allSatisfy({ $0 == .pending }) else { throw CompanionError.malformed("invalid trusted request") }
-        for target in targetedApproverIDs { try requireIdentifier(target, name: "approver ID") }
-        if let message { guard !message.isEmpty, message.utf8.count <= CompanionLimits.maxMessageBytes else { throw CompanionError.malformed("message too long") } }
-        try requireTimestamp(createdAt, name: "request time"); try requireTimestamp(expiresAt, name: "request expiry")
+        try validateCommon()
+        guard status == .pending, decisions.values.allSatisfy({ $0 == .pending }) else {
+            throw CompanionError.malformed("invalid trusted request")
+        }
     }
 
     func validatePersisted() throws {
+        try validateCommon()
+        guard decisions.values.allSatisfy({ $0 == .pending || $0 == .approved || $0 == .declined }) else {
+            throw CompanionError.malformed("invalid stored decision")
+        }
+    }
+
+    private func validateCommon() throws {
         try requireIdentifier(requestID, name: "request ID"); try owner.validate()
         try requireIdentifier(pairingID, name: "pairing ID"); try requireIdentifier(sessionID, name: "session ID")
         try requireIdentifier(activeSetID, name: "active set ID")
         guard pairEpoch > 0, !targetedApproverIDs.isEmpty, targetedApproverIDs.count <= CompanionLimits.maxTargets,
               Set(targetedApproverIDs).count == targetedApproverIDs.count,
-              expiresAt > createdAt, expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime,
-              Set(decisions.keys) == Set(targetedApproverIDs) else { throw CompanionError.malformed("invalid stored request") }
-        for target in targetedApproverIDs { try requireIdentifier(target, name: "approver ID") }
-        guard decisions.values.allSatisfy({ $0 == .pending || $0 == .approved || $0 == .declined }) else {
-            throw CompanionError.malformed("invalid stored decision")
+              targetBindings.count == targetedApproverIDs.count,
+              targetBindings.map(\.approverIdentityID) == targetedApproverIDs,
+              targetBindings.first?.pairingID == pairingID, targetBindings.first?.pairEpoch == pairEpoch,
+              Set(decisions.keys) == Set(targetedApproverIDs), expiresAt > createdAt,
+              expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime else {
+            throw CompanionError.malformed("invalid stored request")
         }
+        for target in targetedApproverIDs { try requireIdentifier(target, name: "approver ID") }
+        for binding in targetBindings { try binding.validateShape() }
         if let message { guard !message.isEmpty, message.utf8.count <= CompanionLimits.maxMessageBytes else { throw CompanionError.malformed("message too long") } }
         try requireTimestamp(createdAt, name: "request time"); try requireTimestamp(expiresAt, name: "request expiry")
     }
@@ -432,17 +491,20 @@ public struct CompanionClient: Sendable {
                           message: message, validFor: validFor)
     }
 
-    /// Targets are explicit identities, each backed by one active pairing. The
-    /// first pairing is the request's primary epoch binding; approvals carry
-    /// and independently validate their own pairing epoch.
+    /// Targets are explicit identities, each paired to the exact pairing ID
+    /// and epoch selected by the owner. A target identity is not sufficient
+    /// authorization when that identity has multiple active pairings.
     public func requestUnlock(requestID: String, pairings: [Pairing], session: ActiveSession,
                               targets: [String], message: String?, validFor: TimeInterval) throws -> TrustedRequest {
-        guard let primary = pairings.first, signer.identity == primary.owner,
+        guard !pairings.isEmpty, signer.identity == pairings[0].owner,
               pairings.count == targets.count,
-              zip(pairings, targets).allSatisfy({ $0.0.approver.identityID == $0.1 }) else { throw CompanionError.wrongTarget }
+              Set(targets).count == targets.count,
+              zip(pairings, targets).allSatisfy({ $0.0.owner == signer.identity && $0.0.approver.identityID == $0.1 }) else { throw CompanionError.wrongTarget }
+        let bindings = try pairings.map { try RequestTargetBinding(pairing: $0) }
         let createdAt = now()
-        let request = try TrustedRequest(requestID: requestID, owner: signer.identity, pairing: primary, session: session,
-                                         targets: targets, message: message, createdAt: createdAt, expiresAt: createdAt.addingTimeInterval(validFor))
+        let request = try TrustedRequest(requestID: requestID, owner: signer.identity,
+                                         targetBindings: bindings, session: session,
+                                         message: message, createdAt: createdAt, expiresAt: createdAt.addingTimeInterval(validFor))
         guard case let .request(value) = try submit("request", request) else { throw CompanionError.malformed("relay response") }
         return value
     }
