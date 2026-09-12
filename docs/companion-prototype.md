@@ -8,7 +8,7 @@ This is a standalone Swift 6 package in [`../CompanionKit`](../CompanionKit) and
 - Invitation links are accountless, signed, bounded, one-use owner invitations. A link can be copied or forwarded, but possession only creates a pending acceptance. The approver signs acceptance, then the owner must explicitly confirm the exact approver and displayed six-digit verification code.
 - Every relay mutation is a signed operation. Signatures use a domain-separated, framed canonical field encoding; operation bodies use sorted-key JSON only as a transport representation and are signed by digest. The relay checks the signer/key identity, role, ownership, pairing state, pairing epoch, request target, exact session ID and active-set ID, timestamps, expiry, and replay markers.
 - Requests have bounded optional messages and `pending`, `approved`, `declined`, `cancelled`, and `expired` states. Targets are explicit. Multiple active pairings can be targeted; any targeted approver may approve. A decline only updates that approver's decision. An approver cannot publish a session, extend it, or issue an untargeted/global approval.
-- Approval verification is single-use. The owner consumes the signed approval against the exact request and current session; both approval ID and use ID are replay protected. This returns a cryptographically bound verification record, not a Managed Settings action.
+- Approval verification is single-use. The relay stores the accepted approval immutably and the owner can consume only that exact record, with its approved decision, targeted identity, pairing epoch, request/session/active-set bindings, and current active session all matching. Both approval ID and use ID are replay protected. The owner may cancel an approved but not-yet-consumed request; cancellation is persisted under the relay lock and rejects later use. This returns a cryptographically bound verification record, not a Managed Settings action.
 - `InMemoryCompanionRelay` is a deterministic, lock-protected relay-shaped test backend with signed-operation authentication, ownership authorization, revocation, rate limits, inbox fetch, and JSON snapshot/restart support. It is not HTTP, a server, a listener, APNs, or a production persistence service.
 - `LocalRecoveryRequest` is an independent fixed 900-second local fallback. Natural session end supersedes confirmation; the caller cannot supply a shorter delay.
 - `QuietHoursPolicy` suppresses only private local approver-notification presentation. Inbox state, expiry, approvals, and history are not changed. There are no scores or usage-sharing fields.
@@ -30,7 +30,18 @@ From the repository root:
 swift test --package-path CompanionKit
 ```
 
-The package tests cover forged and swapped identities, forwarded-link non-authority, replay and one-time approval use, revocation, exact session/active-set changes, expiry and cancellation, multiple-target decline/approval, rate limiting, quiet hours, restart snapshots, missing keys, delayed recovery, and the non-forcing pact model. They run with in-memory keys and a deterministic relay clock; they do not prove network delivery, Keychain behavior on a physical device, APNs behavior, or remote unlock.
+The package tests cover forged and swapped identities, forwarded-link non-authority, replay and one-time approval use, cancellation after approval (including restart), exact accepted-approval/request/session/active-set bindings, declined-target rejection, cross-request approval-ID collisions, revocation, expiry and cancellation, multiple-target decline/approval, rate limiting, quiet hours, malformed pairing metadata, bounded replay-marker snapshots, missing keys, delayed recovery, and the non-forcing pact model. They run with in-memory keys and a deterministic relay clock; they do not prove network delivery, Keychain behavior on a physical device, APNs behavior, or remote unlock.
+
+## Review disposition (Terra P1/P2 findings)
+
+All four verified findings are fixed in the owned protocol/relay lane:
+
+- **P1 approved-request cancellation:** owner cancellation now accepts pending or approved requests only while an approval is unconsumed, persists `.cancelled` before acknowledgement, and rejects use before and after snapshot restart.
+- **P1 unaccepted or mismatched approval use:** `use` requires the relay's stored approval for the supplied ID to be value-identical, approved in the request's persisted decision map, explicitly targeted, and bound to the current request/session/active set and active pairing epoch. Directly signed, stale, wrong-set, and declined approvals are regression-tested.
+- **P2 decoded pairing/snapshot validation:** pairing IDs and creation timestamps are validated; snapshot record counts and every replay-marker ID are bounded and validated before restore.
+- **P2 approval-ID collision:** duplicate approval IDs are rejected before request state mutation, preventing cross-request audit overwrite.
+
+These are protocol/backend prototype guarantees only. The relay remains in-memory with test snapshot persistence and is not a deployed service.
 
 ## Security boundaries and follow-up
 
