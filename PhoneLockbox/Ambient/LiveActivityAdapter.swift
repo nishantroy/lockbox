@@ -21,6 +21,9 @@ public final class LockboxLiveActivityAdapter {
         now: Date = .now
     ) async -> AmbientLiveActivityOutcome {
         guard fixedEnd > now else { return .unavailable(.fixedEndPast) }
+        if let rejection = AmbientLiveActivityPolicy.startRejection(status: status) {
+            return .unavailable(rejection)
+        }
         guard isAvailable() else { return .unavailable(.userDisabled) }
 
         let attributes = AmbientLiveActivityAttributes(sessionID: sessionID, fixedEnd: fixedEnd)
@@ -46,9 +49,19 @@ public final class LockboxLiveActivityAdapter {
         guard let activity = matchingActivity(sessionID: sessionID) else {
             return .unavailable(.noMatchingActivity)
         }
-        let requested = AmbientActivityContentState(fixedEnd: fixedEnd, status: status)
+        if let rejection = AmbientLiveActivityPolicy.updateRejection(
+            attributes: activity.attributes,
+            requestedFixedEnd: fixedEnd,
+            status: status
+        ) {
+            return .unavailable(rejection)
+        }
+        let requested = AmbientActivityContentState(
+            fixedEnd: activity.attributes.fixedEnd,
+            status: status
+        )
         let state = requested.staleIfNeeded(at: now)
-        await activity.update(.init(state: state, staleDate: fixedEnd))
+        await activity.update(.init(state: state, staleDate: activity.attributes.fixedEnd))
         return .updated
     }
 
@@ -66,12 +79,12 @@ public final class LockboxLiveActivityAdapter {
     /// This API is intentionally named for the only condition that permits
     /// release copy. The caller must supply an observed session update.
     public func endAfterObservedRelease(
-        sessionID: String,
-        fixedEnd: Date
+        sessionID: String
     ) async -> AmbientLiveActivityOutcome {
         guard let activity = matchingActivity(sessionID: sessionID) else {
             return .unavailable(.noMatchingActivity)
         }
+        let fixedEnd = activity.attributes.fixedEnd
         let state = AmbientActivityContentState(fixedEnd: fixedEnd, status: .releaseObserved)
         await activity.end(.init(state: state, staleDate: fixedEnd), dismissalPolicy: .immediate)
         return .ended

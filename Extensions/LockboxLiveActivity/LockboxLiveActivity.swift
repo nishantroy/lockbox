@@ -7,20 +7,24 @@ import AmbientKit
 struct LockboxLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AmbientLiveActivityAttributes.self) { context in
+            let display = AmbientLiveActivityPresentation(
+                status: context.state.status,
+                isStale: context.isStale
+            )
             VStack(alignment: .leading, spacing: 6) {
                 Text("Phone Lockbox")
                     .font(.headline)
-                Text(statusTitle(context.state.status))
+                Text(display.title)
                     .font(.subheadline)
                 Text("Fixed end: \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
                     .font(.caption)
-                Text(context.state.status.accessibilityLabel)
+                Text(display.accessibilityLabel)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             .padding()
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Phone Lockbox. \(context.state.status.accessibilityLabel). Fixed end \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
+            .accessibilityLabel("Phone Lockbox. \(display.accessibilityLabel). Fixed end \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -28,35 +32,43 @@ struct LockboxLiveActivity: Widget {
                         .font(.caption)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    Text(statusTitle(context.state.status))
+                    Text(AmbientLiveActivityPresentation(
+                        status: context.state.status,
+                        isStale: context.isStale
+                    ).title)
                         .font(.caption)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text("Fixed end: \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
+                    Text(AmbientLiveActivityPresentation(
+                        status: context.state.status,
+                        isStale: context.isStale
+                    ).accessibilityLabel)
                         .font(.caption2)
                 }
             } compactLeading: {
                 Text("LB")
                     .accessibilityLabel("Phone Lockbox")
             } compactTrailing: {
-                Text(context.state.status == .recoveryPending ? "REC" : "PLAN")
+                Text(AmbientLiveActivityPresentation(
+                    status: context.state.status,
+                    isStale: context.isStale
+                ).compactLabel)
                     .font(.caption2)
-                    .accessibilityLabel(context.state.status.accessibilityLabel)
+                    .accessibilityLabel(AmbientLiveActivityPresentation(
+                        status: context.state.status,
+                        isStale: context.isStale
+                    ).accessibilityLabel)
             } minimal: {
-                Text("LB")
-                    .accessibilityLabel("Phone Lockbox planned session")
+                Text(AmbientLiveActivityPresentation(
+                    status: context.state.status,
+                    isStale: context.isStale
+                ).compactLabel)
+                    .accessibilityLabel(AmbientLiveActivityPresentation(
+                        status: context.state.status,
+                        isStale: context.isStale
+                    ).accessibilityLabel)
             }
         }
-    }
-}
-
-private func statusTitle(_ status: AmbientLiveActivityStatus) -> String {
-    switch status {
-    case .plannedSession: return "Planned session"
-    case .recoveryPending: return "Recovery requested"
-    case .releaseObserved: return "Release observed"
-    case .expired: return "Session end reached"
-    case .stale: return "Status stale"
     }
 }
 

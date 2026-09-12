@@ -68,6 +68,8 @@ public enum AmbientLiveActivityUnavailableReason: String, Codable, Hashable, Sen
     case platformUnavailable
     case noMatchingActivity
     case fixedEndPast
+    case fixedEndMismatch
+    case releaseObservationRequired
 }
 
 public enum AmbientLiveActivityLifetime: String, Codable, Hashable, Sendable {
@@ -92,5 +94,62 @@ public enum AmbientLiveActivityPolicy {
         fixedEnd.timeIntervalSince(now) <= maximumActiveSeconds
             ? .withinPlatformWindow
             : .mayBecomeStaleAfterEightHours
+    }
+
+    /// Release-observed copy is reserved for the dedicated observed-release
+    /// hook. A caller cannot smuggle it through start or an ordinary update.
+    public static func startRejection(
+        status: AmbientLiveActivityStatus
+    ) -> AmbientLiveActivityUnavailableReason? {
+        status == .releaseObserved ? .releaseObservationRequired : nil
+    }
+
+    public static func updateRejection(
+        attributes: AmbientLiveActivityAttributes,
+        requestedFixedEnd: Date,
+        status: AmbientLiveActivityStatus
+    ) -> AmbientLiveActivityUnavailableReason? {
+        guard requestedFixedEnd == attributes.fixedEnd else { return .fixedEndMismatch }
+        return startRejection(status: status)
+    }
+}
+
+/// The widget uses this value-only mapping for every presentation region. In
+/// particular, WidgetKit's `context.isStale` wins over the state status so a
+/// stale activity cannot continue to present a planned or recovery status.
+public struct AmbientLiveActivityPresentation: Equatable, Sendable {
+    public let title: String
+    public let accessibilityLabel: String
+    public let compactLabel: String
+
+    public init(status: AmbientLiveActivityStatus, isStale: Bool) {
+        if isStale {
+            title = "Status stale"
+            accessibilityLabel = "Status stale; open Phone Lockbox to reconcile"
+            compactLabel = "STALE"
+        } else {
+            switch status {
+            case .plannedSession:
+                title = "Planned session"
+                accessibilityLabel = status.accessibilityLabel
+                compactLabel = "PLAN"
+            case .recoveryPending:
+                title = "Recovery requested"
+                accessibilityLabel = status.accessibilityLabel
+                compactLabel = "REC"
+            case .releaseObserved:
+                title = "Release observed"
+                accessibilityLabel = status.accessibilityLabel
+                compactLabel = "DONE"
+            case .expired:
+                title = "Session end reached"
+                accessibilityLabel = status.accessibilityLabel
+                compactLabel = "END"
+            case .stale:
+                title = "Status stale"
+                accessibilityLabel = status.accessibilityLabel
+                compactLabel = "STALE"
+            }
+        }
     }
 }

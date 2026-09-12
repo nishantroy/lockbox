@@ -19,6 +19,8 @@ The planner treats bedtime as a civil local time. Foundation resolves skipped/re
 - requests authorization only when its `requestAuthorization()` method is called (the developer view exposes this behind an explicit button);
 - reports not-determined, denied, authorized, provisional, and ephemeral states rather than treating a request as permission;
 - replaces and cancels only its own identifier namespace;
+- checks the whole app notification queue (64-request system limit) before removing old requests, while retaining our seven-request cap;
+- on an add failure, removes partial new requests and attempts to restore the old owned requests, returning an explicit restored/partial outcome for truthful UI;
 - rejects duplicates and more than seven requests;
 - schedules one-shot calendar triggers with the occurrence's time zone;
 - does not silently retry, fall back, or claim that a notification was delivered.
@@ -35,7 +37,8 @@ The host should plan and call `replace` on explicit enable/configuration save, a
 - it uses `pushType: nil`, so v1 has no APNs dependency;
 - `start`, `update`, and `end` are explicit calls and are never policy or timer dependencies;
 - at/after a fixed end, a planned or recovery state becomes `stale` rather than implying verified release;
-- only the specifically named `endAfterObservedRelease` API can use release-observed copy;
+- fixed end is immutable after start: ordinary updates must match the activity attributes and cannot use `releaseObserved`;
+- only the specifically named `endAfterObservedRelease(sessionID:)` API can use release-observed copy, and it takes the fixed end from the activity rather than from the caller;
 - it reports unavailable, stale/lifetime, and request errors to the host.
 
 Apple's Live Activity active lifetime is approximately eight hours, with a potentially shorter Lock Screen presentation after that. The adapter returns a lifetime classification so a host can present the degraded expectation. The system cannot be assumed to start an activity from a Device Activity extension or update it after force-quit. The parent app therefore needs a foreground/manual update hook for truthful state reconciliation.
@@ -60,8 +63,14 @@ The demo uses a fake `ambient-demo` session and visibly says it is not a real Ph
 4. Parent-owned project configuration should decide target membership, signing, App Group choices, and any extension capability. This prototype intentionally does not edit those files.
 5. Connect real lifecycle/session updates only after the parent runtime supplies a finite committed end and an observed release signal. Do not use notification delivery or Live Activity freshness as enforcement evidence.
 
+## Terra review disposition
+
+- **P1 notification queue/replacement:** fixed in `WindDownNotificationReplacementEngine`. It checks retained non-owned requests against the 64-request system queue before removal, and reports rollback success versus partial replacement after an add failure. The developer view now distinguishes a restored schedule from a partial result.
+- **P1 stale Live Activity copy:** fixed by `AmbientLiveActivityPresentation`; the WidgetKit Lock Screen, Dynamic Island and minimal regions derive title/accessibility/compact text from `context.isStale`, so stale context cannot continue to say planned or recovery requested.
+- **P2 mutable fixed end/release status:** fixed by validating ordinary updates against `activity.attributes.fixedEnd`, sourcing observed-release end state from those immutable attributes, and rejecting `releaseObserved` through start/update. Pure tests cover both rejected calls.
+
 ## Validation performed in this isolated change
 
 - `swift test --package-path AmbientKit` is the focused package test command.
-- Tests cover disabled planning, upcoming-only behavior, deterministic IDs, cross-midnight active-session suppression, invalid lead offsets, UTC/DST concrete components, own-namespace replacement/no duplicates, fixed-end stale state, and the eight-hour lifetime classification.
+- Tests cover disabled planning, upcoming-only behavior, deterministic IDs, cross-midnight active-session suppression, invalid lead offsets, UTC/DST concrete components, own-namespace replacement/no duplicates, full-queue replacement refusal, nth-add rollback with a fake center, fixed-end stale state, stale widget display mapping, immutable-end/release-status validation, and the eight-hour lifetime classification.
 - Native adapters and the WidgetKit extension require the parent iOS target/Xcode SDK; they were intentionally not wired into the existing project in this branch.
