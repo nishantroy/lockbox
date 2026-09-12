@@ -1003,6 +1003,17 @@ final class ScreenTimeCoordinator: ObservableObject {
         if let schedule, let configuration = document.configuration {
             scheduleIsRegistered = hasOSRegistration && RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: schedule.intervalStart, end: schedule.intervalEnd, repeats: schedule.repeats)
         } else { scheduleIsRegistered = false }
+
+        // A crash after the durable disable/clear commit can leave the old OS
+        // route registered. Reconcile it on relaunch/foreground, but retain a
+        // current scheduled end route when recurrence was disabled mid-window.
+        if hasOSRegistration,
+           !document.legacyRegistrationNeedsReview,
+           !RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: Date()) {
+            activityCenter.stopMonitoring([Self.activityName])
+            hasOSRegistration = false
+            scheduleIsRegistered = false
+        }
     }
 
     private func refreshDocument() {

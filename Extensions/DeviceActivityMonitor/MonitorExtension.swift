@@ -25,6 +25,7 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func handleScheduledStart() {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
+        var shouldStopStaleRegistration = false
         do {
             try store.withTransaction { context in
                 guard let configuration = context.document.configuration,
@@ -33,6 +34,12 @@ final class MonitorExtension: DeviceActivityMonitor {
                       activityCenter.activities.contains(activityName),
                       RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats),
                       let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: now).first(where: { now >= $0.start && now < $0.end }) else {
+                    // If recurrence was durably disabled, a callback from the
+                    // old route is the recovery opportunity after a crash
+                    // between the state commit and stopMonitoring. Preserve a
+                    // current scheduled end route, but remove an otherwise
+                    // stale daily registration.
+                    shouldStopStaleRegistration = !RuntimeLifecycle.scheduledRegistrationShouldRemain(context.document, at: now)
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: registration, intent, or current occurrence did not match."), succeeded: false)
                     try replayCurrentPolicy(in: context, at: now, detail: "Rejected scheduled start callback replayed current aggregate.")
                     return
@@ -85,6 +92,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                 context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidStart; stable occurrence committed."), succeeded: true)
                 try replayCurrentPolicy(in: context, at: now, detail: "Frozen scheduled policy reconciled.")
             }
+            if shouldStopStaleRegistration { activityCenter.stopMonitoring([activityName]) }
         } catch { try? record(store: store, operation: .policyApplyFailed, detail: error.localizedDescription, succeeded: false) }
     }
 
