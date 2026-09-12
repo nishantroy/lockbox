@@ -445,6 +445,26 @@ public enum RuntimeScheduleDecision {
             && end.hour == configuration.end.hour && end.minute == configuration.end.minute
     }
 
+    /// A manual route is safe only when DeviceActivity owns a finite,
+    /// non-repeating end matching the frozen session. The shared adapter rule
+    /// prevents either process from treating a stale or mismatched route as
+    /// permission to shield a manual session.
+    public static func manualRegistrationMatches(
+        end: Date,
+        intervalEnd: DateComponents,
+        repeats: Bool,
+        calendar: Calendar = .current
+    ) -> Bool {
+        guard !repeats else { return false }
+        let expected = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: end)
+        guard intervalEnd.hour == expected.hour,
+              intervalEnd.minute == expected.minute else { return false }
+        if let year = intervalEnd.year, year != expected.year { return false }
+        if let month = intervalEnd.month, month != expected.month { return false }
+        if let day = intervalEnd.day, day != expected.day { return false }
+        return true
+    }
+
     public static func accepts(_ kind: RuntimeCallbackKind, configuration: RuntimeConfiguration, at date: Date, calendar: Calendar = .current) -> Bool {
         guard date.timeIntervalSinceReferenceDate.isFinite else { return false }
         let occurrences = RuntimeOccurrenceResolver.candidates(
@@ -549,8 +569,10 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
     /// open must skip that first occurrence; otherwise recovery could silently
     /// recreate a lock immediately.
     public var suppressedOccurrenceKeys: Set<String>
-    /// Civil-day fence used when a released occurrence is represented by a
-    /// different pending interval after recovery or an edit.
+    /// Absolute activation fence used when a released occurrence is
+    /// represented by a different pending interval after recovery or an edit.
+    /// Legacy build-3 civil-day data is retained and migrated conservatively by
+    /// RuntimeScheduledActivationFence's decoder.
     public var scheduledActivationFence: RuntimeScheduledActivationFence?
     /// Fixed-delay recovery target persisted in the same runtime transaction as
     /// session state. It is decoded by RecoveryCommitment's exact validator.

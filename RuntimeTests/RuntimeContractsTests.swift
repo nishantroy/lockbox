@@ -39,6 +39,17 @@ final class RuntimeContractsTests: XCTestCase {
         XCTAssertThrowsError(try short.validate()) { XCTAssertEqual($0 as? RuntimeValidationError, .intervalTooShort) }
     }
 
+    func testManualRegistrationRequiresMatchingFiniteEnd() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let end = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 7, minute: 30))!
+        let expected = DateComponents(year: 2026, month: 9, day: 11, hour: 7, minute: 30)
+        XCTAssertTrue(RuntimeScheduleDecision.manualRegistrationMatches(end: end, intervalEnd: expected, repeats: false, calendar: calendar))
+        XCTAssertFalse(RuntimeScheduleDecision.manualRegistrationMatches(end: end, intervalEnd: expected, repeats: true, calendar: calendar))
+        XCTAssertFalse(RuntimeScheduleDecision.manualRegistrationMatches(end: end, intervalEnd: DateComponents(year: 2026, month: 9, day: 11, hour: 7), repeats: false, calendar: calendar))
+        XCTAssertFalse(RuntimeScheduleDecision.manualRegistrationMatches(end: end, intervalEnd: DateComponents(year: 2026, month: 9, day: 12, hour: 7, minute: 30), repeats: false, calendar: calendar))
+    }
+
     func testMonitorDecisionRejectsLateStartAndEarlyOrStaleEnd() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

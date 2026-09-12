@@ -216,6 +216,60 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: manual.start.addingTimeInterval(1)))
     }
 
+    func testEnabledRecurrenceRetainsDailyRegistrationAfterNaturalExpiry() {
+        let configuration = RuntimeConfiguration(
+            revision: 1,
+            start: RuntimeTime(hour: 22, minute: 0),
+            end: RuntimeTime(hour: 7, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([1])
+        )
+        let ended = session(start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10)
+        var document = RuntimeStoreDocument()
+        document.configuration = configuration
+        document.recurringEnabledIntent = true
+        document.sessions = [ended]
+        var expired = ended
+        expired.state = .expired
+        document.sessions = [expired]
+
+        // Natural expiry must stop shielding this occurrence without
+        // unregistering the repeating route for the next one.
+        XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: ended.end))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let nextStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertTrue(RuntimeScheduleDecision.accepts(.start, configuration: configuration, at: nextStart, calendar: calendar))
+    }
+
+    func testPendingReplacementIsTheOnlyNaturalEndRouteStop() {
+        let ended = session(start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10)
+        var document = RuntimeStoreDocument()
+        document.recurringEnabledIntent = true
+        document.sessions = [ended]
+        var expired = ended
+        expired.state = .expired
+        document.sessions = [expired]
+        document.pendingConfiguration = RuntimeConfiguration(
+            revision: 2,
+            start: RuntimeTime(hour: 23, minute: 0),
+            end: RuntimeTime(hour: 6, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([2])
+        )
+
+        XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: ended.end))
+        // If another route still owns the current scheduled session, retain
+        // its end callback even while a replacement waits to activate.
+        document.sessions = [ended]
+        XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(
+            document,
+            at: ended.start.addingTimeInterval(1)
+        ))
+    }
+
     func testNaturalExpiryPreparesDurableClearBeforeTheEndRouteIsStopped() {
         let scheduled = session(start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10)
         var document = RuntimeStoreDocument()

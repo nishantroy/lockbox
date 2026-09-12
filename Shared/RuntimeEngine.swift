@@ -100,9 +100,10 @@ public enum RuntimeCallbackDecision {
     @discardableResult
     public static func preparePolicyReconciliation(
         _ document: inout RuntimeStoreDocument,
-        at date: Date
+        at date: Date,
+        calendar: Calendar = .current
     ) -> RuntimePolicyIntent {
-        _ = RuntimeLifecycle.expireNaturalSessions(&document, at: date)
+        _ = RuntimeLifecycle.expireNaturalSessions(&document, at: date, calendar: calendar)
         let intent = desiredPolicyIntent(document, at: date)
         document.policyIntent = intent
         return intent

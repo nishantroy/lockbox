@@ -2,44 +2,49 @@ import Foundation
 
 /// Small, side-effect-free state mutations shared by app and monitor adapters.
 public enum RuntimeLifecycle {
-    /// Keep the active model small without dropping a current release marker or
-    /// a target named by an outstanding recovery commitment.
-    ///
-    /// Commitment targets are protected even when naturally expired. A request
-    /// may legitimately contain one expired target and one still-pending
-    /// target, and pruning either one would make the durable request invalid.
+    /// Keep the repeating daily route for a still-enabled recurrence even
+    /// after the just-ended occurrence has become terminal. A manual-only
+    /// document has no recurring intent and therefore cannot keep that route.
+    /// A live scheduled session is retained as an end route after the user
+    /// disables recurrence; an activated pending replacement is explicitly
+    /// stopped by the adapter after this decision.
     public static func pruneTerminalSessions(
         _ document: inout RuntimeStoreDocument,
         keeping limit: Int = 32,
         at date: Date = Date()
     ) {
         let maximum = min(max(0, limit), 64)
-        let protectedIDs = Set(document.recoveryCommitment?.sessionIDs ?? [])
-        let activeCount = document.sessions.filter(\.isEffective).count
-        let terminalLimit = max(0, maximum - activeCount)
-        let terminal = document.sessions
-            .filter { $0.state == .released || $0.state == .expired }
+        var protectedIDs = Set(document.recoveryCommitment?.sessionIDs ?? [])
+        protectedIDs.formUnion(document.releasedOccurrences.compactMap { occurrence in
+            occurrence.origin == .scheduled && occurrence.end > date ? occurrence.sessionID : nil
+        })
+
+        let terminal = document.sessions.filter { $0.state == .released || $0.state == .expired }
+        let nonTerminalCount = document.sessions.count - terminal.count
+        let protectedTerminalCount = terminal.reduce(into: 0) { count, session in
+            if protectedIDs.contains(session.id) { count += 1 }
+        }
+        // `limit` is a history target, not permission to discard an active
+        // session or a durable commitment target. The target can therefore be
+        // larger than `limit`, but never larger than the storage hard limit for
+        // documents produced by normal lifecycle transitions.
+        let terminalTarget = max(0, max(maximum, nonTerminalCount + protectedTerminalCount) - nonTerminalCount)
+        let removableTerminal = terminal
+            .filter { !protectedIDs.contains($0.id) }
             .sorted { $0.end < $1.end }
-        let removableTerminal = terminal.filter { !protectedIDs.contains($0.id) }
-        let removeCount = max(0, terminal.count - terminalLimit)
+        let removeCount = max(0, terminal.count - terminalTarget)
         let removeIDs = Set(removableTerminal.prefix(removeCount).map(\.id))
         document.sessions.removeAll { removeIDs.contains($0.id) }
 
-        // Keep enough released identities for late callbacks. In particular,
-        // do not evict a current scheduled marker or a marker referenced by a
-        // still-valid recovery commitment merely because manual history is
-        // noisy. If more than 64 entries are protected, no bounded document can
-        // represent the state; normal callers cannot create that state because
-        // sessions and commitments are each capped at 64.
+        // A released session requires its marker for duplicate/late callback
+        // suppression. Remove old markers and their released session together;
+        // never leave a `.released` session without its durable marker. Markers
+        // for current scheduled windows and recovery targets are protected even
+        // when noisy manual history exceeds the normal history target.
         guard document.releasedOccurrences.count > 64 else { return }
-        let protectedReleasedIDs = protectedIDs.union(
-            document.releasedOccurrences
-                .filter { $0.origin == .scheduled && $0.end > date }
-                .map(\.sessionID)
-        )
         let excess = document.releasedOccurrences.count - 64
         let removable = document.releasedOccurrences
-            .filter { !protectedReleasedIDs.contains($0.sessionID) }
+            .filter { !protectedIDs.contains($0.sessionID) }
             .sorted { $0.releasedAt < $1.releasedAt }
         let releasedIDsToRemove = Set(removable.prefix(excess).map(\.sessionID))
         guard !releasedIDsToRemove.isEmpty else { return }
@@ -53,9 +58,14 @@ public enum RuntimeLifecycle {
         _ document: RuntimeStoreDocument,
         at date: Date
     ) -> Bool {
-        document.sessions.contains {
+        let scheduledIsLive = document.sessions.contains {
             $0.origin == .scheduled && $0.isEffective(at: date)
         }
+        // `pendingConfiguration` is an explicit replacement. The callback
+        // adapter stops the old route when it activates that replacement;
+        // otherwise an enabled recurrence retains its daily registration even
+        // after ordinary natural expiry.
+        return scheduledIsLive || (document.recurringEnabledIntent && document.pendingConfiguration == nil)
     }
 
     public static func shouldSuppressScheduledOccurrence(
@@ -217,7 +227,11 @@ public enum RuntimeLifecycle {
     }
 
     @discardableResult
-    public static func expireNaturalSessions(_ document: inout RuntimeStoreDocument, at date: Date) -> Bool {
+    public static func expireNaturalSessions(
+        _ document: inout RuntimeStoreDocument,
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> Bool {
         var changed = false
         for index in document.sessions.indices {
             guard (document.sessions[index].state == .active || document.sessions[index].state == .recoveryPending),
@@ -225,7 +239,8 @@ public enum RuntimeLifecycle {
             if document.sessions[index].origin == .scheduled {
                 document.scheduledActivationFence = updatedFence(
                     document.scheduledActivationFence,
-                    with: document.sessions[index].end
+                    with: document.sessions[index].end,
+                    preservingCalendar: calendar
                 )
             }
             document.sessions[index].state = .expired
@@ -272,7 +287,8 @@ public enum RuntimeLifecycle {
     public static func release(
         _ document: inout RuntimeStoreDocument,
         sessionIDs: Set<UUID>,
-        at date: Date
+        at date: Date,
+        calendar: Calendar = .current
     ) throws {
         guard !sessionIDs.isEmpty, date.timeIntervalSinceReferenceDate.isFinite else {
             throw RuntimeValidationError.invalidConfiguration("No current lock was selected for recovery.")
@@ -303,7 +319,7 @@ public enum RuntimeLifecycle {
                 // No replacement occurrence may begin before this frozen
                 // occurrence has naturally ended. This covers edits made just
                 // before midnight as well as after-midnight recovery.
-                document.scheduledActivationFence = updatedFence(document.scheduledActivationFence, with: session.end)
+                document.scheduledActivationFence = updatedFence(document.scheduledActivationFence, with: session.end, preservingCalendar: calendar)
             }
         }
         _ = normalizeRecoveryCommitment(&document, at: date)
