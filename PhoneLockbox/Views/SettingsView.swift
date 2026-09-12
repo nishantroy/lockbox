@@ -51,8 +51,8 @@ struct SettingsView: View {
                 LabeledContent("Notification access", value: coordinator.windDownAuthorizationStatus)
                 if coordinator.windDownEnabled {
                     Text(coordinator.pendingWindDownNotificationCount == 0
-                         ? "No upcoming reminders are scheduled."
-                         : "\(coordinator.pendingWindDownNotificationCount) reminder(s) follow the saved bedtime start.")
+                         ? "No reminder is currently scheduled."
+                         : "You’ll be reminded \(coordinator.windDownLeadMinutes) minutes before bedtime.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

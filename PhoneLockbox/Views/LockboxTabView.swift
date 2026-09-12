@@ -72,13 +72,11 @@ struct UnlockedLockboxView: View {
 
     private var windDownStatusMessage: String {
         if let error = coordinator.ambientError { return error }
-        guard coordinator.windDownEnabled else { return "Reminders are off." }
+        guard coordinator.windDownEnabled else { return "Off" }
         guard coordinator.windDownAuthorizationStatus != "Not requested" else {
-            return "Allow notifications to schedule reminders from the saved bedtime start."
+            return "Allow notifications in Settings to turn this on."
         }
-        return coordinator.pendingWindDownNotificationCount == 0
-            ? "No upcoming reminders are scheduled."
-            : "\(coordinator.pendingWindDownNotificationCount) reminder(s) follow the saved bedtime start."
+        return "You’ll be reminded \(coordinator.windDownLeadMinutes) minutes before bedtime."
     }
 
     var body: some View {
@@ -93,27 +91,24 @@ struct UnlockedLockboxView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!coordinator.isAuthorized)
                 .accessibilityHint("Choose a finite focus lock duration")
-                Text("Starts a separate, finite lock using your saved policy. The end is confirmed before anything is applied.")
+                Text("Block distractions for 30 minutes, 1 hour, or until a time you choose.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Ready when you are")
+                Text("Focus when you need it")
             }
 
             TonightCard(coordinator: coordinator)
 
-            Section("Saved rules") {
-                LabeledContent("Restriction", value: coordinator.savedModeTitle)
-                LabeledContent("Bedtime", value: SavedWindowFormatter.value(for: coordinator))
-                LabeledContent("Selection", value: "\(coordinator.savedSelectedItemCount) selected")
+            Section("Your rules") {
+                LabeledContent("Mode", value: coordinator.savedModeTitle)
+                LabeledContent("Apps & categories", value: "\(coordinator.savedSelectedItemCount) selected")
             }
 
             Section("Wind-down") {
-                Label(coordinator.windDownEnabled ? "Enabled" : "Off", systemImage: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")
-                Text(windDownStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                NavigationLink("Change wind-down settings") {
+                Label(windDownStatusMessage, systemImage: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")
+                    .foregroundStyle(coordinator.ambientError == nil ? Color.primary : Color.orange)
+                NavigationLink("Wind-down settings") {
                     SettingsView(coordinator: coordinator)
                 }
             }
@@ -129,11 +124,10 @@ private struct TonightCard: View {
     var body: some View {
         Section("Tonight") {
             if coordinator.recurringEnabledIntent, let occurrence = nextOccurrence {
-                LabeledContent("Next start", value: occurrence.start.formatted(date: .abbreviated, time: .shortened))
-                LabeledContent("Ends", value: occurrence.end.formatted(date: .abbreviated, time: .shortened))
-                Text("Your saved bedtime rules will be used for this automatic session.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Label("Bedtime lock is set", systemImage: "moon.stars")
+                    .font(.headline)
+                LabeledContent("Locks at", value: occurrence.start.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("Opens at", value: occurrence.end.formatted(date: .abbreviated, time: .shortened))
             } else {
                 Label("Automatic bedtime schedule is off", systemImage: "calendar.badge.exclamationmark")
                 Text("Save and register a schedule in Settings to turn on automatic sessions.")
@@ -162,35 +156,36 @@ struct ActiveLockView: View {
                 Label(coordinator.activeLockTitle, systemImage: "lock.fill")
                     .font(.title3.weight(.semibold))
                     .accessibilityAddTraits(.isHeader)
-                Text("This lock is committed. Routine settings do not change it.")
-                    .foregroundStyle(.secondary)
+                if let end = coordinator.activeLockEnd {
+                    Text("Your apps will open at \(end.formatted(date: .omitted, time: .shortened)).")
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            Section("Current lock") {
+            Section("This lock") {
                 if let end = coordinator.activeLockEnd {
-                    LabeledContent("Fixed end", value: end.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Opens", value: end.formatted(date: .abbreviated, time: .shortened))
                 } else {
-                    Text("The active lock has no trustworthy end time. Use Developer in Settings only if cleanup is required.")
+                    Text("The opening time isn’t available. Developer cleanup remains in Settings if needed.")
                         .foregroundStyle(.orange)
                 }
-                LabeledContent("Origin summary", value: coordinator.activeLockOriginSummary)
-                LabeledContent("Active sessions", value: "\(coordinator.activeSessionCount)")
+                LabeledContent("Started by", value: coordinator.activeLockOriginSummary)
             }
 
             if let pending = coordinator.pendingChangesSummary {
                 Section("Changes after this lock") {
                     Label(pending, systemImage: "clock.arrow.circlepath")
-                    Text("These changes are queued and cannot weaken the current committed lock.")
+                    Text("They’ll take effect after this lock ends.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Section("Recovery") {
-                Text("Recovery has a fixed wait and explicit confirmation. It ends this lock only; future bedtime sessions remain enabled.")
+            Section("Need to end early?") {
+                Text("Recovery waits 15 minutes, then asks you to confirm.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                NavigationLink("Recovery options") {
+                NavigationLink("Start recovery") {
                     RecoveryView(coordinator: coordinator)
                 }
             }
