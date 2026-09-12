@@ -58,6 +58,7 @@ public struct WindDownOccurrence: Equatable, Sendable {
     public let intendedLocalDate: Date
     public let bedtime: Date
     public let triggerDate: Date
+    public let bedtimeComponents: DateComponents
     public let triggerComponents: DateComponents
 
     public init(
@@ -65,12 +66,14 @@ public struct WindDownOccurrence: Equatable, Sendable {
         intendedLocalDate: Date,
         bedtime: Date,
         triggerDate: Date,
+        bedtimeComponents: DateComponents = DateComponents(),
         triggerComponents: DateComponents
     ) {
         self.identifier = identifier
         self.intendedLocalDate = intendedLocalDate
         self.bedtime = bedtime
         self.triggerDate = triggerDate
+        self.bedtimeComponents = bedtimeComponents
         self.triggerComponents = triggerComponents
     }
 }
@@ -152,6 +155,12 @@ public enum WindDownPlanner {
             if isUpcoming && !isAlreadyActive {
                 let id = identifier(for: dayComponents, bedtime: configuration.bedtime)
                 if seenIdentifiers.insert(id).inserted {
+                    var plannedBedtimeComponents = calendar.dateComponents(
+                        [.era, .year, .month, .day, .hour, .minute, .second],
+                        from: bedtime
+                    )
+                    plannedBedtimeComponents.calendar = calendar
+                    plannedBedtimeComponents.timeZone = calendar.timeZone
                     var triggerComponents = calendar.dateComponents(
                         [.era, .year, .month, .day, .hour, .minute, .second],
                         from: triggerDate
@@ -164,6 +173,7 @@ public enum WindDownPlanner {
                             intendedLocalDate: day,
                             bedtime: bedtime,
                             triggerDate: triggerDate,
+                            bedtimeComponents: plannedBedtimeComponents,
                             triggerComponents: triggerComponents
                         )
                     )
@@ -189,6 +199,45 @@ public enum WindDownPlanner {
         let hour = String(format: "%02d", bedtime.hour)
         let minute = String(format: "%02d", bedtime.minute)
         return "\(WindDownNotificationNamespace.prefix)\(year)-\(month)-\(day)-\(hour)-\(minute)"
+    }
+}
+
+/// The exact user-facing copy for one concrete local reminder. It is derived
+/// from the occurrence's resolved dates, never from a second bedtime setting.
+public struct WindDownNotificationContent: Equatable, Sendable {
+    public let title: String
+    public let body: String
+
+    public init(
+        occurrence: WindDownOccurrence,
+        locale: Locale = .current
+    ) throws {
+        let leadSeconds = occurrence.bedtime.timeIntervalSince(occurrence.triggerDate)
+        guard leadSeconds.isFinite,
+              leadSeconds >= 60,
+              leadSeconds <= WindDownLeadOffset.maximumSeconds,
+              leadSeconds.rounded() == leadSeconds else {
+            throw WindDownPlanningError.invalidLeadOffset(seconds: leadSeconds)
+        }
+        let leadMinutes = Int((leadSeconds / 60).rounded())
+        guard leadMinutes > 0 else {
+            throw WindDownPlanningError.invalidLeadOffset(seconds: leadSeconds)
+        }
+
+        var calendar = occurrence.bedtimeComponents.calendar ?? Calendar(identifier: .gregorian)
+        if let timeZone = occurrence.bedtimeComponents.timeZone {
+            calendar.timeZone = timeZone
+        }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = locale
+        formatter.timeZone = calendar.timeZone
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        let localBedtime = formatter.string(from: occurrence.bedtime)
+
+        title = "Bedtime in \(leadMinutes) minutes"
+        body = "Lockbox starts at \(localBedtime)."
     }
 }
 

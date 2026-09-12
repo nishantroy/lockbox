@@ -683,9 +683,11 @@ final class ScreenTimeCoordinator: ObservableObject {
         let active = enforcementSessions(at: now)
         for session in active {
             let status: AmbientLiveActivityStatus = session.state == .recoveryPending ? .recoveryPending : .plannedSession
+            let kind: AmbientLiveActivityKind = session.origin == .scheduled ? .bedtime : .focus
             let result = await liveActivity.reconcile(
                 sessionID: session.id.uuidString,
                 fixedEnd: session.end,
+                kind: kind,
                 status: status,
                 now: now
             )

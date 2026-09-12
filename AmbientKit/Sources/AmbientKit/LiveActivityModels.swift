@@ -1,7 +1,31 @@
 import Foundation
 
-/// Status wording deliberately distinguishes a plan from observed Managed
-/// Settings state. There is no generic "unlocked" or "success" state.
+/// The origin determines the small amount of language and iconography shown
+/// by the Live Activity. It is part of the immutable Activity attributes.
+public enum AmbientLiveActivityKind: String, Codable, Hashable, Sendable {
+    case bedtime
+    case focus
+    case demo
+
+    public var title: String {
+        switch self {
+        case .bedtime: return "Get some rest"
+        case .focus, .demo: return "Focus time"
+        }
+    }
+
+    public var iconSystemName: String {
+        switch self {
+        case .bedtime: return "moon.fill"
+        case .focus: return "lock.fill"
+        case .demo: return "testtube.2"
+        }
+    }
+}
+
+/// Compatibility spelling for callers that describe this value as an origin.
+public typealias AmbientLiveActivityOrigin = AmbientLiveActivityKind
+
 public enum AmbientLiveActivityStatus: String, Codable, Hashable, Sendable {
     case plannedSession
     case recoveryPending
@@ -11,11 +35,11 @@ public enum AmbientLiveActivityStatus: String, Codable, Hashable, Sendable {
 
     public var accessibilityLabel: String {
         switch self {
-        case .plannedSession: return "Planned session; enforcement is not independently verified"
-        case .recoveryPending: return "Recovery requested; release is not yet observed"
-        case .releaseObserved: return "Release observed"
-        case .expired: return "Session end reached; release is not independently verified"
-        case .stale: return "Status stale; open Phone Lockbox to reconcile"
+        case .plannedSession: return "Session is active"
+        case .recoveryPending: return "Recovery requested"
+        case .releaseObserved: return "Session released"
+        case .expired: return "Session end reached"
+        case .stale: return "Status may be out of date. Open Phone Lockbox"
         }
     }
 }
@@ -42,16 +66,24 @@ public struct AmbientActivityContentState: Codable, Hashable, Sendable {
     }
 }
 
-/// The Activity attributes are also useful to host tests and do not depend on
-/// ActivityKit. The iOS adapter conditionally adds ActivityAttributes below.
+/// Activity attributes are immutable after an Activity starts. In particular,
+/// neither the fixed end nor the presentation kind can be changed by updates.
 public struct AmbientLiveActivityAttributes: Codable, Hashable, Sendable {
     public let sessionID: String
     public let fixedEnd: Date
+    public let kind: AmbientLiveActivityKind
 
-    public init(sessionID: String, fixedEnd: Date) {
+    public init(
+        sessionID: String,
+        fixedEnd: Date,
+        kind: AmbientLiveActivityKind = .demo
+    ) {
         self.sessionID = sessionID
         self.fixedEnd = fixedEnd
+        self.kind = kind
     }
+
+    public var origin: AmbientLiveActivityOrigin { kind }
 }
 
 #if os(iOS) && canImport(ActivityKit)
@@ -69,6 +101,7 @@ public enum AmbientLiveActivityUnavailableReason: String, Codable, Hashable, Sen
     case noMatchingActivity
     case fixedEndPast
     case fixedEndMismatch
+    case kindMismatch
     case releaseObservationRequired
 }
 
@@ -107,49 +140,54 @@ public enum AmbientLiveActivityPolicy {
     public static func updateRejection(
         attributes: AmbientLiveActivityAttributes,
         requestedFixedEnd: Date,
-        status: AmbientLiveActivityStatus
+        status: AmbientLiveActivityStatus,
+        requestedKind: AmbientLiveActivityKind? = nil
     ) -> AmbientLiveActivityUnavailableReason? {
         guard requestedFixedEnd == attributes.fixedEnd else { return .fixedEndMismatch }
+        if let requestedKind, requestedKind != attributes.kind { return .kindMismatch }
         return startRejection(status: status)
     }
 }
 
-/// The widget uses this value-only mapping for every presentation region. In
-/// particular, WidgetKit's `context.isStale` wins over the state status so a
-/// stale activity cannot continue to present a planned or recovery status.
+/// Value-only presentation mapping shared by the widget and host tests.
+/// Accessibility labels contain context that is intentionally not printed in
+/// the compact or expanded regions.
 public struct AmbientLiveActivityPresentation: Equatable, Sendable {
     public let title: String
     public let accessibilityLabel: String
-    public let compactLabel: String
+    public let compactIconName: String
+    public let recoveryText: String?
+    public let demoIndicator: String?
+    public let staleActionText: String?
 
-    public init(status: AmbientLiveActivityStatus, isStale: Bool) {
+    /// Compatibility value for older hosts; compact presentation now uses an
+    /// icon rather than an abbreviated status string.
+    public var compactLabel: String { compactIconName }
+
+    public init(
+        kind: AmbientLiveActivityKind,
+        status: AmbientLiveActivityStatus,
+        isStale: Bool
+    ) {
+        compactIconName = kind.iconSystemName
+        recoveryText = !isStale && status == .recoveryPending ? "Recovery requested" : nil
+        demoIndicator = kind == .demo ? "Demo" : nil
+        staleActionText = isStale ? "Open Phone Lockbox" : nil
+
         if isStale {
-            title = "Status stale"
-            accessibilityLabel = "Status stale; open Phone Lockbox to reconcile"
-            compactLabel = "STALE"
+            title = "Status may be out of date"
+            let originLabel = kind == .demo ? "Demo. " : ""
+            accessibilityLabel = "\(originLabel)Status may be out of date. Open Phone Lockbox."
         } else {
-            switch status {
-            case .plannedSession:
-                title = "Planned session"
-                accessibilityLabel = status.accessibilityLabel
-                compactLabel = "PLAN"
-            case .recoveryPending:
-                title = "Recovery requested"
-                accessibilityLabel = status.accessibilityLabel
-                compactLabel = "REC"
-            case .releaseObserved:
-                title = "Release observed"
-                accessibilityLabel = status.accessibilityLabel
-                compactLabel = "DONE"
-            case .expired:
-                title = "Session end reached"
-                accessibilityLabel = status.accessibilityLabel
-                compactLabel = "END"
-            case .stale:
-                title = "Status stale"
-                accessibilityLabel = status.accessibilityLabel
-                compactLabel = "STALE"
-            }
+            title = kind.title
+            let originLabel = kind == .demo ? "Demo. " : ""
+            accessibilityLabel = "\(originLabel)\(kind.title). \(status.accessibilityLabel)."
         }
+    }
+
+    /// Preserves the old host-test initializer; new call sites should pass the
+    /// immutable kind explicitly.
+    public init(status: AmbientLiveActivityStatus, isStale: Bool) {
+        self.init(kind: .demo, status: status, isStale: isStale)
     }
 }

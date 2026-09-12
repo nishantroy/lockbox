@@ -17,6 +17,7 @@ public final class LockboxLiveActivityAdapter: Sendable {
     public func start(
         sessionID: String,
         fixedEnd: Date,
+        kind: AmbientLiveActivityKind = .demo,
         status: AmbientLiveActivityStatus = .plannedSession,
         now: Date = .now
     ) async -> AmbientLiveActivityOutcome {
@@ -26,7 +27,7 @@ public final class LockboxLiveActivityAdapter: Sendable {
         }
         guard isAvailable() else { return .unavailable(.userDisabled) }
 
-        let attributes = AmbientLiveActivityAttributes(sessionID: sessionID, fixedEnd: fixedEnd)
+        let attributes = AmbientLiveActivityAttributes(sessionID: sessionID, fixedEnd: fixedEnd, kind: kind)
         let state = AmbientActivityContentState(fixedEnd: fixedEnd, status: status)
         do {
             // ActivityKit does not provide an idempotency key for request().
@@ -35,6 +36,7 @@ public final class LockboxLiveActivityAdapter: Sendable {
             let matches = matchingActivities(sessionID: sessionID)
             if let existing = matches.first {
                 guard existing.attributes.fixedEnd == fixedEnd else { return .unavailable(.fixedEndMismatch) }
+                guard existing.attributes.kind == kind else { return .unavailable(.kindMismatch) }
                 await existing.update(.init(state: state, staleDate: fixedEnd))
                 for duplicate in matches.dropFirst() {
                     let duplicateState = duplicate.content.state.staleIfNeeded(at: now)
@@ -60,16 +62,30 @@ public final class LockboxLiveActivityAdapter: Sendable {
     public func reconcile(
         sessionID: String,
         fixedEnd: Date,
+        kind: AmbientLiveActivityKind,
         status: AmbientLiveActivityStatus,
         now: Date = .now
     ) async -> AmbientLiveActivityOutcome {
-        await start(sessionID: sessionID, fixedEnd: fixedEnd, status: status, now: now)
+        await start(sessionID: sessionID, fixedEnd: fixedEnd, kind: kind, status: status, now: now)
+    }
+
+    /// Compatibility overload for older hosts. New production callers should
+    /// provide the session origin explicitly.
+    @MainActor
+    public func reconcile(
+        sessionID: String,
+        fixedEnd: Date,
+        status: AmbientLiveActivityStatus,
+        now: Date = .now
+    ) async -> AmbientLiveActivityOutcome {
+        await reconcile(sessionID: sessionID, fixedEnd: fixedEnd, kind: .demo, status: status, now: now)
     }
 
     public func update(
         sessionID: String,
         fixedEnd: Date,
         status: AmbientLiveActivityStatus,
+        kind: AmbientLiveActivityKind? = nil,
         now: Date = .now
     ) async -> AmbientLiveActivityOutcome {
         guard let activity = matchingActivity(sessionID: sessionID) else {
@@ -78,7 +94,8 @@ public final class LockboxLiveActivityAdapter: Sendable {
         if let rejection = AmbientLiveActivityPolicy.updateRejection(
             attributes: activity.attributes,
             requestedFixedEnd: fixedEnd,
-            status: status
+            status: status,
+            requestedKind: kind
         ) {
             return .unavailable(rejection)
         }

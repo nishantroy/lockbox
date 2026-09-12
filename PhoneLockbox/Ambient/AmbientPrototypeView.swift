@@ -55,9 +55,12 @@ public struct AmbientPrototypeView: View {
             .disabled(isScheduling)
 
             Section {
-                Text("LIVE ACTIVITY DEMO — not a real Phone Lockbox lock")
+                Text("Live Activity demo")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
+                Text("This screen is a demo outside the lock and notification status.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Text(demoActive ? "Demo presentation active until \(demoEnd?.formatted(date: .omitted, time: .shortened) ?? "unknown")." : "Demo presentation inactive.")
                 Button("Start demo") {
                     Task { await startDemo() }
@@ -69,7 +72,7 @@ public struct AmbientPrototypeView: View {
                     Task { await endDemo() }
                 }
             } footer: {
-                Text("Live Activities are best-effort presentation. They do not unlock, enforce, or prove release. The real app supplies session updates later.")
+                Text("Live Activities are best-effort presentation. They do not unlock or enforce restrictions.")
             }
 
             Text(message)
@@ -126,7 +129,11 @@ public struct AmbientPrototypeView: View {
     @MainActor
     private func startDemo() async {
         let end = Date(timeIntervalSinceNow: 2 * 60 * 60)
-        let result = await liveActivity.start(sessionID: "ambient-demo", fixedEnd: end)
+        let result = await liveActivity.start(
+            sessionID: "ambient-demo",
+            fixedEnd: end,
+            kind: .demo
+        )
         switch result {
         case .started(let lifetime):
             demoActive = true

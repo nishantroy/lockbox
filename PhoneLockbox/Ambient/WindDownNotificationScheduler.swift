@@ -99,22 +99,28 @@ public actor WindDownNotificationScheduler {
             throw SchedulerError.authorizationDenied
         }
 
-        let requests = occurrences.map { occurrence in
-            let content = UNMutableNotificationContent()
-            content.title = "Wind-down"
-            content.body = "Your bedtime starts soon. This reminder is informational and does not enforce a lock."
-            content.sound = .default
-            // The planner already resolved this absolute occurrence. Never
-            // reinterpret it in a possibly changed device calendar/time zone.
-            let trigger = UNCalendarNotificationTrigger(dateMatching: occurrence.triggerComponents, repeats: false)
-            return StoredNotificationRequest(
-                identifier: occurrence.identifier,
-                request: UNNotificationRequest(
+        let requests: [StoredNotificationRequest]
+        do {
+            requests = try occurrences.map { occurrence in
+                let copy = try WindDownNotificationContent(occurrence: occurrence)
+                let content = UNMutableNotificationContent()
+                content.title = copy.title
+                content.body = copy.body
+                content.sound = .default
+                // The planner already resolved this absolute occurrence. Never
+                // reinterpret it in a possibly changed device calendar/time zone.
+                let trigger = UNCalendarNotificationTrigger(dateMatching: occurrence.triggerComponents, repeats: false)
+                return StoredNotificationRequest(
                     identifier: occurrence.identifier,
-                    content: content,
-                    trigger: trigger
+                    request: UNNotificationRequest(
+                        identifier: occurrence.identifier,
+                        content: content,
+                        trigger: trigger
+                    )
                 )
-            )
+            }
+        } catch {
+            throw SchedulerError.underlying(error.localizedDescription)
         }
 
         do {

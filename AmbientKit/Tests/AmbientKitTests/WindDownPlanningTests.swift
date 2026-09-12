@@ -239,16 +239,79 @@ final class LiveActivityModelTests: XCTestCase {
         )
     }
 
-    func testWidgetPresentationAlwaysUsesStaleCopyWhenContextIsStale() {
-        let display = AmbientLiveActivityPresentation(status: .releaseObserved, isStale: true)
-        XCTAssertEqual(display.title, "Status stale")
-        XCTAssertEqual(display.compactLabel, "STALE")
-        XCTAssertTrue(display.accessibilityLabel.contains("open Phone Lockbox to reconcile"))
+    func testNotificationCopyUsesConcreteLeadAndPlannedLocalBedtime() throws {
+        let now = ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z")!
+        let config = WindDownConfiguration(
+            enabled: true,
+            bedtime: try AmbientLocalTime(hour: 22, minute: 0),
+            lead: try WindDownLeadOffset(minutes: 30)
+        )
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        utc.locale = Locale(identifier: "en_US_POSIX")
+        let occurrence = try XCTUnwrap(WindDownPlanner.plan(
+            configuration: config,
+            now: now,
+            calendar: utc,
+            limit: 1
+        ).first)
+        let copy = try WindDownNotificationContent(occurrence: occurrence, locale: Locale(identifier: "en_US_POSIX"))
+        XCTAssertEqual(copy.title, "Bedtime in 30 minutes")
+        XCTAssertEqual(
+            copy.body.replacingOccurrences(of: "\u{202F}", with: " "),
+            "Lockbox starts at 10:00 PM."
+        )
+    }
+
+    func testLiveActivityPresentationUsesOriginIconsAndConciseStates() {
+        let bedtime = AmbientLiveActivityPresentation(kind: .bedtime, status: .plannedSession, isStale: false)
+        XCTAssertEqual(bedtime.title, "Get some rest")
+        XCTAssertEqual(bedtime.compactIconName, "moon.fill")
+        XCTAssertNil(bedtime.demoIndicator)
+        XCTAssertNil(bedtime.recoveryText)
+
+        let focusRecovery = AmbientLiveActivityPresentation(kind: .focus, status: .recoveryPending, isStale: false)
+        XCTAssertEqual(focusRecovery.title, "Focus time")
+        XCTAssertEqual(focusRecovery.compactIconName, "lock.fill")
+        XCTAssertEqual(focusRecovery.recoveryText, "Recovery requested")
+        XCTAssertFalse(focusRecovery.accessibilityLabel.contains("PLAN"))
+        XCTAssertFalse(focusRecovery.accessibilityLabel.contains("REC"))
+
+        let demo = AmbientLiveActivityPresentation(kind: .demo, status: .plannedSession, isStale: false)
+        XCTAssertEqual(demo.compactIconName, "testtube.2")
+        XCTAssertEqual(demo.demoIndicator, "Demo")
+        let stale = AmbientLiveActivityPresentation(kind: .bedtime, status: .recoveryPending, isStale: true)
+        XCTAssertEqual(stale.title, "Status may be out of date")
+        XCTAssertEqual(stale.staleActionText, "Open Phone Lockbox")
+        XCTAssertNil(stale.recoveryText)
+        XCTAssertFalse(stale.accessibilityLabel.contains("PLAN"))
+        XCTAssertFalse(stale.accessibilityLabel.contains("STALE"))
+    }
+
+    func testActivityAttributesCarryImmutableValidatedKind() throws {
+        let end = Date(timeIntervalSince1970: 100)
+        let attributes = AmbientLiveActivityAttributes(sessionID: "session", fixedEnd: end, kind: .bedtime)
+        XCTAssertEqual(attributes.origin, .bedtime)
+        let encoded = try JSONEncoder().encode(attributes)
+        XCTAssertEqual(try JSONDecoder().decode(AmbientLiveActivityAttributes.self, from: encoded), attributes)
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            AmbientLiveActivityAttributes.self,
+            from: Data(#"{"sessionID":"session","fixedEnd":100,"kind":"unknown"}"#.utf8)
+        ))
+        XCTAssertEqual(
+            AmbientLiveActivityPolicy.updateRejection(
+                attributes: attributes,
+                requestedFixedEnd: end,
+                status: .plannedSession,
+                requestedKind: .focus
+            ),
+            .kindMismatch
+        )
     }
 
     func testLiveActivityUpdatesCannotMoveEndOrClaimUnobservedRelease() {
         let end = Date(timeIntervalSince1970: 100)
-        let attributes = AmbientLiveActivityAttributes(sessionID: "session", fixedEnd: end)
+        let attributes = AmbientLiveActivityAttributes(sessionID: "session", fixedEnd: end, kind: .focus)
         XCTAssertEqual(
             AmbientLiveActivityPolicy.updateRejection(
                 attributes: attributes,

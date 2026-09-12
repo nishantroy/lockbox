@@ -8,73 +8,83 @@ struct LockboxLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AmbientLiveActivityAttributes.self) { context in
             let display = AmbientLiveActivityPresentation(
+                kind: context.attributes.kind,
                 status: context.state.status,
                 isStale: context.isStale
             )
             VStack(alignment: .leading, spacing: 6) {
-                Text("Phone Lockbox · Demo")
-                    .font(.headline)
-                Text(display.title)
-                    .font(.subheadline)
-                Text("Fixed end: \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption)
-                Text(display.accessibilityLabel)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .padding()
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Phone Lockbox demo, not a lock. \(display.accessibilityLabel). Fixed end \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
-        } dynamicIsland: { context in
-            DynamicIsland {
-                DynamicIslandExpandedRegion(.leading) {
-                    Text("Lockbox demo")
-                        .font(.caption)
-                }
-                DynamicIslandExpandedRegion(.center) {
-                    Text(AmbientLiveActivityPresentation(
-                        status: context.state.status,
-                        isStale: context.isStale
-                    ).title)
-                        .font(.caption)
-                }
-                DynamicIslandExpandedRegion(.bottom) {
-                    VStack(alignment: .leading) {
-                        Text(AmbientLiveActivityPresentation(
-                            status: context.state.status,
-                            isStale: context.isStale
-                        ).accessibilityLabel)
+                HStack(spacing: 8) {
+                    Image(systemName: display.compactIconName)
+                    Text(display.title)
+                        .font(.headline)
+                    if let demoIndicator = display.demoIndicator {
+                        Text(demoIndicator)
                             .font(.caption2)
-                        Text("Fixed end: \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
-                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
+                Text("Opens at \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
+                    .font(.subheadline)
+                if let recoveryText = display.recoveryText {
+                    Text(recoveryText)
+                        .font(.caption)
+                }
+                if let staleActionText = display.staleActionText {
+                    Text(staleActionText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                "\(display.accessibilityLabel) Opens at \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))."
+            )
+        } dynamicIsland: { context in
+            let display = AmbientLiveActivityPresentation(
+                kind: context.attributes.kind,
+                status: context.state.status,
+                isStale: context.isStale
+            )
+            return DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    Image(systemName: display.compactIconName)
+                        .accessibilityHidden(true)
+                }
+                DynamicIslandExpandedRegion(.center) {
+                    HStack(spacing: 6) {
+                        Text(display.title)
+                        if let demoIndicator = display.demoIndicator {
+                            Text(demoIndicator)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Opens at \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
+                        if let recoveryText = display.recoveryText {
+                            Text(recoveryText)
+                        }
+                        if let staleActionText = display.staleActionText {
+                            Text(staleActionText)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption)
+                }
             } compactLeading: {
-                Text("Demo")
-                    .accessibilityLabel(
-                        context.isStale
-                            ? "Phone Lockbox. \(AmbientLiveActivityPresentation(status: context.state.status, isStale: true).accessibilityLabel)"
-                            : "Phone Lockbox"
-                    )
+                Image(systemName: display.compactIconName)
+                    .accessibilityLabel(display.accessibilityLabel)
             } compactTrailing: {
-                Text(AmbientLiveActivityPresentation(
-                    status: context.state.status,
-                    isStale: context.isStale
-                ).compactLabel)
-                    .font(.caption2)
-                    .accessibilityLabel(AmbientLiveActivityPresentation(
-                        status: context.state.status,
-                        isStale: context.isStale
-                    ).accessibilityLabel)
+                Text(context.state.fixedEnd, style: .time)
+                    .accessibilityLabel(
+                        "Opens at \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))"
+                    )
             } minimal: {
-                Text(AmbientLiveActivityPresentation(
-                    status: context.state.status,
-                    isStale: context.isStale
-                ).compactLabel)
-                    .accessibilityLabel(AmbientLiveActivityPresentation(
-                        status: context.state.status,
-                        isStale: context.isStale
-                    ).accessibilityLabel)
+                Image(systemName: display.compactIconName)
+                    .accessibilityLabel(display.accessibilityLabel)
             }
         }
     }
