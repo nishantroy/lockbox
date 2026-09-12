@@ -39,15 +39,23 @@ struct LockboxLiveActivity: Widget {
                         .font(.caption)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text(AmbientLiveActivityPresentation(
-                        status: context.state.status,
-                        isStale: context.isStale
-                    ).accessibilityLabel)
-                        .font(.caption2)
+                    VStack(alignment: .leading) {
+                        Text(AmbientLiveActivityPresentation(
+                            status: context.state.status,
+                            isStale: context.isStale
+                        ).accessibilityLabel)
+                            .font(.caption2)
+                        Text("Fixed end: \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption2)
+                    }
                 }
             } compactLeading: {
                 Text("LB")
-                    .accessibilityLabel("Phone Lockbox")
+                    .accessibilityLabel(
+                        context.isStale
+                            ? "Phone Lockbox. \(AmbientLiveActivityPresentation(status: context.state.status, isStale: true).accessibilityLabel)"
+                            : "Phone Lockbox"
+                    )
             } compactTrailing: {
                 Text(AmbientLiveActivityPresentation(
                     status: context.state.status,
