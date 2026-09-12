@@ -37,8 +37,11 @@ final class ReconciliationTests: XCTestCase {
     func testInterruptedApplyRequiresValidCurrentWindowAndAuthorization() {
         var state = document()
         state.policyIntent = .apply
-        XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(23), authorized: true, registrationMatches: true, calendar: calendar), .applyScheduled)
-        XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(23), authorized: false, registrationMatches: true, calendar: calendar), .none)
+        // An apply intent without a committed current session is unsafe to
+        // replay from configuration alone; the shared callback decision clears
+        // it rather than creating an unbounded shield.
+        XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(23), authorized: true, registrationMatches: true, calendar: calendar), .clearOwned)
+        XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(23), authorized: false, registrationMatches: true, calendar: calendar), .clearOwned)
         XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(12), authorized: true, registrationMatches: true, calendar: calendar), .clearOwned)
         XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(23), authorized: true, registrationMatches: false, calendar: calendar), .clearOwned)
     }

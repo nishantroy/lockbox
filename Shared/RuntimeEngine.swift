@@ -7,6 +7,19 @@ public enum RuntimeSessionDecision {
         sessions.filter { $0.isEffective(at: date) }
     }
 
+    /// The sessions that may contribute to the named Managed Settings store.
+    /// A manual session is not enforceable until DeviceActivity has accepted
+    /// its one-shot end route. Keeping this gate in the shared core prevents a
+    /// recovery/relaunch path from shielding a manual lock indefinitely.
+    public static func enforcementSessions(
+        in document: RuntimeStoreDocument,
+        at date: Date
+    ) -> [RuntimeSession] {
+        document.sessions.filter {
+            $0.isEffective(at: date) && ($0.origin != .manual || document.manualRegistrationActive)
+        }
+    }
+
     public static func matchingScheduledOccurrence(
         sessions: [RuntimeSession],
         start: Date,
@@ -47,5 +60,51 @@ public enum RuntimeSessionDecision {
 
     public static func occurrenceKey(origin: RuntimeSessionOrigin, start: Date, end: Date) -> String {
         "\(origin.rawValue):\(start.timeIntervalSinceReferenceDate):\(end.timeIntervalSinceReferenceDate)"
+    }
+}
+
+/// Decisions used at callback boundaries by both the monitor and the app.
+/// The callback may be late, duplicated, or arrive after a crash between a
+/// durable intent and Managed Settings. It must always reduce the *current*
+/// aggregate, rather than replaying an unconditional clear from the callback's
+/// origin.
+public enum RuntimeCallbackDecision {
+    public static func currentAggregate(
+        _ document: RuntimeStoreDocument,
+        at date: Date
+    ) -> [RuntimeSession] {
+        RuntimeSessionDecision.enforcementSessions(in: document, at: date)
+    }
+
+    public static func desiredPolicyIntent(
+        _ document: RuntimeStoreDocument,
+        at date: Date
+    ) -> RuntimePolicyIntent {
+        if !currentAggregate(document, at: date).isEmpty {
+            return .apply
+        }
+
+        // The developer prototype deliberately has no committed session. Its
+        // persisted apply intent is the one supported exception to the
+        // no-manual-route rule, and is retained for the existing cleanup path.
+        if document.activeOwner == .prototypeTest,
+           document.testLockActive {
+            return .apply
+        }
+        return .clear
+    }
+
+    /// Expire natural sessions and persist the intent that a callback must
+    /// replay before touching Managed Settings. Callers still commit this
+    /// mutation before performing the side effect.
+    @discardableResult
+    public static func preparePolicyReconciliation(
+        _ document: inout RuntimeStoreDocument,
+        at date: Date
+    ) -> RuntimePolicyIntent {
+        _ = RuntimeLifecycle.expireNaturalSessions(&document, at: date)
+        let intent = desiredPolicyIntent(document, at: date)
+        document.policyIntent = intent
+        return intent
     }
 }

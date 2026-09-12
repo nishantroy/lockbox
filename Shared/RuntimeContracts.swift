@@ -334,31 +334,98 @@ public struct RuntimeReleasedOccurrence: Codable, Equatable, Sendable {
     }
 }
 
-/// A release of a scheduled occurrence is also a fence for that civil night.
-/// It prevents a changed/pending interval from recreating the same occurrence
-/// with a different end (or revision). Future calendar occurrences are not
-/// fenced.
+/// A release of a scheduled occurrence is also a monotonic activation fence.
+/// A replacement occurrence is suppressed when its absolute start is at or
+/// before the frozen occurrence's end. This keeps edits from resurrecting the
+/// released window before its natural end, while intentionally avoiding a
+/// civil-day flag: after a 22:00–07:00 recovery, a genuine 22:00 occurrence
+/// later on that same calendar day has a later absolute start and is allowed.
+///
+/// The optional year/month/day values are retained solely to decode documents
+/// written by the build-3 civil-day fence. Such a legacy fence remains a
+/// conservative same-day suppression until a later lifecycle write replaces
+/// it with an absolute cutoff; it is never silently discarded.
 public struct RuntimeScheduledActivationFence: Codable, Equatable, Sendable {
+    public let notBeforeOccurrenceStart: Date?
     public let year: Int
     public let month: Int
     public let day: Int
+    internal let preservesLegacyCivilDay: Bool
 
     public init(date: Date, calendar: Calendar = .current) {
         let components = calendar.dateComponents([.year, .month, .day], from: date)
+        notBeforeOccurrenceStart = date
         year = components.year ?? 0
         month = components.month ?? 0
         day = components.day ?? 0
+        preservesLegacyCivilDay = false
     }
 
+    internal init(
+        notBeforeOccurrenceStart: Date?,
+        year: Int,
+        month: Int,
+        day: Int,
+        preservesLegacyCivilDay: Bool
+    ) {
+        self.notBeforeOccurrenceStart = notBeforeOccurrenceStart
+        self.year = year
+        self.month = month
+        self.day = day
+        self.preservesLegacyCivilDay = preservesLegacyCivilDay
+    }
+
+    /// True when this occurrence start is fenced. `matches` remains as a
+    /// source-compatible name for the callback adapters.
     public func matches(_ date: Date, calendar: Calendar = .current) -> Bool {
+        let absoluteMatch: Bool
+        if let cutoff = notBeforeOccurrenceStart {
+            absoluteMatch = date.timeIntervalSinceReferenceDate.isFinite
+                && cutoff.timeIntervalSinceReferenceDate.isFinite
+                && date <= cutoff
+        } else {
+            absoluteMatch = false
+        }
+        guard preservesLegacyCivilDay else { return absoluteMatch }
         let components = calendar.dateComponents([.year, .month, .day], from: date)
-        return components.year == year && components.month == month && components.day == day
+        return absoluteMatch || (components.year == year && components.month == month && components.day == day)
     }
 
     public func validate() throws {
-        guard (1...9999).contains(year), (1...12).contains(month), (1...31).contains(day) else {
-            throw RuntimeValidationError.corruptSharedData
+        if let cutoff = notBeforeOccurrenceStart {
+            guard cutoff.timeIntervalSinceReferenceDate.isFinite else {
+                throw RuntimeValidationError.corruptSharedData
+            }
+        } else {
+            guard (1...9999).contains(year), (1...12).contains(month), (1...31).contains(day) else {
+                throw RuntimeValidationError.corruptSharedData
+            }
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case notBeforeOccurrenceStart, year, month, day, preservesLegacyCivilDay
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let cutoff = try container.decodeIfPresent(Date.self, forKey: .notBeforeOccurrenceStart) {
+            let year = try container.decodeIfPresent(Int.self, forKey: .year) ?? 0
+            let month = try container.decodeIfPresent(Int.self, forKey: .month) ?? 0
+            let day = try container.decodeIfPresent(Int.self, forKey: .day) ?? 0
+            self.init(notBeforeOccurrenceStart: cutoff, year: year, month: month, day: day, preservesLegacyCivilDay: try container.decodeIfPresent(Bool.self, forKey: .preservesLegacyCivilDay) ?? false)
+        } else {
+            // Build-3 encoded only the civil date. Preserve that meaning until
+            // lifecycle code has an opportunity to write a newer absolute fence.
+            self.init(
+                notBeforeOccurrenceStart: nil,
+                year: try container.decode(Int.self, forKey: .year),
+                month: try container.decode(Int.self, forKey: .month),
+                day: try container.decode(Int.self, forKey: .day),
+                preservesLegacyCivilDay: true
+            )
+        }
+        try validate()
     }
 }
 
@@ -645,7 +712,10 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
               !(testLockActive && !sessions.isEmpty),
               !(testLockActive && recurringEnabledIntent),
               !(activeOwner == .prototypeTest && recurringEnabledIntent),
-              !(policyIntent != nil && activeOwner == nil && sessions.isEmpty) else {
+              // A clear intent with no remaining session is a valid durable
+              // cleanup request (for example a stale callback on an empty
+              // store). Only an orphan apply could create an unbounded shield.
+              !(policyIntent == .apply && activeOwner == nil && sessions.isEmpty) else {
             throw RuntimeValidationError.corruptSharedData
         }
     }

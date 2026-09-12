@@ -105,6 +105,13 @@ final class RuntimeContractsTests: XCTestCase {
         XCTAssertFalse(allow.blocksSelectedCategories)
     }
 
+    func testEmptyDocumentMayPersistAReplayedClearIntent() throws {
+        var document = RuntimeStoreDocument()
+        document.policyIntent = .clear
+        XCTAssertNoThrow(try document.validate())
+        XCTAssertEqual(RuntimeCallbackDecision.desiredPolicyIntent(document, at: .now), .clear)
+    }
+
     func testRecoveryDocumentRequiresBidirectionalSessionRelationships() throws {
         let id = UUID()
         let policy = RuntimePolicySnapshot(
