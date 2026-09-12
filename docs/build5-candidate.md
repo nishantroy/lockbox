@@ -1,6 +1,6 @@
 # Build 5 — tabbed layout candidate
 
-Prepared 2026-09-12; not installed at the time of this note.
+Prepared 2026-09-12. Installed and launched successfully on the owner's paired iPhone at 14:30 PDT on explicit request. Installation did not itself change schedules, authorization or notification settings.
 
 ## Included
 
