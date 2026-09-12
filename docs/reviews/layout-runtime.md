@@ -13,6 +13,7 @@ Date: 2026-09-12
 ## Checks run
 
 - `swift test --scratch-path /tmp/lockbox-layout-runtime-final-tests`: **84 tests passed**.
+- `swift test --package-path AmbientKit --scratch-path /tmp/lockbox-layout-runtime-ambient-tests`: **13 tests passed**.
 - `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -configuration Debug -derivedDataPath /tmp/lockbox-layout-runtime-final-derived CODE_SIGNING_ALLOWED=NO build`: **passed**.
 - `git diff --check`: **passed**.
 
