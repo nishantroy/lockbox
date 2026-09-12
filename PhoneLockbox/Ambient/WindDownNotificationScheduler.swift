@@ -101,8 +101,8 @@ public actor WindDownNotificationScheduler {
 
         let requests = occurrences.map { occurrence in
             let content = UNMutableNotificationContent()
-            content.title = "Wind-down prototype"
-            content.body = "Your demo wind-down time has arrived. This reminder is not connected to a lock schedule."
+            content.title = "Wind-down"
+            content.body = "Your bedtime starts soon. This reminder is informational and does not enforce a lock."
             content.sound = .default
             // The planner already resolved this absolute occurrence. Never
             // reinterpret it in a possibly changed device calendar/time zone.
