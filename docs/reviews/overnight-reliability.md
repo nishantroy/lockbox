@@ -7,7 +7,7 @@ Scope: shared lifecycle/reconciliation contracts, the app coordinator, and the D
 ## Delivered
 
 - Added `RuntimeCallbackDecision`, the shared current-aggregate policy decision used by both callback adapters. A terminal manual callback now replays a durable clear against the live aggregate, re-applying an overlapping scheduled session instead of unconditionally clearing it. Every monitor start/end path persists the resulting apply/clear intent before Managed Settings.
-- Made schedule-stop expiry atomic with its durable desired policy and changed daily-route retention to depend only on a live scheduled session. Manual-only state no longer keeps the repeating registration alive; a current scheduled session keeps its natural end route.
+- Made schedule-stop expiry atomic with its durable desired policy and changed daily-route retention to depend on enabled recurrence or a live scheduled session. Manual-only state no longer keeps the repeating registration alive; a current scheduled session keeps its natural end route.
 - Added shared manual-route normalization and recovery relationship repair. A missing accepted route retires the manual session; a mismatched route becomes pending replacement without entering the enforcement aggregate. Recovery-pending and naturally expired targets remain internally consistent.
 - Replaced the new fence behavior with an absolute cutoff through the frozen occurrence end. Pending current windows are suppressed, changed boundaries cannot resurrect the released window, and a genuine later same-day start is allowed. Build-3 civil-day fence data is decoded conservatively; when retained session/configuration data can provide an absolute end, it is used rather than silently dropping suppression. Otherwise the old same-day suppression remains as the safe fallback.
 - Protected recovery-referenced terminal sessions and current scheduled release markers during bounded history pruning.
@@ -46,4 +46,4 @@ The tests include terminal manual clear with scheduled overlap, atomic natural e
 - App/monitor finite-route checks and sticky reconciliation errors: `232d2e2` (`fix: verify manual end routes before shielding`)
 - Deferred replacement route retention: `0115c85` (`fix: keep recurring route through deferred replacement`)
 - Stale disabled-route reconciliation: `e758547` (`fix: reconcile stale disabled daily routes`)
-- This review record: pending documentation-only commit after recording the final validation.
+- Review record updates: `91b1355`, `2f60b21` (documentation-only disposition and validation updates).
