@@ -13,11 +13,21 @@ Scope: shared lifecycle/reconciliation contracts, the app coordinator, and the D
 - Protected recovery-referenced terminal sessions and current scheduled release markers during bounded history pruning.
 - Kept reconciliation failures separate from ordinary successful UI operations so later actions do not blindly clear `lastError`.
 
+## Terra finding disposition — 2026-09-12
+
+The latest Terra review reported one verified finding and no P0 findings:
+
+| Finding | Disposition | Regression coverage |
+| --- | --- | --- |
+| **P1 normal scheduled end disables recurrence.** A natural end made `scheduledRegistrationShouldRemain` false, causing `handleScheduledEnd` to unregister the repeating daily route. | **Fixed.** The shared production decision now retains an enabled recurring route after terminal natural expiry. It still stops a disabled route, an explicitly activated replacement, or a manual-only route; a live scheduled session remains an end route when recurrence is disabled. `MonitorExtension.handleScheduledEnd` consumes this decision. | `testEnabledRecurrenceRetainsDailyRegistrationAfterNaturalExpiry`, `testPendingReplacementIsTheOnlyNaturalEndRouteStop`, and `testManualOnlyStateDoesNotKeepDailyRegistration` exercise the shared decision used by the monitor. |
+
+The requested reliability slices are also covered in the owned production paths: terminal manual callback replay uses the current aggregate; schedule-stop expiry persists the desired clear/apply intent before OS changes; finite manual route matching is shared by app and monitor; absolute activation fences retain the frozen end and allow a later same-day start; bounded pruning protects recovery targets/current scheduled markers; and reconciliation errors are not cleared by a no-op foreground pass. No device QA is claimed.
+
 ## Validation
 
-- `swift test --scratch-path /tmp/phone-lockbox-over-reliability-tests`: **70 tests passed**.
-- Simulator app build, no signing: `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -configuration Debug -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build`: **passed**.
-- Monitor extension target build, no signing, using `DerivedData/MonitorTarget`: **passed**. This explicitly compiled `MonitorExtension.swift` and all shared runtime sources.
+- `swift test --scratch-path /tmp/phone-lockbox-overnight-reliability-tests-2`: **74 tests passed**.
+- Simulator app/extension build, no signing: `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -configuration Debug -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build`: **passed**. This compiled `MonitorExtension.swift` and all shared runtime sources.
+- iOS Simulator unit tests on booted `iPhone 17` (`D7081409-96E5-4F3A-9F33-47288449EC3D`): `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'platform=iOS Simulator,id=D7081409-96E5-4F3A-9F33-47288449EC3D' -configuration Debug -derivedDataPath DerivedData test -only-testing:PhoneLockboxTests`: **15 tests passed**. The simulator was not authorized for Family Controls; the system emitted expected authorization errors during app test launch.
 - `git diff --check`: passed.
 
 The tests include terminal manual clear with scheduled overlap, atomic natural expiry intent, manual route loss/mismatch during recovery, manual-history stress and marker protection, commitment-target pruning, before/after-midnight pending fences, next-22:00 same-day activation, legacy fence decoding, and bounded clear intent on an empty document.
@@ -32,4 +42,7 @@ The tests include terminal manual clear with scheduled overlap, atomic natural e
 
 - Shared lifecycle and regression tests: `369c798` (`fix: harden shared runtime lifecycle decisions`)
 - App/monitor integration: `b1b8b1e` (`fix: replay runtime policy across callback races`)
-- This review record: committed separately after recording the implementation hashes.
+- Recurring-route retention, bounded-history hardening, and shared finite-route validation: `a1e578c` (`fix: retain recurring routes and bound runtime history`)
+- App/monitor finite-route checks and sticky reconciliation errors: `232d2e2` (`fix: verify manual end routes before shielding`)
+- Deferred replacement route retention: `0115c85` (`fix: keep recurring route through deferred replacement`)
+- This review record: pending documentation-only commit after recording the final validation.
