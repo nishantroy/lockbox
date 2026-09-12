@@ -106,10 +106,10 @@ public struct AmbientPrototypeView: View {
         let end = Date(timeIntervalSinceNow: 2 * 60 * 60)
         let result = await liveActivity.start(sessionID: "ambient-demo", fixedEnd: end)
         switch result {
-        case .started:
+        case .started(let lifetime):
             demoActive = true
             demoEnd = end
-            message = "Live Activity demo started; no lock was changed."
+            message = "Live Activity demo started (\(lifetime)); no lock was changed."
         default:
             message = "Live Activity demo unavailable: \(String(describing: result))"
         }
