@@ -107,6 +107,27 @@ public enum RuntimeCallbackDecision {
         return .clear
     }
 
+    /// Manual activity names are reused. Retire the route only when no live
+    /// manual session remains, even if older unnormalized sessions have ended.
+    /// Returns whether the adapter may stop monitoring while still holding its
+    /// shared transaction lock. The caller commits before policy side effects.
+    public static func prepareManualEnd(
+        _ document: inout RuntimeStoreDocument,
+        at date: Date
+    ) -> Bool {
+        _ = RuntimeLifecycle.expireNaturalSessions(&document, at: date)
+        let hasLiveManual = document.sessions.contains {
+            $0.origin == .manual && $0.isEffective(at: date)
+        }
+        if !hasLiveManual {
+            document.manualRegistrationActive = false
+            document.manualRegistrationIntent = false
+        }
+        _ = RuntimeLifecycle.normalizeRecoveryCommitment(&document, at: date)
+        document.policyIntent = desiredPolicyIntent(document, at: date)
+        return !hasLiveManual
+    }
+
     /// Expire natural sessions and persist the intent that a callback must
     /// replay before touching Managed Settings. Callers still commit this
     /// mutation before performing the side effect.

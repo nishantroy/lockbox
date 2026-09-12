@@ -206,40 +206,14 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func handleManualEnd() {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
-        var shouldStopManualMonitoring = false
         do {
             try store.withTransaction { context in
-                let hasLiveManual = context.document.sessions.contains {
-                    $0.origin == .manual && $0.isEffective(at: now)
-                }
-                let hasTerminalManual = context.document.sessions.contains {
-                    $0.origin == .manual && ($0.state == .active || $0.state == .recoveryPending) && now >= $0.end
-                }
-                if hasTerminalManual {
-                    _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
-                    context.document.manualRegistrationActive = false
-                    context.document.manualRegistrationIntent = false
-                    shouldStopManualMonitoring = true
-                    _ = RuntimeLifecycle.normalizeRecoveryCommitment(&context.document, at: now)
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidEnd; natural finite end reconciled."), succeeded: true)
-                } else if !hasLiveManual {
-                    // This includes a released manual session after a crash at
-                    // the release-commit/clear boundary. Do not let the
-                    // terminal callback's old path return before replaying the
-                    // durable intent against any scheduled overlap.
-                    context.document.manualRegistrationActive = false
-                    context.document.manualRegistrationIntent = false
-                    shouldStopManualMonitoring = true
-                    _ = RuntimeLifecycle.normalizeRecoveryCommitment(&context.document, at: now)
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidEnd replayed a terminal or already-released session."), succeeded: true)
-                } else {
-                    // A stale end callback must not clear a newer live manual
-                    // lock. The shared aggregate below re-applies it.
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "stale manual intervalDidEnd ignored while a finite manual session remains live."), succeeded: true)
-                }
+                let shouldStop = RuntimeCallbackDecision.prepareManualEnd(&context.document, at: now)
+                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: shouldStop ? "manual intervalDidEnd reconciled terminal sessions." : "stale manual intervalDidEnd preserved the live manual route."), succeeded: true)
                 try replayCurrentPolicy(in: context, at: now, detail: "Manual-end reconciliation used the current aggregate.")
+                // Serialize route teardown with a possible new manual start.
+                if shouldStop { activityCenter.stopMonitoring([manualActivityName]) }
             }
-            if shouldStopManualMonitoring { activityCenter.stopMonitoring([manualActivityName]) }
         } catch { try? record(store: store, operation: .policyClearFailed, detail: error.localizedDescription, succeeded: false) }
     }
 

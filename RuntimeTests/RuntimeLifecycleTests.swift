@@ -22,6 +22,41 @@ final class RuntimeLifecycleTests: XCTestCase {
         RuntimeSession(id: id, origin: origin, start: start, end: start.addingTimeInterval(duration), sourceRevision: 1, policy: policy(mode: mode, id: dataID))
     }
 
+    func testLateManualEndRetainsNewLiveRouteAndPolicy() throws {
+        let old = session(origin: .manual, duration: 900)
+        let live = session(origin: .manual, start: old.end, duration: 3600)
+        let now = live.start.addingTimeInterval(60)
+        var document = RuntimeStoreDocument()
+        document.sessions = [old, live]
+        document.manualRegistrationActive = true
+        document.policyIntent = .clear
+        XCTAssertFalse(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertTrue(document.manualRegistrationActive)
+        XCTAssertEqual(document.sessions[0].state, .expired)
+        XCTAssertEqual(document.policyIntent, .apply)
+        XCTAssertEqual(RuntimeCallbackDecision.currentAggregate(document, at: now).map(\.id), [live.id])
+        XCTAssertFalse(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        try document.validate()
+    }
+
+    func testManualEndReplaysTerminalClearAndPreservesScheduledOverlap() throws {
+        let manual = session(origin: .manual, duration: 900)
+        let scheduled = session(start: manual.start, duration: 3600)
+        let now = manual.end.addingTimeInterval(1)
+        var document = RuntimeStoreDocument()
+        document.sessions = [manual, scheduled]
+        document.manualRegistrationActive = true
+        XCTAssertTrue(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertFalse(document.manualRegistrationActive)
+        XCTAssertEqual(document.policyIntent, .apply)
+        XCTAssertEqual(RuntimeCallbackDecision.currentAggregate(document, at: now).map(\.id), [scheduled.id])
+        document.sessions.removeAll { $0.id == scheduled.id }
+        document.policyIntent = .clear
+        XCTAssertTrue(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertEqual(document.policyIntent, .clear)
+        try document.validate()
+    }
+
     func testOccurrenceIdentityIsStableAcrossDuplicateCallbacks() throws {
         let id = UUID()
         let original = session(id: id)
