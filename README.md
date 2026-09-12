@@ -1,13 +1,14 @@
 # Phone Lockbox
 
-A native iPhone app to keep essentials available while restricting nighttime app-hopping. Personal use first; local-only, no accounts or backend.
+A native iPhone app to keep essentials available while restricting nighttime app-hopping. Personal use first. Bedtime enforcement is local; an accountless trusted-person companion protocol is being prototyped separately, with no hosted service configured.
 
-**Status:** working device prototype. Build-2 settings migration, scheduled blocking/automatic release and relaunch persistence have owner-reported passes. Next is production session/recovery integration; overnight and reboot reliability remain unvalidated.
+**Status:** build 3 has owner-reported passes for persistence, pending edits, delayed recovery and one overnight natural release. Interruption/reboot and broader platform cases still need coverage. Source-only reliability, companion and ambient prototypes are tracked in the [overnight build contract](docs/overnight-build-plan.md); no new device deployment is implied.
 
 ## Start here
 
 - **[Execution roadmap / Luna handoff](docs/roadmap.md)** — next tasks, dependencies, acceptance gates.
-- **[Latest R1 progress and focused QA](docs/r1-progress.md)** — implementation, checks, and the next 20-minute device experiment.
+- **[Build-3 lifecycle QA](docs/r2-r3-qa.md)** — reported passes and remaining acceptance cases.
+- [Historical R1 progress](docs/r1-progress.md) — build-2 implementation and completed bounded experiment.
 - [Historical status and QA evidence](docs/status-and-qa.md) — confirmed build-1 behavior versus assumptions.
 - [Independent Sol code review](docs/reviews/2026-09-10-sol.md) — prioritized findings.
 - [Developer runbook](docs/development.md) — source map, builds, wireless device deployment.
@@ -20,4 +21,4 @@ A native iPhone app to keep essentials available while restricting nighttime app
 
 The SwiftUI app uses FamilyControls, ManagedSettings and DeviceActivity, with monitor and shield extensions. Generate the Xcode project using `xcodegen generate`; run core tests using `swift test`. Physical-device enforcement requires eligible Apple development signing. See the runbook for full commands.
 
-This is a self-control tool, not tamper-proof lockdown. System exclusions, authorization revocation and uninstall remain limitations. Launcher/widgets, NFC and public distribution are deferred until bedtime reliability is proven.
+This is a self-control tool, not tamper-proof lockdown. System exclusions, authorization revocation and uninstall remain limitations. NFC and public distribution remain deferred. Live Activity and wind-down prototypes are informational only, never enforcement or cleanup dependencies.
