@@ -162,7 +162,7 @@ struct ActiveLockView: View {
                     Text("The active lock has no trustworthy end time. Use Developer in Settings only if cleanup is required.")
                         .foregroundStyle(.orange)
                 }
-                LabeledContent("Origin", value: coordinator.activeLockTitle)
+                LabeledContent("Origin summary", value: coordinator.activeLockTitle)
                 LabeledContent("Active sessions", value: "\(coordinator.activeSessionCount)")
             }
 
