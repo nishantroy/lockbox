@@ -12,11 +12,8 @@ final class MonitorExtension: DeviceActivityMonitor {
 
     override func intervalDidStart(for activity: DeviceActivityName) {
         super.intervalDidStart(for: activity)
-        guard activity == activityName else {
-            if activity == manualActivityName { handleManualStart() }
-            return
-        }
-        handleScheduledStart()
+        if activity == activityName { handleScheduledStart() }
+        else if activity == manualActivityName { handleManualStart() }
     }
 
     override func intervalDidEnd(for activity: DeviceActivityName) {
@@ -28,65 +25,74 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func handleScheduledStart() {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
-        guard let registered = activityCenter.schedule(for: activityName), activityCenter.activities.contains(activityName) else {
-            try? record(store: store, operation: .callbackReceived, detail: "intervalDidStart ignored: no current OS registration.", succeeded: false)
-            return
-        }
+        var shouldStopStaleRegistration = false
         do {
             try store.withTransaction { context in
                 guard let configuration = context.document.configuration,
                       context.document.recurringEnabledIntent,
+                      let registered = activityCenter.schedule(for: activityName),
+                      activityCenter.activities.contains(activityName),
                       RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats),
                       let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: now).first(where: { now >= $0.start && now < $0.end }) else {
+                    // If recurrence was durably disabled, a callback from the
+                    // old route is the recovery opportunity after a crash
+                    // between the state commit and stopMonitoring. Preserve a
+                    // current scheduled end route, but remove an otherwise
+                    // stale daily registration.
+                    shouldStopStaleRegistration = !RuntimeLifecycle.scheduledRegistrationShouldRemain(context.document, at: now)
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: registration, intent, or current occurrence did not match."), succeeded: false)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Rejected scheduled start callback replayed current aggregate.")
                     return
                 }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
-                RuntimeLifecycle.pruneTerminalSessions(&context.document)
+                RuntimeLifecycle.pruneTerminalSessions(&context.document, at: now)
                 let savedSelection = try JSONDecoder().decode(FamilyActivitySelection.self, from: configuration.selectionData)
                 guard selectionSummary(savedSelection) == configuration.selectionSummary else {
                     context.document.record(RuntimeDiagnostic(operation: .policyApplyFailed, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidStart rejected: selection summary mismatch."), succeeded: false)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Invalid scheduled selection replayed current aggregate.")
                     return
                 }
                 if RuntimeLifecycle.shouldSuppressScheduledOccurrence(context.document, start: occurrence.start, end: occurrence.end) {
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: a durable activation fence deliberately deferred this already-open occurrence."), succeeded: true)
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: a durable activation fence deferred this already-open occurrence."), succeeded: true)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Suppressed scheduled start replayed current aggregate.")
                     return
                 }
                 if RuntimeSessionDecision.isReleased(sessions: context.document.sessions, releasedOccurrences: context.document.releasedOccurrences, origin: .scheduled, start: occurrence.start, end: occurrence.end) {
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidStart ignored: this stable occurrence was already released or expired."), succeeded: true)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Released scheduled start replayed current aggregate.")
                     return
                 }
                 let snapshot = RuntimePolicySnapshot(mode: configuration.mode, selectionSummary: configuration.selectionSummary, selectionData: configuration.selectionData)
                 try snapshot.validate()
                 if let existing = RuntimeSessionDecision.matchingScheduledOccurrence(sessions: context.document.sessions, start: occurrence.start, end: occurrence.end) {
-                    guard existing.state == .active || existing.state == .recoveryPending else { return }
+                    guard existing.state == .active || existing.state == .recoveryPending else {
+                        try replayCurrentPolicy(in: context, at: now, detail: "Terminal duplicate scheduled start replayed current aggregate.")
+                        return
+                    }
                 } else {
-                    let active = RuntimeSessionDecision.activeSessions(context.document.sessions, at: now)
-                    // A time-zone change or a duplicate callback must not make
-                    // a second scheduled session while a frozen one is live.
+                    let active = RuntimeCallbackDecision.currentAggregate(context.document, at: now)
+                    // A time-zone change or duplicate callback must not make a
+                    // second scheduled session while a frozen one is live.
                     guard !active.contains(where: { $0.origin == .scheduled }) else {
                         context.document.record(RuntimeDiagnostic(operation: .conflictRejected, observedAt: now, detail: "Scheduled start rejected: a different frozen scheduled occurrence is already active."), succeeded: false)
+                        try replayCurrentPolicy(in: context, at: now, detail: "Conflicting scheduled start replayed current aggregate.")
                         return
                     }
                     let session = RuntimeSession(origin: .scheduled, start: occurrence.start, end: occurrence.end, sourceRevision: configuration.revision, policy: snapshot)
                     context.document.sessions.append(session)
-                    do { _ = try RuntimeSessionDecision.composedMode(for: RuntimeSessionDecision.activeSessions(context.document.sessions, at: now)) }
+                    do { _ = try RuntimeSessionDecision.composedMode(for: RuntimeCallbackDecision.currentAggregate(context.document, at: now)) }
                     catch {
                         context.document.sessions.removeAll { $0.id == session.id }
                         context.document.record(RuntimeDiagnostic(operation: .conflictRejected, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Scheduled start rejected: mixed restriction modes cannot be safely composed."), succeeded: false)
+                        try replayCurrentPolicy(in: context, at: now, detail: "Mixed-mode scheduled start replayed current aggregate.")
                         return
                     }
                     if !active.isEmpty { context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "Scheduled occurrence composed with an existing same-mode session."), succeeded: true) }
                 }
-                context.document.policyIntent = .apply
                 context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidStart; stable occurrence committed."), succeeded: true)
-                context.document.record(RuntimeDiagnostic(operation: .policyApplyAttempted, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Frozen scheduled policy persisted before apply."))
-                try context.commit()
-                try applyEffectivePolicy(context.document, at: now)
-                context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: .policyApplied, observedAt: Date(), requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Frozen scheduled policy application attempted."), succeeded: true)
-                try context.commit()
+                try replayCurrentPolicy(in: context, at: now, detail: "Frozen scheduled policy reconciled.")
             }
+            if shouldStopStaleRegistration { activityCenter.stopMonitoring([activityName]) }
         } catch { try? record(store: store, operation: .policyApplyFailed, detail: error.localizedDescription, succeeded: false) }
     }
 
@@ -95,17 +101,40 @@ final class MonitorExtension: DeviceActivityMonitor {
         let now = Date()
         do {
             try store.withTransaction { context in
-                guard context.document.manualRegistrationActive || context.document.manualRegistrationIntent else { return }
-                guard let session = context.document.sessions.first(where: { $0.origin == .manual && $0.isEffective && now < $0.end }) else { return }
+                let routeExists = activityCenter.activities.contains(manualActivityName)
+                let registered = activityCenter.schedule(for: manualActivityName)
+                let session = context.document.sessions.first {
+                    $0.origin == .manual && $0.isEffective(at: now) && now < $0.end
+                }
+                let routeMatches = routeExists && registered != nil && session.map {
+                    RuntimeScheduleDecision.manualRegistrationMatches(
+                        end: $0.end,
+                        intervalEnd: registered!.intervalEnd,
+                        repeats: registered!.repeats
+                    )
+                } ?? false
+                // A callback from a stale route must not turn a manual session
+                // back into an enforceable one. Normalize the route flags before
+                // replaying the current aggregate, so an overlapping scheduled
+                // session is preserved while the unowned manual session waits
+                // for replacement registration (or is retired by the shared
+                // normalization rule).
+                _ = RuntimeLifecycle.normalizeManualRegistration(
+                    &context.document,
+                    at: now,
+                    routeExists: routeExists,
+                    routeMatches: routeMatches
+                )
+                guard routeMatches, let session else {
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidStart rejected: no matching finite OS end route; current aggregate replayed."), succeeded: false)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Unowned or mismatched manual start replayed current aggregate.")
+                    return
+                }
                 context.document.manualRegistrationActive = true
                 context.document.manualRegistrationIntent = false
-                context.document.policyIntent = .apply
                 context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidStart; stable manual session reconciled."), succeeded: true)
-                try context.commit()
-                try applyEffectivePolicy(context.document, at: now)
-                context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: .policyApplied, observedAt: Date(), requestedEnd: time(from: session.end), detail: "Finite manual policy application attempted."), succeeded: true)
-                try context.commit()
+                _ = session
+                try replayCurrentPolicy(in: context, at: now, detail: "Finite manual policy reconciled after OS start.")
             }
         } catch { try? record(store: store, operation: .policyApplyFailed, detail: error.localizedDescription, succeeded: false) }
     }
@@ -113,43 +142,39 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func handleScheduledEnd() {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
-        guard let registered = activityCenter.schedule(for: activityName), activityCenter.activities.contains(activityName) else {
-            try? record(store: store, operation: .callbackReceived, detail: "intervalDidEnd ignored: no current OS registration.", succeeded: false)
-            return
-        }
         do {
             var shouldStop = false
             var scheduleToRegister: RuntimeConfiguration?
             try store.withTransaction { context in
-                guard let configuration = context.document.configuration,
-                      RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats) else {
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidEnd ignored: registration no longer matches saved configuration."), succeeded: false)
-                    return
+                let configuration = context.document.configuration
+                if let configuration,
+                   let registered = activityCenter.schedule(for: activityName),
+                   activityCenter.activities.contains(activityName),
+                   !RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats) {
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidEnd registration no longer matches saved configuration; replaying current aggregate."), succeeded: false)
                 }
-                let prior = context.document.sessions
-                let expiredScheduled = prior.contains { $0.origin == .scheduled && ($0.state == .active || $0.state == .recoveryPending) && now >= $0.end }
-                guard expiredScheduled || context.document.policyIntent == .clear else {
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidEnd ignored: no scheduled occurrence is naturally finished."), succeeded: false)
-                    return
+
+                let expiredScheduled = context.document.sessions.contains {
+                    $0.origin == .scheduled && ($0.state == .active || $0.state == .recoveryPending) && now >= $0.end
                 }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
                 let activated = RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: now)
                 if activated && context.document.recurringEnabledIntent {
-                    // The old repeating registration has the old boundaries.
-                    // It is stopped after this transaction; its callback gate
-                    // still rejects a stale callback against the new rules.
+                    // The old repeating registration has old boundaries. Stop
+                    // it after this transaction, then register the new one.
                     scheduleToRegister = context.document.configuration
                 }
-                shouldStop = activated || (!context.document.recurringEnabledIntent && expiredScheduled)
-                let effective = enforcementSessions(in: context.document, at: now)
-                context.document.policyIntent = effective.isEmpty ? .clear : .apply
-                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidEnd; natural end wins over recovery."), succeeded: true)
-                context.document.record(RuntimeDiagnostic(operation: effective.isEmpty ? .policyClearAttempted : .policyApplyAttempted, observedAt: now, detail: "Natural-end reconciliation intent persisted before policy update."))
-                try context.commit()
-                try applyEffectivePolicy(context.document, at: now)
-                context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: effective.isEmpty ? .policyCleared : .policyApplied, observedAt: Date(), detail: effective.isEmpty ? "Scheduled occurrence expired and named policy was cleared." : "Remaining overlapping policy was retained."), succeeded: true)
-                try context.commit()
+                let hasLiveScheduled = RuntimeLifecycle.scheduledRegistrationShouldRemain(context.document, at: now)
+                // With recurrence disabled, a manual-only aggregate never
+                // keeps the daily OS route alive. Enabled recurrence retains
+                // the route even after this occurrence expires.
+                shouldStop = activated || !RuntimeLifecycle.scheduledRegistrationShouldRemain(
+                    context.document,
+                    at: now,
+                    replacementActivated: activated
+                )
+                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration?.start, requestedEnd: configuration?.end, revision: configuration?.revision, detail: expiredScheduled ? "intervalDidEnd; natural end wins over recovery." : "intervalDidEnd replayed idempotently; no natural scheduled expiry was required."), succeeded: true)
+                try replayCurrentPolicy(in: context, at: now, detail: "Scheduled-end reconciliation used the current aggregate.")
             }
             if shouldStop { activityCenter.stopMonitoring([activityName]) }
             if let configuration = scheduleToRegister {
@@ -183,29 +208,56 @@ final class MonitorExtension: DeviceActivityMonitor {
         let now = Date()
         do {
             try store.withTransaction { context in
-                guard context.document.sessions.contains(where: { $0.origin == .manual && ($0.state == .active || $0.state == .recoveryPending) && now >= $0.end }) else { return }
-                _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
-                context.document.manualRegistrationActive = false
-                context.document.manualRegistrationIntent = false
-                let effective = enforcementSessions(in: context.document, at: now)
-                context.document.policyIntent = effective.isEmpty ? .clear : .apply
-                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidEnd; natural finite end reconciled."), succeeded: true)
-                try context.commit()
-                try applyEffectivePolicy(context.document, at: now)
-                context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: effective.isEmpty ? .policyCleared : .policyApplied, observedAt: Date(), detail: effective.isEmpty ? "Finite manual policy cleared." : "Scheduled overlap retained after manual end."), succeeded: true)
-                try context.commit()
+                let shouldStop = RuntimeCallbackDecision.prepareManualEnd(&context.document, at: now)
+                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: shouldStop ? "manual intervalDidEnd reconciled terminal sessions." : "stale manual intervalDidEnd preserved the live manual route."), succeeded: true)
+                try replayCurrentPolicy(in: context, at: now, detail: "Manual-end reconciliation used the current aggregate.")
+                // Serialize route teardown with a possible new manual start.
+                if shouldStop { activityCenter.stopMonitoring([manualActivityName]) }
             }
         } catch { try? record(store: store, operation: .policyClearFailed, detail: error.localizedDescription, succeeded: false) }
     }
 
-    private func enforcementSessions(in state: RuntimeStoreDocument, at date: Date) -> [RuntimeSession] {
-        state.sessions.filter { $0.isEffective(at: date) && ($0.origin != .manual || state.manualRegistrationActive) }
+    /// Persist the current desired intent before applying Managed Settings.
+    /// This is the shared callback decision boundary: a clear intent from one
+    /// session is converted to apply when another current session remains.
+    private func replayCurrentPolicy(
+        in context: RuntimeStoreTransaction,
+        at date: Date,
+        detail: String
+    ) throws {
+        let intent = RuntimeCallbackDecision.preparePolicyReconciliation(&context.document, at: date)
+        context.document.record(RuntimeDiagnostic(
+            operation: intent == .clear ? .policyClearAttempted : .policyApplyAttempted,
+            observedAt: date,
+            detail: detail
+        ))
+        try context.commit()
+        try applyEffectivePolicy(context.document, at: date)
+        context.document.policyIntent = nil
+        context.document.record(RuntimeDiagnostic(
+            operation: intent == .clear ? .policyCleared : .policyApplied,
+            observedAt: Date(),
+            detail: intent == .clear ? "Current aggregate is empty; named policy cleared." : "Current aggregate policy applied.",
+        ), succeeded: true)
+        try context.commit()
     }
 
     private func applyEffectivePolicy(_ state: RuntimeStoreDocument, at date: Date) throws {
-        let sessions = enforcementSessions(in: state, at: date)
-        guard !sessions.isEmpty else { settingsStore.clearAllSettings(); return }
+        let sessions = RuntimeCallbackDecision.currentAggregate(state, at: date)
+        guard !sessions.isEmpty else {
+            if state.activeOwner == .prototypeTest && state.testLockActive && state.policyIntent == .apply {
+                let data = state.draft?.selectionData ?? state.configuration?.selectionData
+                let runtimeMode = state.draft?.mode ?? state.configuration?.mode
+                let expected = state.draft?.selectionSummary ?? state.configuration?.selectionSummary
+                guard let data, let runtimeMode, let expected else { throw RuntimeValidationError.corruptSharedData }
+                let saved = try JSONDecoder().decode(FamilyActivitySelection.self, from: data)
+                guard selectionSummary(saved) == expected else { throw RuntimeValidationError.corruptSharedData }
+                apply(plan: try RuntimePolicyPlan.make(mode: runtimeMode, selection: expected), selection: saved)
+            } else {
+                settingsStore.clearAllSettings()
+            }
+            return
+        }
         guard let mode = try RuntimeSessionDecision.composedMode(for: sessions) else { return }
         var selections: [FamilyActivitySelection] = []
         for session in sessions {
@@ -250,6 +302,21 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func record(store: SharedRuntimeStore, operation: RuntimeOperation, detail: String, succeeded: Bool) throws {
         try store.transaction { document in
             document.record(RuntimeDiagnostic(operation: operation, observedAt: Date(), detail: detail), succeeded: succeeded)
+        }
+    }
+
+    private func apply(plan: RuntimePolicyPlan, selection: FamilyActivitySelection) {
+        switch plan.mode {
+        case .blockSelected:
+            settingsStore.shield.applications = plan.blocksSelectedApplications ? selection.applicationTokens : nil
+            settingsStore.shield.applicationCategories = plan.blocksSelectedCategories ? .specific(selection.categoryTokens) : nil
+            settingsStore.shield.webDomains = plan.blocksSelectedWebDomains ? selection.webDomainTokens : nil
+            settingsStore.shield.webDomainCategories = nil
+        case .allowOnlySelected:
+            settingsStore.shield.applications = nil
+            settingsStore.shield.applicationCategories = .all(except: selection.applicationTokens)
+            settingsStore.shield.webDomains = nil
+            settingsStore.shield.webDomainCategories = .all(except: selection.webDomainTokens)
         }
     }
 

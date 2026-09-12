@@ -22,6 +22,41 @@ final class RuntimeLifecycleTests: XCTestCase {
         RuntimeSession(id: id, origin: origin, start: start, end: start.addingTimeInterval(duration), sourceRevision: 1, policy: policy(mode: mode, id: dataID))
     }
 
+    func testLateManualEndRetainsNewLiveRouteAndPolicy() throws {
+        let old = session(origin: .manual, duration: 900)
+        let live = session(origin: .manual, start: old.end, duration: 3600)
+        let now = live.start.addingTimeInterval(60)
+        var document = RuntimeStoreDocument()
+        document.sessions = [old, live]
+        document.manualRegistrationActive = true
+        document.policyIntent = .clear
+        XCTAssertFalse(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertTrue(document.manualRegistrationActive)
+        XCTAssertEqual(document.sessions[0].state, .expired)
+        XCTAssertEqual(document.policyIntent, .apply)
+        XCTAssertEqual(RuntimeCallbackDecision.currentAggregate(document, at: now).map(\.id), [live.id])
+        XCTAssertFalse(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        try document.validate()
+    }
+
+    func testManualEndReplaysTerminalClearAndPreservesScheduledOverlap() throws {
+        let manual = session(origin: .manual, duration: 900)
+        let scheduled = session(start: manual.start, duration: 3600)
+        let now = manual.end.addingTimeInterval(1)
+        var document = RuntimeStoreDocument()
+        document.sessions = [manual, scheduled]
+        document.manualRegistrationActive = true
+        XCTAssertTrue(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertFalse(document.manualRegistrationActive)
+        XCTAssertEqual(document.policyIntent, .apply)
+        XCTAssertEqual(RuntimeCallbackDecision.currentAggregate(document, at: now).map(\.id), [scheduled.id])
+        document.sessions.removeAll { $0.id == scheduled.id }
+        document.policyIntent = .clear
+        XCTAssertTrue(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertEqual(document.policyIntent, .clear)
+        try document.validate()
+    }
+
     func testOccurrenceIdentityIsStableAcrossDuplicateCallbacks() throws {
         let id = UUID()
         let original = session(id: id)
@@ -176,5 +211,327 @@ final class RuntimeLifecycleTests: XCTestCase {
         let recovered = try store.read()
         XCTAssertEqual(recovered.sessions.first?.id, committed.id)
         XCTAssertEqual(recovered.policyIntent, .apply)
+    }
+
+    func testManualTerminalClearIntentReplaysTheCurrentScheduledAggregate() throws {
+        let scheduled = session(id: UUID(), origin: .scheduled, start: Date(timeIntervalSinceReferenceDate: 1_000))
+        let manual = session(id: UUID(), origin: .manual, start: scheduled.start)
+        var document = RuntimeStoreDocument()
+        var releasedManual = manual
+        releasedManual.state = .released
+        document.sessions = [scheduled, releasedManual]
+        document.manualRegistrationActive = true
+        document.policyIntent = .clear
+
+        let intent = RuntimeCallbackDecision.preparePolicyReconciliation(&document, at: scheduled.start.addingTimeInterval(100))
+        XCTAssertEqual(intent, .apply)
+        XCTAssertEqual(document.policyIntent, .apply)
+        XCTAssertEqual(RuntimeReconciliation.action(document: document, at: scheduled.start.addingTimeInterval(100), authorized: true, registrationMatches: false), .applyScheduled)
+    }
+
+    func testTerminalManualIntentClearsWhenNoCurrentAggregateRemains() {
+        let manual = session(origin: .manual, start: Date(timeIntervalSinceReferenceDate: 1_000))
+        var document = RuntimeStoreDocument()
+        var released = manual
+        released.state = .released
+        document.sessions = [released]
+        document.manualRegistrationActive = true
+        document.policyIntent = .clear
+
+        XCTAssertEqual(RuntimeCallbackDecision.desiredPolicyIntent(document, at: released.start.addingTimeInterval(10)), .clear)
+        _ = RuntimeCallbackDecision.preparePolicyReconciliation(&document, at: released.start.addingTimeInterval(10))
+        XCTAssertEqual(document.policyIntent, .clear)
+    }
+
+    func testManualOnlyStateDoesNotKeepDailyRegistration() {
+        let manual = session(origin: .manual, start: Date(timeIntervalSinceReferenceDate: 1_000))
+        var document = RuntimeStoreDocument()
+        document.sessions = [manual]
+        document.manualRegistrationActive = true
+        XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: manual.start.addingTimeInterval(1)))
+    }
+
+    func testEnabledRecurrenceRetainsDailyRegistrationAfterNaturalExpiry() {
+        let configuration = RuntimeConfiguration(
+            revision: 1,
+            start: RuntimeTime(hour: 22, minute: 0),
+            end: RuntimeTime(hour: 7, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([1])
+        )
+        let ended = session(start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10)
+        var document = RuntimeStoreDocument()
+        document.configuration = configuration
+        document.recurringEnabledIntent = true
+        var expired = ended
+        expired.state = .expired
+        document.sessions = [expired]
+
+        // Natural expiry must stop shielding this occurrence without
+        // unregistering the repeating route for the next one.
+        XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: ended.end))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let nextStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertTrue(RuntimeScheduleDecision.accepts(.start, configuration: configuration, at: nextStart, calendar: calendar))
+    }
+
+    func testNaturalExpiryUsesInjectedCalendarForAbsoluteFence() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let end = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 7))!
+        var document = RuntimeStoreDocument()
+        document.sessions = [session(start: start, duration: end.timeIntervalSince(start))]
+
+        XCTAssertTrue(RuntimeLifecycle.expireNaturalSessions(&document, at: end, calendar: calendar))
+        XCTAssertEqual(document.scheduledActivationFence?.notBeforeOccurrenceStart, end)
+        let nextNight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(
+            document,
+            start: nextNight,
+            end: nextNight.addingTimeInterval(8 * 60 * 60),
+            calendar: calendar
+        ))
+    }
+
+    func testPendingReplacementIsTheOnlyNaturalEndRouteStop() {
+        let ended = session(start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10)
+        var document = RuntimeStoreDocument()
+        document.recurringEnabledIntent = true
+        document.sessions = [ended]
+        var expired = ended
+        expired.state = .expired
+        document.sessions = [expired]
+        document.pendingConfiguration = RuntimeConfiguration(
+            revision: 2,
+            start: RuntimeTime(hour: 23, minute: 0),
+            end: RuntimeTime(hour: 6, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([2])
+        )
+
+        // A queued replacement alone must not strand recurrence while a
+        // manual overlap prevents activation. The adapter stops only after the
+        // replacement has actually activated.
+        XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: ended.end))
+        XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(
+            document,
+            at: ended.end,
+            replacementActivated: true
+        ))
+        document.sessions = [ended]
+        XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(
+            document,
+            at: ended.start.addingTimeInterval(1)
+        ))
+    }
+
+    func testNaturalExpiryPreparesDurableClearBeforeTheEndRouteIsStopped() {
+        let scheduled = session(start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10)
+        var document = RuntimeStoreDocument()
+        document.sessions = [scheduled]
+        document.policyIntent = .apply
+
+        let intent = RuntimeCallbackDecision.preparePolicyReconciliation(&document, at: scheduled.end)
+        XCTAssertEqual(document.sessions.first?.state, .expired)
+        XCTAssertEqual(intent, .clear)
+        XCTAssertEqual(document.policyIntent, .clear)
+    }
+
+    func testMismatchedManualRouteIsPendingButNeverEnforceable() throws {
+        let manual = session(origin: .manual, start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10_000)
+        var document = RuntimeStoreDocument()
+        var pending = manual
+        pending.state = .recoveryPending
+        document.sessions = [pending]
+        document.recoveryCommitment = try RecoveryCommitment(sessionIDs: [manual.id], requestedAt: manual.start.addingTimeInterval(1))
+        document.manualRegistrationActive = true
+
+        XCTAssertTrue(RuntimeLifecycle.normalizeManualRegistration(&document, at: manual.start.addingTimeInterval(2), routeExists: true, routeMatches: false))
+        XCTAssertFalse(document.manualRegistrationActive)
+        XCTAssertTrue(document.manualRegistrationIntent)
+        XCTAssertTrue(RuntimeCallbackDecision.currentAggregate(document, at: manual.start.addingTimeInterval(2)).isEmpty)
+        XCTAssertNoThrow(try document.validate())
+    }
+
+    func testManualRouteLossExpiresManualTargetAndRepairsRecoveryRelationship() throws {
+        let scheduled = session(id: UUID(), origin: .scheduled, start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 10_000)
+        let manual = session(id: UUID(), origin: .manual, start: scheduled.start, duration: 10_000)
+        var document = RuntimeStoreDocument()
+        var pendingScheduled = scheduled
+        pendingScheduled.state = .recoveryPending
+        var pendingManual = manual
+        pendingManual.state = .recoveryPending
+        document.sessions = [pendingScheduled, pendingManual]
+        document.recoveryCommitment = try RecoveryCommitment(sessionIDs: [scheduled.id, manual.id], requestedAt: scheduled.start.addingTimeInterval(10))
+        document.manualRegistrationActive = true
+
+        XCTAssertTrue(RuntimeLifecycle.normalizeManualRegistration(&document, at: scheduled.start.addingTimeInterval(20), routeExists: false, routeMatches: false))
+        XCTAssertEqual(document.sessions.first(where: { $0.id == manual.id })?.state, .expired)
+        // The expired target remains named so the fixed recovery request stays
+        // auditable; only its pending-session relationship is removed.
+        XCTAssertEqual(document.recoveryCommitment?.sessionIDs, Set([scheduled.id, manual.id]))
+        XCTAssertFalse(RuntimeCallbackDecision.currentAggregate(document, at: scheduled.start.addingTimeInterval(20)).contains { $0.id == manual.id })
+        XCTAssertNoThrow(try document.validate())
+    }
+
+    func testPruningProtectsCommitmentTerminalTargetWhileRetainingBoundedHistory() throws {
+        let base = Date(timeIntervalSinceReferenceDate: 10_000)
+        var document = RuntimeStoreDocument()
+        for index in 0..<50 {
+            let old = session(id: UUID(), start: base.addingTimeInterval(Double(index)), duration: 1)
+            var released = old
+            released.state = .released
+            document.sessions.append(released)
+            document.releasedOccurrences.append(RuntimeReleasedOccurrence(sessionID: old.id, origin: .scheduled, start: old.start, end: old.end, releasedAt: old.end))
+        }
+        let protected = session(id: UUID(), start: base.addingTimeInterval(100), duration: 100)
+        var expiredProtected = protected
+        expiredProtected.state = .expired
+        let liveTarget = session(id: UUID(), start: base.addingTimeInterval(100), duration: 10_000)
+        var pendingLive = liveTarget
+        pendingLive.state = .recoveryPending
+        document.sessions += [expiredProtected, pendingLive]
+        document.releasedOccurrences.append(RuntimeReleasedOccurrence(sessionID: protected.id, origin: .scheduled, start: protected.start, end: protected.end, releasedAt: protected.end))
+        document.recoveryCommitment = try RecoveryCommitment(sessionIDs: [protected.id, liveTarget.id], requestedAt: protected.start.addingTimeInterval(1))
+
+        RuntimeLifecycle.pruneTerminalSessions(&document, at: base.addingTimeInterval(200))
+
+        XCTAssertLessThanOrEqual(document.sessions.count, 64)
+        XCTAssertNotNil(document.sessions.first(where: { $0.id == protected.id }))
+        XCTAssertNotNil(document.releasedOccurrences.first(where: { $0.sessionID == protected.id }))
+        XCTAssertNoThrow(try document.validate())
+    }
+
+    func testManualHistoryStressRetainsCurrentScheduledMarker() {
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        var document = RuntimeStoreDocument()
+        for index in 0..<80 {
+            let old = session(origin: .manual, start: Date(timeIntervalSinceReferenceDate: Double(index)), duration: 1)
+            var released = old
+            released.state = .released
+            document.sessions.append(released)
+            document.releasedOccurrences.append(RuntimeReleasedOccurrence(sessionID: old.id, origin: .manual, start: old.start, end: old.end, releasedAt: old.end))
+        }
+        let current = session(origin: .scheduled, start: now.addingTimeInterval(-60), duration: 600)
+        var releasedCurrent = current
+        releasedCurrent.state = .released
+        document.sessions.append(releasedCurrent)
+        document.releasedOccurrences.append(RuntimeReleasedOccurrence(sessionID: current.id, origin: .scheduled, start: current.start, end: current.end, releasedAt: now))
+
+        RuntimeLifecycle.pruneTerminalSessions(&document, at: now)
+
+        XCTAssertLessThanOrEqual(document.sessions.count, 64)
+        XCTAssertLessThanOrEqual(document.releasedOccurrences.count, 64)
+        XCTAssertTrue(RuntimeSessionDecision.isReleased(sessions: document.sessions, releasedOccurrences: document.releasedOccurrences, origin: .scheduled, start: current.start, end: current.end))
+        XCTAssertNoThrow(try document.validate())
+    }
+
+    func testAbsoluteFenceAllowsFutureSameDayStartButSuppressesCurrentReplacement() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let currentStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 0))!
+        let currentEnd = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 8))!
+        let nextSameDayStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        var document = RuntimeStoreDocument()
+        document.scheduledActivationFence = RuntimeScheduledActivationFence(date: currentStart, calendar: calendar)
+
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: currentStart, end: currentEnd, calendar: calendar))
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: nextSameDayStart, end: nextSameDayStart.addingTimeInterval(8 * 3600), calendar: calendar))
+    }
+
+    func testReleasedOvernightWindowFencesChangedBoundariesUntilFrozenEnd() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let end = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 7))!
+        let releasedAt = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 2))!
+        var document = RuntimeStoreDocument()
+        document.sessions = [session(origin: .scheduled, start: start, duration: end.timeIntervalSince(start))]
+        try RuntimeLifecycle.release(&document, sessionIDs: Set([document.sessions[0].id]), at: releasedAt)
+
+        let changedCurrent = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 0))!
+        let futureSameDay = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: changedCurrent, end: end, calendar: calendar))
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: futureSameDay, end: futureSameDay.addingTimeInterval(8 * 3600), calendar: calendar))
+    }
+
+    func testPendingWindowFenceWorksAfterMidnightAndAllowsNextNightSameDay() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let afterMidnight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 2))!
+        let pending = RuntimeConfiguration(
+            revision: 2,
+            start: RuntimeTime(hour: 0, minute: 0),
+            end: RuntimeTime(hour: 8, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([2])
+        )
+        var document = RuntimeStoreDocument()
+        document.pendingConfiguration = pending
+        XCTAssertTrue(RuntimeLifecycle.activatePendingConfigurationIfIdle(&document, at: afterMidnight, calendar: calendar))
+
+        let currentStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 0))!
+        let nextNight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: currentStart, end: currentStart.addingTimeInterval(8 * 3600), calendar: calendar))
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: nextNight, end: nextNight.addingTimeInterval(8 * 3600), calendar: calendar))
+    }
+
+    func testLegacyCivilFenceIsConservativelyPreservedOnDecode() throws {
+        let old: [String: Any] = ["year": 2026, "month": 9, "day": 10]
+        let data = try JSONSerialization.data(withJSONObject: old)
+        let fence = try JSONDecoder().decode(RuntimeScheduledActivationFence.self, from: data)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let sameDay = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let nextDay = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertTrue(fence.matches(sameDay, calendar: calendar))
+        XCTAssertFalse(fence.matches(nextDay, calendar: calendar))
+
+        // With the retained configuration, migration can turn the old civil
+        // marker into an absolute end cutoff and permit the next same-day
+        // night without dropping suppression for the old open window.
+        var migrated = RuntimeStoreDocument()
+        migrated.configuration = RuntimeConfiguration(
+            revision: 1,
+            start: RuntimeTime(hour: 0, minute: 0),
+            end: RuntimeTime(hour: 8, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([1])
+        )
+        migrated.scheduledActivationFence = fence
+        let oldWindowStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 0))!
+        let oldWindowEnd = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 8))!
+        let nextNightStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let nextNightEnd = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 6))!
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledOccurrence(migrated, start: oldWindowStart, end: oldWindowEnd, calendar: calendar))
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(migrated, start: nextNightStart, end: nextNightEnd, calendar: calendar))
+    }
+
+    func testPendingWindowFenceWorksBeforeMidnightAndAllowsNextNight() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let beforeMidnight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 23))!
+        let pending = RuntimeConfiguration(
+            revision: 2,
+            start: RuntimeTime(hour: 22, minute: 0),
+            end: RuntimeTime(hour: 8, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([2])
+        )
+        var document = RuntimeStoreDocument()
+        document.pendingConfiguration = pending
+        XCTAssertTrue(RuntimeLifecycle.activatePendingConfigurationIfIdle(&document, at: beforeMidnight, calendar: calendar))
+
+        let currentNight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let nextNight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 22))!
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: currentNight, end: currentNight.addingTimeInterval(10 * 3600), calendar: calendar))
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: nextNight, end: nextNight.addingTimeInterval(8 * 3600), calendar: calendar))
     }
 }
