@@ -38,7 +38,7 @@ struct SettingsView: View {
                 Stepper(value: Binding(
                     get: { coordinator.windDownLeadMinutes },
                     set: { coordinator.setWindDownLeadMinutes($0) }
-                ), in: 1...1_440, step: 5) {
+                ), in: coordinator.windDownLeadChoices, step: 5) {
                     Text("Lead time: \(coordinator.windDownLeadMinutes) minutes")
                 }
                 .disabled(!coordinator.windDownEnabled)
@@ -46,17 +46,27 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button("Allow notifications") {
-                    Task { await coordinator.requestWindDownAuthorization() }
+                    Task { await coordinator.requestWindDownNotificationAuthorization() }
                 }
-                Text(coordinator.ambientStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                LabeledContent("Notification access", value: coordinator.windDownAuthorizationStatus)
+                if coordinator.windDownEnabled {
+                    Text(coordinator.pendingWindDownNotificationCount == 0
+                         ? "No upcoming reminders are scheduled."
+                         : "\(coordinator.pendingWindDownNotificationCount) reminder(s) follow the saved bedtime start.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = coordinator.ambientError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section("Live Activity") {
                 Toggle("Show lock status when available", isOn: Binding(
-                    get: { coordinator.liveActivitiesEnabled },
-                    set: { coordinator.setLiveActivitiesEnabled($0) }
+                    get: { coordinator.liveActivityEnabled },
+                    set: { coordinator.setLiveActivityEnabled($0) }
                 ))
                 Text("Live Activity is a best-effort status surface. It never enforces, releases, or proves that restrictions changed; scheduled sessions may appear only after a later foreground update.")
                     .font(.footnote)

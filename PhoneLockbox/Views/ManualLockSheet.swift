@@ -4,9 +4,16 @@ struct ManualLockSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @State private var choice: ManualLockChoice = .thirtyMinutes
-    @State private var customEnd = Date(timeIntervalSinceNow: 30 * 60)
+    @State private var customEnd: Date
     @State private var attempted = false
-    private let referenceDate = Date()
+    @State private var referenceDate: Date
+
+    init(coordinator: ScreenTimeCoordinator) {
+        _coordinator = ObservedObject(wrappedValue: coordinator)
+        let capturedDate = Date()
+        _referenceDate = State(initialValue: capturedDate)
+        _customEnd = State(initialValue: capturedDate.addingTimeInterval(30 * 60))
+    }
 
     var body: some View {
         NavigationStack {
@@ -23,7 +30,7 @@ struct ManualLockSheet: View {
                         DatePicker(
                             "End",
                             selection: $customEnd,
-                            in: referenceDate.addingTimeInterval(15 * 60)...,
+                            in: coordinator.manualLockCustomRange(at: referenceDate),
                             displayedComponents: [.date, .hourAndMinute]
                         )
                     }
@@ -85,9 +92,8 @@ struct ManualLockSheet: View {
         case .oneHour:
             return coordinator.manualLockProposedEnd(after: 60 * 60, at: referenceDate)
         case .custom:
-            let duration = customEnd.timeIntervalSince(referenceDate)
-            guard duration.isFinite, duration >= 15 * 60 else { return nil }
-            return coordinator.manualLockProposedEnd(after: duration, at: referenceDate)
+            guard coordinator.manualLockCustomRange(at: referenceDate).contains(customEnd) else { return nil }
+            return customEnd
         }
     }
 }

@@ -134,12 +134,6 @@ final class ScreenTimeCoordinator: ObservableObject {
         return "Pending after the current lock: \(pending.mode == .blockSelected ? "block selected" : "allow only selected"), \(pending.start.displayValue)–\(pending.end.displayValue)"
     }
 
-    /// Backwards-compatible default preview for the existing UI. The parent
-    /// layout chooses the duration; this default is only 30 minutes.
-    var manualLockProposedEnd: Date? {
-        manualLockProposedEnd(after: Self.defaultManualDuration, at: currentDate())
-    }
-
     func manualLockProposedEnd(after duration: TimeInterval, at date: Date = Date()) -> Date? {
         RuntimeManualLockDecision.proposedEnd(after: duration, at: date)
     }

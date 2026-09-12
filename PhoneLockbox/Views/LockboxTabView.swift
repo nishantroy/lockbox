@@ -70,6 +70,17 @@ struct UnlockedLockboxView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @Binding var showingManualLock: Bool
 
+    private var windDownStatusMessage: String {
+        if let error = coordinator.ambientError { return error }
+        guard coordinator.windDownEnabled else { return "Reminders are off." }
+        guard coordinator.windDownAuthorizationStatus != "Not requested" else {
+            return "Allow notifications to schedule reminders from the saved bedtime start."
+        }
+        return coordinator.pendingWindDownNotificationCount == 0
+            ? "No upcoming reminders are scheduled."
+            : "\(coordinator.pendingWindDownNotificationCount) reminder(s) follow the saved bedtime start."
+    }
+
     var body: some View {
         Form {
             Section {
@@ -99,7 +110,7 @@ struct UnlockedLockboxView: View {
 
             Section("Wind-down") {
                 Label(coordinator.windDownEnabled ? "Enabled" : "Off", systemImage: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")
-                Text(coordinator.ambientStatusMessage)
+                Text(windDownStatusMessage)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 NavigationLink("Change wind-down settings") {
@@ -162,7 +173,7 @@ struct ActiveLockView: View {
                     Text("The active lock has no trustworthy end time. Use Developer in Settings only if cleanup is required.")
                         .foregroundStyle(.orange)
                 }
-                LabeledContent("Origin summary", value: coordinator.activeLockTitle)
+                LabeledContent("Origin summary", value: coordinator.activeLockOriginSummary)
                 LabeledContent("Active sessions", value: "\(coordinator.activeSessionCount)")
             }
 
@@ -202,6 +213,7 @@ struct OperationalWarning: View {
     }
 }
 
+@MainActor
 private enum AuthorizationStatusLabel {
     static func value(for coordinator: ScreenTimeCoordinator) -> String {
         if coordinator.isAuthorized { return "Authorized" }
@@ -214,6 +226,7 @@ private enum AuthorizationStatusLabel {
     }
 }
 
+@MainActor
 private enum SavedWindowFormatter {
     static func value(for coordinator: ScreenTimeCoordinator) -> String {
         let start = coordinator.savedStartComponents

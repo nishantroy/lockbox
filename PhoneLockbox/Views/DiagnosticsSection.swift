@@ -4,7 +4,7 @@ struct DiagnosticsSection: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
 
     var body: some View {
-        DisclosureGroup("Diagnostics") {
+        DisclosureGroup {
             LabeledContent("Registration", value: coordinator.registrationLabel)
             if let operation = coordinator.lastOperation.operation {
                 LabeledContent("Last operation", value: diagnosticLabel(operation))
