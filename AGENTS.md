@@ -8,6 +8,7 @@ Before implementation, read:
 3. `docs/reviews/2026-09-10-sol.md` — independent review of the prototype.
 4. `docs/development.md` — build/test/install commands and source map.
 5. `docs/overnight-build-plan.md` — approved feature scope, lane ownership and source-only delivery constraints.
+6. `docs/layout-v1-contract.md` — owner-approved tab structure, Lock now choices and UI/presentation boundaries.
 
 Product/interaction/technical plans specify intended behavior; they do not certify implementation. Update roadmap/QA evidence as work lands. Do not repeat already-passed owner QA without a relevant code change.
 
