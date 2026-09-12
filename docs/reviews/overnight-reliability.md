@@ -21,7 +21,7 @@ The latest Terra review reported one verified finding and no P0 findings:
 | --- | --- | --- |
 | **P1 normal scheduled end disables recurrence.** A natural end made `scheduledRegistrationShouldRemain` false, causing `handleScheduledEnd` to unregister the repeating daily route. | **Fixed.** The shared production decision now retains an enabled recurring route after terminal natural expiry. It still stops a disabled route, an explicitly activated replacement, or a manual-only route; a live scheduled session remains an end route when recurrence is disabled. `MonitorExtension.handleScheduledEnd` consumes this decision. | `testEnabledRecurrenceRetainsDailyRegistrationAfterNaturalExpiry`, `testPendingReplacementIsTheOnlyNaturalEndRouteStop`, and `testManualOnlyStateDoesNotKeepDailyRegistration` exercise the shared decision used by the monitor. |
 
-The requested reliability slices are also covered in the owned production paths: terminal manual callback replay uses the current aggregate; schedule-stop expiry persists the desired clear/apply intent before OS changes; finite manual route matching is shared by app and monitor; absolute activation fences retain the frozen end and allow a later same-day start; bounded pruning protects recovery targets/current scheduled markers; and reconciliation errors are not cleared by a no-op foreground pass. No device QA is claimed.
+The requested reliability slices are also covered in the owned production paths: terminal manual callback replay uses the current aggregate; schedule-stop expiry persists the desired clear/apply intent before OS changes and relaunch/late callbacks retire stale disabled daily routes; finite manual route matching is shared by app and monitor; absolute activation fences retain the frozen end and allow a later same-day start; bounded pruning protects recovery targets/current scheduled markers; and reconciliation errors are not cleared by a no-op foreground pass. No device QA is claimed.
 
 ## Validation
 
@@ -45,4 +45,5 @@ The tests include terminal manual clear with scheduled overlap, atomic natural e
 - Recurring-route retention, bounded-history hardening, and shared finite-route validation: `a1e578c` (`fix: retain recurring routes and bound runtime history`)
 - App/monitor finite-route checks and sticky reconciliation errors: `232d2e2` (`fix: verify manual end routes before shielding`)
 - Deferred replacement route retention: `0115c85` (`fix: keep recurring route through deferred replacement`)
+- Stale disabled-route reconciliation: `e758547` (`fix: reconcile stale disabled daily routes`)
 - This review record: pending documentation-only commit after recording the final validation.
