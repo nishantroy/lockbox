@@ -39,4 +39,8 @@ Install only when no current lock/QA interval is running. Preserve developer unl
 3. Start Live Activity demo, inspect Lock Screen/Dynamic Island, update recovery text and end demo. These operations must not change actual restrictions. This is presentation evidence, not enforcement evidence.
 4. Reliability changes require targeted subsequent validation: daily registration remains after natural end, next occurrence starts, manual end/recovery/relaunch behavior. Historical build-3 owner passes remain valid but do not certify this new runtime.
 
-No overnight/reboot, notification delivery, Live Activity behavior or physical enforcement is claimed for build 4 before owner testing.
+## Owner ambient QA — 2026-09-12
+
+Owner confirmed both the wind-down notification and Live Activity demos worked on the physical device. This validates the explicit demo paths only—not automatic linkage to bedtime sessions, background reliability or enforcement. Owner feedback: use a normal time picker, integrate wind-down semantics with the actual bedtime flow, and separate ordinary product UI from developer controls before further polish.
+
+No overnight/reboot or revised runtime enforcement behavior is claimed for build 4 yet.
