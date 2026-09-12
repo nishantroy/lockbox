@@ -3,6 +3,10 @@ import DeviceActivity
 import FamilyControls
 import ManagedSettings
 import Foundation
+import AmbientKit
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 
 @MainActor
 final class ScreenTimeCoordinator: ObservableObject {
@@ -17,7 +21,13 @@ final class ScreenTimeCoordinator: ObservableObject {
     private static let manualActivityName = DeviceActivityName("com.phone-lockbox.manual")
     private static let appGroupIdentifier = "group.com.phone-lockbox"
     private static let settingsName = ManagedSettingsStore.Name("phone-lockbox")
-    private static let minimumScheduledDuration: TimeInterval = 15 * 60
+    private static let minimumScheduledDuration = RuntimeManualLockDecision.minimumDuration
+    private static let defaultManualDuration: TimeInterval = 30 * 60
+    private static let maximumManualDuration = RuntimeManualLockDecision.maximumDuration
+    private static let ambientDefaultsPrefix = "phone-lockbox.ambient."
+    private static let windDownEnabledKey = ambientDefaultsPrefix + "wind-down-enabled"
+    private static let windDownLeadMinutesKey = ambientDefaultsPrefix + "wind-down-lead-minutes"
+    private static let liveActivityEnabledKey = ambientDefaultsPrefix + "live-activity-enabled"
 
     @Published private(set) var authorizationStatus: AuthorizationStatus = .notDetermined
     @Published private(set) var selection: FamilyActivitySelection
@@ -28,8 +38,25 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isConfigured: Bool
     @Published private(set) var recentDiagnostics: [RuntimeDiagnostic] = []
+    /// Ambient state is deliberately separate from enforcement errors. A
+    /// notification or Live Activity failure must never make a committed lock
+    /// appear released or roll back a lifecycle transaction.
+    @Published private(set) var windDownEnabled = false
+    @Published private(set) var windDownLeadMinutes = 30
+    @Published private(set) var liveActivityEnabled = true
+    @Published private(set) var ambientError: String?
+    @Published private(set) var pendingWindDownNotificationCount = 0
+    @Published private(set) var windDownAuthorizationStatus = "Not requested"
+    @Published private(set) var liveActivityStatus: String?
 
     private let activityCenter = DeviceActivityCenter()
+    private let clock: () -> Date
+#if canImport(UserNotifications)
+    private let windDownScheduler = WindDownNotificationScheduler()
+#endif
+#if canImport(ActivityKit)
+    private let liveActivity = LockboxLiveActivityAdapter()
+#endif
     private let settingsStore = ManagedSettingsStore(named: ManagedSettingsStore.Name("phone-lockbox"))
     private let store: SharedRuntimeStore?
     private var document: RuntimeStoreDocument
@@ -55,20 +82,46 @@ final class ScreenTimeCoordinator: ObservableObject {
     // MARK: R2/R3 coordinator contract
 
     var hasActiveLock: Bool {
-        !enforcementSessions(at: Date()).isEmpty
+        !enforcementSessions(at: currentDate()).isEmpty
     }
 
     var activeLockEnd: Date? {
-        enforcementSessions(at: Date()).map(\.end).max()
+        enforcementSessions(at: currentDate()).map(\.end).max()
     }
 
     var activeSessionCount: Int {
-        enforcementSessions(at: Date()).count
+        enforcementSessions(at: currentDate()).count
     }
+
+    var activeLockTitle: String {
+        RuntimeLockPresentation.activeTitle(for: enforcementSessions(at: currentDate()))
+    }
+
+    var activeLockOriginSummary: String {
+        RuntimeLockPresentation.originSummary(for: enforcementSessions(at: currentDate()))
+    }
+
+    var nextScheduledStart: Date? {
+        scheduledOccurrence(at: currentDate())?.start
+    }
+
+    var nextScheduledEnd: Date? {
+        scheduledOccurrence(at: currentDate())?.end
+    }
+
+    /// A compact summary for the parent UI. It is derived from the saved
+    /// configuration on every read, rather than cached across clock or edits.
+    var compactSavedSummary: String {
+        guard let configuration = document.configuration else { return "No saved bedtime rules" }
+        let mode = configuration.mode == .blockSelected ? "Block selected" : "Allow only selected"
+        return "\(mode) · \(configuration.selectionSummary.totalCount) selected · \(configuration.start.displayValue)–\(configuration.end.displayValue)"
+    }
+
+    var savedRulesSummary: String { compactSavedSummary }
 
     var hasRecoveryRequest: Bool {
         guard let commitment = document.recoveryCommitment else { return false }
-        return !commitment.sessionIDs.intersection(Set(enforcementSessions(at: Date()).map(\.id))).isEmpty
+        return !commitment.sessionIDs.intersection(Set(enforcementSessions(at: currentDate()).map(\.id))).isEmpty
     }
 
     var recoveryEligibleAt: Date? {
@@ -81,10 +134,18 @@ final class ScreenTimeCoordinator: ObservableObject {
         return "Pending after the current lock: \(pending.mode == .blockSelected ? "block selected" : "allow only selected"), \(pending.start.displayValue)–\(pending.end.displayValue)"
     }
 
-    /// Lock now is intentionally finite. The displayed end is resolved from the
-    /// configured daily window, so there is no caller-controlled indefinite path.
+    /// Backwards-compatible default preview for the existing UI. The parent
+    /// layout chooses the duration; this default is only 30 minutes.
     var manualLockProposedEnd: Date? {
-        proposedManualEnd(at: Date())
+        manualLockProposedEnd(after: Self.defaultManualDuration, at: currentDate())
+    }
+
+    func manualLockProposedEnd(after duration: TimeInterval, at date: Date = Date()) -> Date? {
+        RuntimeManualLockDecision.proposedEnd(after: duration, at: date)
+    }
+
+    func manualLockCustomRange(at date: Date = Date()) -> ClosedRange<Date> {
+        RuntimeManualLockDecision.customEndRange(at: date)
     }
 
     func canConfirmRecovery(at date: Date) -> Bool {
@@ -123,6 +184,7 @@ final class ScreenTimeCoordinator: ObservableObject {
             reconcileRuntime()
             refreshDocument()
             clearLastErrorAfterSuccessfulOperation()
+            scheduleLiveActivityReconciliation()
         } catch {
             reconcileRuntime()
             refreshDocument(); lastError = error.localizedDescription
@@ -146,6 +208,7 @@ final class ScreenTimeCoordinator: ObservableObject {
             }
             reconcileRuntime()
             refreshDocument(); clearLastErrorAfterSuccessfulOperation()
+            scheduleLiveActivityReconciliation()
         } catch {
             reconcileRuntime()
             refreshDocument(); lastError = error.localizedDescription
@@ -195,6 +258,7 @@ final class ScreenTimeCoordinator: ObservableObject {
             if shouldStopManualMonitoring { activityCenter.stopMonitoring([Self.manualActivityName]) }
             refreshDocument()
             clearLastErrorAfterSuccessfulOperation()
+            scheduleLiveActivityReconciliation()
             if shouldRegisterPending { registerConfiguredSchedule() }
         } catch {
             // A confirmation raced the natural end: reconcile expiry even though
@@ -209,19 +273,20 @@ final class ScreenTimeCoordinator: ObservableObject {
         guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
         guard !hasRecoveryRequest else { lastError = "Cancel the pending recovery request before starting another lock."; return }
         guard !testScheduleActive, !document.legacyRegistrationNeedsReview else { lastError = "Finish or resolve the developer restriction before starting a committed lock."; return }
-        let proposedEnd = proposedManualEnd(at: Date())
-        if let expectedEnd, proposedEnd != expectedEnd {
-            lastError = "The manual lock preview changed. Review it and confirm again."
-            return
-        }
-        guard let end = expectedEnd ?? proposedEnd, end.timeIntervalSinceNow >= Self.minimumScheduledDuration else {
+
+        // This is the transaction clock. An explicit expected end is a frozen
+        // absolute boundary; it is never replaced by a freshly recomputed
+        // bedtime end or by the current clock.
+        let startedAt = currentDate()
+        let end = expectedEnd ?? RuntimeManualLockDecision.proposedEnd(after: Self.defaultManualDuration, at: startedAt)
+        guard let end, RuntimeManualLockDecision.accepts(expectedEnd: end, startedAt: startedAt) else {
             lastError = RuntimeValidationError.manualLockUnavailable.localizedDescription
             return
         }
+
         var sessionID: UUID?
         var manualRegistered = false
         do {
-            let startedAt = Date()
             try store.withTransaction { context in
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: startedAt)
                 guard context.document.recoveryCommitment == nil,
@@ -230,7 +295,6 @@ final class ScreenTimeCoordinator: ObservableObject {
                       !context.document.legacyRegistrationNeedsReview else {
                     throw RuntimeValidationError.invalidConfiguration("Finish the current recovery or developer restriction before starting another lock.")
                 }
-                let active = enforcementSessions(in: context.document, at: startedAt)
                 guard !context.document.sessions.contains(where: { $0.origin == .manual && $0.isEffective(at: startedAt) }) else {
                     throw RuntimeValidationError.invalidConfiguration("A finite manual lock is already active; it cannot be shortened or replaced.")
                 }
@@ -238,14 +302,38 @@ final class ScreenTimeCoordinator: ObservableObject {
                 let savedSelection = try JSONDecoder().decode(FamilyActivitySelection.self, from: configuration.selectionData)
                 guard selectionSummary(savedSelection) == configuration.selectionSummary else { throw RuntimeValidationError.corruptSharedData }
                 let policy = try RuntimePolicySnapshot(mode: configuration.mode, selectionSummary: configuration.selectionSummary, selectionData: configuration.selectionData).validated()
-                guard let currentEnd = RuntimeOccurrenceResolver.currentOrNext(start: configuration.start, end: configuration.end, enabled: true, after: startedAt)?.end,
-                      currentEnd == end else { throw RuntimeValidationError.invalidConfiguration("The manual lock preview changed. Review it and confirm again.") }
-                if !active.isEmpty {
-                    guard try active.allSatisfy({ try policiesAreSemanticallyEqual($0.policy, policy) }) else {
-                        throw RuntimeValidationError.overlapUnsupported
+
+                // Check both current sessions and every future saved bedtime
+                // occurrence intersecting the manual interval. Same-policy
+                // overlap is composed by the runtime; mixed policy overlap is
+                // rejected before the first Managed Settings write.
+                let active = enforcementSessions(in: context.document, at: startedAt)
+                guard try active.allSatisfy({ try policiesAreSemanticallyEqual($0.policy, policy) }) else {
+                    throw RuntimeValidationError.overlapUnsupported
+                }
+                if context.document.recurringEnabledIntent {
+                    let overlaps = RuntimeManualLockDecision.overlappingScheduledOccurrences(
+                        configuration: configuration,
+                        intervalStart: startedAt,
+                        intervalEnd: end,
+                        calendar: Calendar.current
+                    )
+                    for occurrence in overlaps {
+                        if RuntimeLifecycle.shouldSuppressScheduledOccurrence(
+                            context.document,
+                            start: occurrence.start,
+                            end: occurrence.end
+                        ) { continue }
+                        let scheduledPolicy = context.document.sessions.first(where: {
+                            $0.origin == .scheduled && $0.start == occurrence.start && $0.end == occurrence.end
+                        })?.policy ?? policy
+                        guard try policiesAreSemanticallyEqual(scheduledPolicy, policy) else {
+                            throw RuntimeValidationError.overlapUnsupported
+                        }
                     }
                 }
-                RuntimeLifecycle.pruneTerminalSessions(&context.document)
+
+                RuntimeLifecycle.pruneTerminalSessions(&context.document, at: startedAt)
                 let session = RuntimeSession(origin: .manual, start: startedAt, end: end, sourceRevision: configuration.revision, policy: policy)
                 sessionID = session.id
                 context.document.sessions.append(session)
@@ -259,11 +347,14 @@ final class ScreenTimeCoordinator: ObservableObject {
                 try activityCenter.startMonitoring(Self.manualActivityName, during: schedule)
                 guard let registered = activityCenter.schedule(for: Self.manualActivityName),
                       activityCenter.activities.contains(Self.manualActivityName),
-                      RuntimeScheduleDecision.manualRegistrationMatches(
+                      RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                          start: startedAt,
                           end: end,
+                          intervalStart: registered.intervalStart,
                           intervalEnd: registered.intervalEnd,
                           repeats: registered.repeats,
-                          calendar: Calendar.current
+                          calendar: Calendar.current,
+                          tolerance: RuntimeManualLockDecision.registrationClockTolerance
                       ) else {
                     throw RuntimeValidationError.invalidConfiguration("The OS did not retain the expected finite manual end route.")
                 }
@@ -273,10 +364,11 @@ final class ScreenTimeCoordinator: ObservableObject {
                 try context.commit()
                 try applyEffectivePolicy(context.document, at: startedAt)
                 context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: .policyApplied, observedAt: Date(), detail: "Finite manual policy application attempted; OS-managed end is registered."), succeeded: true)
+                context.document.record(RuntimeDiagnostic(operation: .policyApplied, observedAt: currentDate(), detail: "Finite manual policy application attempted; OS-managed end is registered."), succeeded: true)
                 try context.commit()
             }
             refreshDocument(); clearLastErrorAfterSuccessfulOperation()
+            scheduleLiveActivityReconciliation()
         } catch {
             if !manualRegistered {
                 // A rejected second manual lock has no sessionID and must not
@@ -287,9 +379,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                         document.sessions.removeAll { $0.id == sessionID }
                         document.manualRegistrationIntent = false
                         document.manualRegistrationActive = false
-                        let remaining = enforcementSessions(in: document, at: Date())
+                        let remaining = enforcementSessions(in: document, at: currentDate())
                         document.policyIntent = remaining.isEmpty ? .clear : .apply
-                        document.record(RuntimeDiagnostic(operation: .registrationFailed, observedAt: Date(), detail: error.localizedDescription), succeeded: false)
+                        document.record(RuntimeDiagnostic(operation: .registrationFailed, observedAt: currentDate(), detail: error.localizedDescription), succeeded: false)
                     }
                     reconcileRuntime()
                 }
@@ -297,7 +389,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 // The OS release route was accepted. Retain cleanup ownership
                 // and durable apply intent; never clear the named store here.
                 try? store.transaction { document in
-                    document.record(RuntimeDiagnostic(operation: .policyApplyFailed, observedAt: Date(), detail: error.localizedDescription), succeeded: false)
+                    document.record(RuntimeDiagnostic(operation: .policyApplyFailed, observedAt: currentDate(), detail: error.localizedDescription), succeeded: false)
                 }
                 reconcilePendingManualRegistration()
                 reconcileRuntime()
@@ -373,7 +465,13 @@ final class ScreenTimeCoordinator: ObservableObject {
         return "Not registered"
     }
 
-    init() {
+    init(clock: @escaping () -> Date = { Date() }) {
+        self.clock = clock
+        let defaults = UserDefaults.standard
+        windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
+        let storedLead = defaults.object(forKey: Self.windDownLeadMinutesKey) as? Int ?? 30
+        windDownLeadMinutes = min(max(storedLead, 1), 1_440)
+        liveActivityEnabled = defaults.object(forKey: Self.liveActivityEnabledKey) as? Bool ?? true
         var loadedStore: SharedRuntimeStore?
         var loadedDocument = RuntimeStoreDocument()
         var loadError: String?
@@ -408,6 +506,8 @@ final class ScreenTimeCoordinator: ObservableObject {
         retryInterruptedDailyRegistration()
         reconcilePendingManualRegistration()
         reconcileRuntime()
+        scheduleAmbientReconciliation()
+        scheduleLiveActivityReconciliation()
     }
 
     func refreshAuthorization() {
@@ -419,6 +519,8 @@ final class ScreenTimeCoordinator: ObservableObject {
         reconcilePendingManualRegistration()
         reconcileRuntime()
         refreshDocument()
+        scheduleAmbientReconciliation()
+        scheduleLiveActivityReconciliation()
     }
 
     func requestAuthorization() async {
@@ -432,6 +534,196 @@ final class ScreenTimeCoordinator: ObservableObject {
             lastError = error.localizedDescription
         }
     }
+
+    // MARK: Ambient preferences
+
+    /// Valid lead values are expressed in minutes so the settings surface can
+    /// offer 1 minute through 24 hours without maintaining another bedtime.
+    var windDownLeadChoices: ClosedRange<Int> { 1...1_440 }
+
+    func setWindDownEnabled(_ enabled: Bool) {
+        windDownEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.windDownEnabledKey)
+        scheduleAmbientReconciliation()
+    }
+
+    func setWindDownLeadMinutes(_ minutes: Int) {
+        guard windDownLeadChoices.contains(minutes) else {
+            ambientError = "Wind-down lead time must be between 1 minute and 24 hours."
+            return
+        }
+        windDownLeadMinutes = minutes
+        UserDefaults.standard.set(minutes, forKey: Self.windDownLeadMinutesKey)
+        scheduleAmbientReconciliation()
+    }
+
+    func setLiveActivityEnabled(_ enabled: Bool) {
+        liveActivityEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.liveActivityEnabledKey)
+        scheduleLiveActivityReconciliation()
+    }
+
+    /// Permission is requested only from this explicit host action. Enabling
+    /// wind-down or foregrounding the app never calls the system prompt.
+    func requestWindDownNotificationAuthorization() async {
+#if canImport(UserNotifications)
+        do {
+            let result = try await windDownScheduler.requestAuthorization()
+            windDownAuthorizationStatus = windDownAuthorizationLabel(result)
+            if result == .denied {
+                ambientError = "Notification permission was denied; wind-down reminders are not scheduled."
+            } else {
+                ambientError = nil
+                await reconcileWindDownNotifications()
+            }
+        } catch {
+            ambientError = "Wind-down notification permission failed: \(error.localizedDescription)"
+            await refreshWindDownStatus()
+        }
+#else
+        ambientError = "Wind-down notifications are unavailable on this platform."
+#endif
+    }
+
+    /// Foreground/relaunch reconciliation for the saved ambient preferences.
+    /// It only touches this feature's notification namespace and has no effect
+    /// on Screen Time registration or lifecycle state.
+    func reconcileAmbientPreferences() {
+        scheduleAmbientReconciliation()
+    }
+
+    private func scheduleAmbientReconciliation() {
+#if canImport(UserNotifications)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.reconcileWindDownNotifications()
+        }
+#endif
+    }
+
+#if canImport(UserNotifications)
+    private func reconcileWindDownNotifications() async {
+        let authorization = await windDownScheduler.authorization()
+        windDownAuthorizationStatus = windDownAuthorizationLabel(authorization)
+
+        guard windDownEnabled else {
+            await windDownScheduler.disable()
+            await refreshWindDownStatus()
+            ambientError = nil
+            return
+        }
+        guard let configuration = document.configuration else {
+            await windDownScheduler.disable()
+            await refreshWindDownStatus()
+            ambientError = "Wind-down needs a saved bedtime schedule."
+            return
+        }
+        guard document.recurringEnabledIntent else {
+            await windDownScheduler.disable()
+            await refreshWindDownStatus()
+            ambientError = "Wind-down is waiting for the bedtime schedule to be registered."
+            return
+        }
+
+        do {
+            let bedtime = try AmbientLocalTime(hour: configuration.start.hour, minute: configuration.start.minute)
+            let lead = try WindDownLeadOffset(minutes: windDownLeadMinutes)
+            let current = enforcementSessions(at: currentDate()).first(where: { $0.isEffective(at: currentDate()) })
+            let activeBoundary = try current.map { try AmbientSessionBoundary(start: $0.start, end: $0.end) }
+            let plan = try WindDownPlanner.plan(
+                configuration: WindDownConfiguration(enabled: true, bedtime: bedtime, lead: lead),
+                now: currentDate(),
+                calendar: .autoupdatingCurrent,
+                activeSession: activeBoundary,
+                limit: WindDownConfiguration.maximumScheduledOccurrences
+            )
+            let outcome = try await windDownScheduler.replace(occurrences: plan)
+            switch outcome {
+            case .replaced:
+                ambientError = nil
+            case .failed(let requested, let added, let restored):
+                ambientError = restored
+                    ? "Wind-down was not changed: only \(added) of \(requested) reminders could be added; the previous schedule was restored."
+                    : "Wind-down reminders partially changed (\(added) of \(requested)); open Phone Lockbox to reconcile."
+            }
+        } catch {
+            // Ambient errors are intentionally not assigned to lastError: a
+            // reminder problem cannot certify or invalidate enforcement.
+            ambientError = "Wind-down not scheduled: \(error.localizedDescription)"
+        }
+        await refreshWindDownStatus()
+    }
+
+    private func refreshWindDownStatus() async {
+        let authorization = await windDownScheduler.authorization()
+        windDownAuthorizationStatus = windDownAuthorizationLabel(authorization)
+        pendingWindDownNotificationCount = await windDownScheduler.pendingOwnedRequestCount()
+    }
+
+    private func windDownAuthorizationLabel(_ authorization: WindDownNotificationScheduler.Authorization) -> String {
+        switch authorization {
+        case .notDetermined: return "Not requested"
+        case .denied: return "Denied"
+        case .authorized: return "Authorized"
+        case .provisional: return "Provisional"
+        case .ephemeral: return "Ephemeral"
+        }
+    }
+#endif
+
+#if canImport(ActivityKit)
+    private func scheduleLiveActivityReconciliation() {
+        Task { @MainActor [weak self] in
+            await self?.reconcileLiveActivities()
+        }
+    }
+
+    private func reconcileLiveActivities() async {
+        if !liveActivityEnabled {
+            _ = await liveActivity.endAllAppOwnedActivities()
+            liveActivityStatus = "Live Activities disabled"
+            return
+        }
+
+        let now = currentDate()
+        let active = enforcementSessions(at: now)
+        for session in active {
+            let status: AmbientLiveActivityStatus = session.state == .recoveryPending ? .recoveryPending : .plannedSession
+            let result = await liveActivity.reconcile(
+                sessionID: session.id.uuidString,
+                fixedEnd: session.end,
+                status: status,
+                now: now
+            )
+            recordLiveActivityResult(result)
+        }
+
+        // Only terminal states observed in the durable runtime may end the
+        // corresponding activity. A missing callback or a merely past clock
+        // does not get translated into "unlocked" copy here.
+        for session in document.sessions where session.state == .released || session.state == .expired {
+            let result: AmbientLiveActivityOutcome
+            if session.state == .released {
+                result = await liveActivity.endAfterObservedRelease(sessionID: session.id.uuidString)
+            } else {
+                result = await liveActivity.endAfterObservedExpiry(sessionID: session.id.uuidString)
+            }
+            recordLiveActivityResult(result)
+        }
+    }
+
+    private func recordLiveActivityResult(_ result: AmbientLiveActivityOutcome) {
+        switch result {
+        case .started: liveActivityStatus = "Live Activity started"
+        case .updated: liveActivityStatus = "Live Activity updated"
+        case .ended: liveActivityStatus = "Live Activity ended after runtime reconciliation"
+        case .unavailable(let reason): liveActivityStatus = "Live Activity unavailable: \(reason.rawValue)"
+        case .failed(let message): liveActivityStatus = "Live Activity failed: \(message)"
+        }
+    }
+#else
+    private func scheduleLiveActivityReconciliation() {}
+#endif
 
     // MARK: Draft and saved schedule
 
@@ -520,8 +812,12 @@ final class ScreenTimeCoordinator: ObservableObject {
                 }
             }
             refreshDocument()
-            if shouldRegister { registerConfiguredSchedule() }
-            else { clearLastErrorAfterSuccessfulOperation() }
+            if shouldRegister {
+                registerConfiguredSchedule()
+            } else {
+                clearLastErrorAfterSuccessfulOperation()
+                scheduleAmbientReconciliation()
+            }
         } catch { lastError = error.localizedDescription }
     }
 
@@ -560,6 +856,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 document.record(RuntimeDiagnostic(operation: .registrationSucceeded, observedAt: Date(), requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "OS accepted monitoring; callback delivery is not independently verified."), succeeded: true)
             }
             refreshDocument(); reconcileRegistration(); clearLastErrorAfterSuccessfulOperation()
+            scheduleAmbientReconciliation()
         } catch {
             guard replacingRegistration else { refreshDocument(); reconcileRegistration(); lastError = error.localizedDescription; return }
             activityCenter.stopMonitoring([Self.activityName])
@@ -569,6 +866,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 document.record(RuntimeDiagnostic(operation: .registrationFailed, observedAt: Date(), requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: error.localizedDescription), succeeded: false)
             }
             refreshDocument(); reconcileRegistration(); lastError = error.localizedDescription
+            scheduleAmbientReconciliation()
         }
     }
 
@@ -652,6 +950,7 @@ final class ScreenTimeCoordinator: ObservableObject {
             }
             if shouldStopMonitoring { activityCenter.stopMonitoring([Self.activityName]) }
             refreshDocument(); clearLastErrorAfterSuccessfulOperation()
+            scheduleAmbientReconciliation()
         } catch { refreshDocument(); lastError = error.localizedDescription }
     }
 
@@ -749,6 +1048,7 @@ final class ScreenTimeCoordinator: ObservableObject {
             reconciliationError = "State reconciliation needs attention: \(error.localizedDescription)"
             lastError = reconciliationError
         }
+        scheduleLiveActivityReconciliation()
     }
 
     private func retryInterruptedDailyRegistration() {
@@ -771,11 +1071,14 @@ final class ScreenTimeCoordinator: ObservableObject {
             try store.transaction { context in
                 if let registered,
                    let session = context.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }) {
-                    routeMatches = RuntimeScheduleDecision.manualRegistrationMatches(
+                    routeMatches = RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                        start: session.start,
                         end: session.end,
+                        intervalStart: registered.intervalStart,
                         intervalEnd: registered.intervalEnd,
                         repeats: registered.repeats,
-                        calendar: Calendar.current
+                        calendar: Calendar.current,
+                        tolerance: RuntimeManualLockDecision.registrationClockTolerance
                     )
                 }
                 let changed = RuntimeLifecycle.normalizeManualRegistration(
@@ -828,18 +1131,21 @@ final class ScreenTimeCoordinator: ObservableObject {
         do {
             // The original start may be in the past after a crash. The session
             // end remains frozen, while the OS registration starts from now.
-            try activityCenter.startMonitoring(Self.manualActivityName, during: manualSchedule(start: Date(), end: pending.end))
-            try store.transaction { document in
-                guard document.sessions.contains(where: {
+            let replayStart = currentDate()
+            try activityCenter.startMonitoring(Self.manualActivityName, during: manualSchedule(start: replayStart, end: pending.end))
+            try store.transaction { document in                guard document.sessions.contains(where: {
                     $0.id == pending.id && ($0.state == .active || $0.state == .recoveryPending) && $0.isEffective(at: Date())
                 }),
                 let registered = activityCenter.schedule(for: Self.manualActivityName),
                 activityCenter.activities.contains(Self.manualActivityName),
-                RuntimeScheduleDecision.manualRegistrationMatches(
+                RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                    start: replayStart,
                     end: pending.end,
+                    intervalStart: registered.intervalStart,
                     intervalEnd: registered.intervalEnd,
                     repeats: registered.repeats,
-                    calendar: Calendar.current
+                    calendar: Calendar.current,
+                    tolerance: RuntimeManualLockDecision.registrationClockTolerance
                 ) else {
                     throw RuntimeValidationError.invalidConfiguration("The OS did not retain the expected finite manual end route.")
                 }
@@ -942,20 +1248,29 @@ final class ScreenTimeCoordinator: ObservableObject {
     private func hasAnyCommittedSession(in state: RuntimeStoreDocument, at date: Date) -> Bool { state.sessions.contains { $0.isEffective(at: date) } }
     private func hasAnyCommittedSession(at date: Date) -> Bool { hasAnyCommittedSession(in: document, at: date) }
 
-    private func proposedManualEnd(at date: Date) -> Date? {
+    private func scheduledOccurrence(at date: Date) -> RuntimeOccurrenceResolver.Occurrence? {
         guard let configuration = document.configuration else { return nil }
-        let occurrence = RuntimeOccurrenceResolver.currentOrNext(start: configuration.start, end: configuration.end, enabled: true, after: date)
-        guard let end = occurrence?.end, end > date, end.timeIntervalSince(date) >= Self.minimumScheduledDuration else { return nil }
-        return end
+        let hasCurrentScheduled = document.sessions.contains {
+            $0.origin == .scheduled && $0.isEffective(at: date)
+        }
+        guard document.recurringEnabledIntent || hasCurrentScheduled else { return nil }
+        return RuntimeOccurrenceResolver.currentOrNext(
+            start: configuration.start,
+            end: configuration.end,
+            enabled: true,
+            after: date,
+            calendar: Calendar.current
+        )
     }
+
+    private func currentDate() -> Date { clock() }
 
     private func manualSchedule(start: Date, end: Date) -> DeviceActivitySchedule {
         let calendar = Calendar.current
-        // The persisted session end is authoritative. Do not add a minute to
-        // the registration start: doing so can turn an otherwise valid 15+
-        // minute session into an OS-rejected interval.
-        let startComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: start)
-        let endComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: end)
+        // Persisted absolute boundaries are authoritative. Include seconds so
+        // a 30-minute lock cannot be silently shortened by minute truncation.
+        let startComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: start)
+        let endComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: end)
         return DeviceActivitySchedule(intervalStart: startComponents, intervalEnd: endComponents, repeats: false)
     }
 

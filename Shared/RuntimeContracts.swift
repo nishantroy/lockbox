@@ -1,5 +1,111 @@
 import Foundation
 
+/// Pure bounds and overlap decisions for the finite Lock now route. The
+/// coordinator uses these values before it persists or applies a policy so a
+/// UI preview can never turn into an indefinite restriction.
+public enum RuntimeManualLockDecision {
+    public static let minimumDuration: TimeInterval = 15 * 60
+    public static let maximumDuration: TimeInterval = 7 * 24 * 60 * 60
+    /// DeviceActivity can round a returned component boundary by a second on
+    /// some OS versions. This is only used to compare the frozen registration
+    /// with the already committed absolute end; it is not a duration grace.
+    public static let registrationClockTolerance: TimeInterval = 1
+
+    public static func proposedEnd(after duration: TimeInterval, at date: Date) -> Date? {
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              duration.isFinite,
+              duration >= minimumDuration,
+              duration <= maximumDuration else { return nil }
+        let end = date.addingTimeInterval(duration)
+        guard end.timeIntervalSinceReferenceDate.isFinite, end > date else { return nil }
+        return end
+    }
+
+    public static func customEndRange(at date: Date) -> ClosedRange<Date> {
+        date.addingTimeInterval(minimumDuration)...date.addingTimeInterval(maximumDuration)
+    }
+
+    /// Validates the caller's frozen absolute end against the actual
+    /// transaction start. It intentionally does not compare against a newly
+    /// computed preview: a few seconds of UI/clock drift must not replace the
+    /// confirmed absolute boundary.
+    public static func accepts(expectedEnd: Date, startedAt: Date) -> Bool {
+        guard startedAt.timeIntervalSinceReferenceDate.isFinite,
+              expectedEnd.timeIntervalSinceReferenceDate.isFinite else { return false }
+        let duration = expectedEnd.timeIntervalSince(startedAt)
+        return duration.isFinite
+            && duration >= minimumDuration
+            && duration <= maximumDuration
+    }
+
+    /// Returns every saved daily occurrence that intersects a finite manual
+    /// interval. The seven-day manual limit makes this bounded while the
+    /// small calendar cushion covers overnight and DST boundaries.
+    public static func overlappingScheduledOccurrences(
+        configuration: RuntimeConfiguration,
+        intervalStart: Date,
+        intervalEnd: Date,
+        calendar: Calendar = .current
+    ) -> [RuntimeOccurrenceResolver.Occurrence] {
+        guard intervalStart < intervalEnd,
+              intervalStart.timeIntervalSinceReferenceDate.isFinite,
+              intervalEnd.timeIntervalSinceReferenceDate.isFinite else { return [] }
+
+        let firstDay = calendar.startOfDay(for: intervalStart)
+        let lastDay = calendar.startOfDay(for: intervalEnd)
+        guard let first = calendar.date(byAdding: .day, value: -2, to: firstDay),
+              let last = calendar.date(byAdding: .day, value: 2, to: lastDay) else { return [] }
+
+        var day = first
+        var seen = Set<String>()
+        var result: [RuntimeOccurrenceResolver.Occurrence] = []
+        var iterations = 0
+        while day <= last && iterations < 32 {
+            let candidates = RuntimeOccurrenceResolver.candidates(
+                start: configuration.start,
+                end: configuration.end,
+                around: day,
+                calendar: calendar
+            )
+            for occurrence in candidates where occurrence.start < intervalEnd && occurrence.end > intervalStart {
+                let key = "\(occurrence.start.timeIntervalSinceReferenceDate):\(occurrence.end.timeIntervalSinceReferenceDate)"
+                if seen.insert(key).inserted { result.append(occurrence) }
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
+            day = next
+            iterations += 1
+        }
+        return result.sorted { $0.start < $1.start }
+    }
+}
+
+/// Truthful copy for the ordinary Lockbox active-session surface. The
+/// coordinator supplies the currently effective sessions; no cached title can
+/// survive a changing clock or a newly reconciled overlap.
+public enum RuntimeLockPresentation {
+    public static func activeTitle(for sessions: [RuntimeSession]) -> String {
+        let hasScheduled = sessions.contains { $0.origin == .scheduled }
+        let hasManual = sessions.contains { $0.origin == .manual }
+        switch (hasScheduled, hasManual) {
+        case (true, true): return "Get some rest + Focus time"
+        case (true, false): return "Get some rest"
+        case (false, true): return "Focus time"
+        case (false, false): return ""
+        }
+    }
+
+    public static func originSummary(for sessions: [RuntimeSession]) -> String {
+        let hasScheduled = sessions.contains { $0.origin == .scheduled }
+        let hasManual = sessions.contains { $0.origin == .manual }
+        switch (hasScheduled, hasManual) {
+        case (true, true): return "Scheduled bedtime and manual focus overlap"
+        case (true, false): return "Scheduled bedtime"
+        case (false, true): return "Manual focus"
+        case (false, false): return ""
+        }
+    }
+}
+
 /// The only restriction modes accepted by the app and the monitor.
 public enum RuntimeMode: String, Codable, CaseIterable, Sendable {
     case blockSelected
@@ -463,6 +569,42 @@ public enum RuntimeScheduleDecision {
         if let month = intervalEnd.month, month != expected.month { return false }
         if let day = intervalEnd.day, day != expected.day { return false }
         return true
+    }
+
+    /// Strict one-shot registration check used by production Lock now.  The
+    /// older component-only helper above remains for legacy schedule queries;
+    /// a finite manual session must include an absolute calendar boundary and
+    /// may differ by at most the documented component clock tolerance.
+    public static func manualRegistrationMatchesExact(
+        start: Date? = nil,
+        end: Date,
+        intervalStart: DateComponents? = nil,
+        intervalEnd: DateComponents,
+        repeats: Bool,
+        calendar: Calendar = .current,
+        tolerance: TimeInterval = 1
+    ) -> Bool {
+        guard !repeats, tolerance.isFinite, tolerance >= 0,
+              let registeredEnd = exactDate(from: intervalEnd, calendar: calendar),
+              abs(registeredEnd.timeIntervalSince(end)) <= tolerance else { return false }
+        if let start {
+            guard let intervalStart,
+                  let registeredStart = exactDate(from: intervalStart, calendar: calendar),
+                  abs(registeredStart.timeIntervalSince(start)) <= tolerance else { return false }
+        }
+        return true
+    }
+
+    private static func exactDate(from components: DateComponents, calendar: Calendar) -> Date? {
+        guard components.year != nil,
+              components.month != nil,
+              components.day != nil,
+              components.hour != nil,
+              components.minute != nil,
+              components.second != nil else { return nil }
+        var components = components
+        components.calendar = calendar
+        return calendar.date(from: components)
     }
 
     public static func accepts(_ kind: RuntimeCallbackKind, configuration: RuntimeConfiguration, at date: Date, calendar: Calendar = .current) -> Bool {
