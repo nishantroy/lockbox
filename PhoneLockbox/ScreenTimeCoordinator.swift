@@ -1035,9 +1035,11 @@ final class ScreenTimeCoordinator: ObservableObject {
     }
 
     private func clearLastErrorAfterSuccessfulOperation() {
-        guard storageError == nil,
-              reconciliationError == nil,
-              document.operationStatus.succeeded != false else { return }
+        guard RuntimeErrorPolicy.mayClearLastError(
+            storageError: storageError,
+            reconciliationError: reconciliationError,
+            latestOperationSucceeded: document.operationStatus.succeeded
+        ) else { return }
         lastError = nil
     }
 

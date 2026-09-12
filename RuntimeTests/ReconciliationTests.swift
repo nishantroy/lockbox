@@ -61,6 +61,24 @@ final class ReconciliationTests: XCTestCase {
         XCTAssertEqual(RuntimeReconciliation.action(document: state, at: date(12), authorized: true, registrationMatches: false, calendar: calendar), .none)
     }
 
+    func testUnrelatedSuccessCannotClearReconciliationFailure() {
+        XCTAssertFalse(RuntimeErrorPolicy.mayClearLastError(
+            storageError: nil,
+            reconciliationError: "policy adapter failed",
+            latestOperationSucceeded: true
+        ))
+        XCTAssertFalse(RuntimeErrorPolicy.mayClearLastError(
+            storageError: nil,
+            reconciliationError: "policy adapter failed",
+            latestOperationSucceeded: nil
+        ))
+        XCTAssertTrue(RuntimeErrorPolicy.mayClearLastError(
+            storageError: nil,
+            reconciliationError: nil,
+            latestOperationSucceeded: true
+        ))
+    }
+
     func testDiagnosticOnlyCallbackDocumentDoesNotSuppressLegacyMigration() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

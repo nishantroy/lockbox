@@ -1,5 +1,18 @@
 import Foundation
 
+/// A successful unrelated operation must not hide a reconciliation failure.
+/// The coordinator supplies its local reconciliation error and the latest
+/// durable operation status to this shared rule before clearing UI errors.
+public enum RuntimeErrorPolicy {
+    public static func mayClearLastError(
+        storageError: String?,
+        reconciliationError: String?,
+        latestOperationSucceeded: Bool?
+    ) -> Bool {
+        storageError == nil && reconciliationError == nil && latestOperationSucceeded != false
+    }
+}
+
 /// Pure lifecycle decisions shared by the app and DeviceActivity adapter.
 /// Managed Settings is intentionally outside this file.
 public enum RuntimeSessionDecision {
