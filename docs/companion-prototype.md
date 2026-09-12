@@ -30,16 +30,19 @@ From the repository root:
 swift test --package-path CompanionKit
 ```
 
-The package tests cover forged and swapped identities, forwarded-link non-authority, replay and one-time approval use, cancellation after approval (including restart), exact accepted-approval/request/session/active-set bindings, declined-target rejection, cross-request approval-ID collisions, revocation, expiry and cancellation, multiple-target decline/approval, rate limiting, quiet hours, malformed pairing metadata, bounded replay-marker snapshots, missing keys, delayed recovery, and the non-forcing pact model. They run with in-memory keys and a deterministic relay clock; they do not prove network delivery, Keychain behavior on a physical device, APNs behavior, or remote unlock.
+The package has 17 tests covering forged and swapped identities, forwarded-link non-authority, one-use invite confirmation across competing acceptances, replay and one-time approval use, cancellation after approval (including restart), exact accepted-approval/request/session/active-set bindings, multiple same-identity pairings and revocation, declined-target rejection, cross-request approval-ID collisions, revocation, expiry and cancellation, multiple-target decline/approval, rate limiting, quiet hours, malformed and cross-owner snapshot graphs, tampered invitation signatures, bounded replay-marker snapshots, missing keys, delayed recovery, and the non-forcing pact model. They run with in-memory keys and a deterministic relay clock; they do not prove network delivery, Keychain behavior on a physical device, APNs behavior, or remote unlock.
 
 ## Review disposition (Terra P1/P2 findings)
 
-All four verified findings are fixed in the owned protocol/relay lane:
+All findings in the latest companion review are fixed in the owned protocol/relay lane:
 
 - **P1 approved-request cancellation:** owner cancellation now accepts pending or approved requests only while an approval is unconsumed, persists `.cancelled` before acknowledgement, and rejects use before and after snapshot restart.
 - **P1 unaccepted or mismatched approval use:** `use` requires the relay's stored approval for the supplied ID to be value-identical, approved in the request's persisted decision map, explicitly targeted, and bound to the current request/session/active set and active pairing epoch. Directly signed, stale, wrong-set, and declined approvals are regression-tested.
 - **P2 decoded pairing/snapshot validation:** pairing IDs and creation timestamps are validated; snapshot record counts and every replay-marker ID are bounded and validated before restore.
 - **P2 approval-ID collision:** duplicate approval IDs are rejected before request state mutation, preventing cross-request audit overwrite.
+- **P1 one-use invite confirmation:** confirmation checks the consumed-invite marker while holding the relay lock and atomically discards every other pending acceptance for that invite. A second confirmation returns replay; the two-acceptance regression covers this race shape.
+- **P1 exact per-target pairing binding:** requests persist a binding for every target's pairing ID and epoch. Submission and consumption require that exact binding, not merely the approver identity. Same-identity re-pairing and revocation-after-approval are covered by regression tests.
+- **P2 snapshot authentication and graph integrity:** restore verifies every invitation signature, requires a single relay owner for invitations/pairings/sessions/requests, checks request-to-session and request-to-pairing references, checks approval-to-request/pairing/decision references, and validates replay markers. The complete graph is validated before any decoded record is installed, so restore fails closed. Tampered signatures and cross-owner/cross-record snapshots are tested.
 
 These are protocol/backend prototype guarantees only. The relay remains in-memory with test snapshot persistence and is not a deployed service.
 

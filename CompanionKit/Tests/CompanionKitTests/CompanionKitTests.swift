@@ -46,6 +46,55 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertNoThrow(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t))
     }
 
+    func testInviteIsConsumedAcrossTwoPendingAcceptances() throws {
+        let ownerKeys = InMemoryDeviceKeyStore()
+        let firstKeys = InMemoryDeviceKeyStore()
+        let secondKeys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
+        let firstSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: firstKeys)
+        let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondKeys)
+        let now = t
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: now)
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { now })
+        let first = CompanionClient(signer: firstSigner, transport: relay, now: { now })
+        let second = CompanionClient(signer: secondSigner, transport: relay, now: { now })
+        let invitation = try owner.createInvite(inviteID: "one-use", validFor: 3_600, now: t,
+                                                nonce: Data(repeating: 6, count: 24))
+        let firstAcceptance = try first.accept(invitation, acceptanceID: "first-acceptance", now: t)
+        let secondAcceptance = try second.accept(invitation, acceptanceID: "second-acceptance", now: t)
+
+        XCTAssertNoThrow(try owner.confirm(firstAcceptance, verificationCode: firstAcceptance.verificationCode, now: t))
+        XCTAssertThrowsError(try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .replay)
+        }
+        // The competing acceptance was discarded atomically with invite use.
+        XCTAssertThrowsError(try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t))
+    }
+
+    func testSameIdentityPairingsAreExactPerTargetAndRevocationIsRechecked() throws {
+        let (relay, owner, approver, firstPairing, session) = try harness()
+        let secondInvite = try owner.createInvite(inviteID: "same-identity-invite", validFor: 3_600, now: t,
+                                                  nonce: Data(repeating: 10, count: 24))
+        let secondAcceptance = try approver.accept(secondInvite, acceptanceID: "same-identity-acceptance", now: t)
+        let secondPairing = try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)
+        XCTAssertNotEqual(firstPairing.pairingID, secondPairing.pairingID)
+
+        let request = try owner.requestUnlock(requestID: "exact-target", pairing: secondPairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        // The same identity is trusted through two pairings, but this request
+        // names only the second one.
+        XCTAssertThrowsError(try approver.submitApproval(request: request, pairing: firstPairing, decision: .approved)) {
+            XCTAssertEqual($0 as? CompanionError, .wrongTarget)
+        }
+        let accepted = try approver.submitApproval(request: request, pairing: secondPairing, decision: .approved,
+                                                   approvalID: "exact-target-approval")
+        try owner.revoke(secondPairing)
+        XCTAssertThrowsError(try owner.useApproval(accepted, request: request, useID: "revoked-exact-target")) {
+            XCTAssertEqual($0 as? CompanionError, .revokedPairing)
+        }
+        _ = relay
+    }
+
     func testForgedInviteAndSwapReceiverIssuerFail() throws {
         let keys = InMemoryDeviceKeyStore()
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: keys)
@@ -174,6 +223,50 @@ final class CompanionKitTests: XCTestCase {
         }
         XCTAssertEqual(try relay.request(id: secondRequest.requestID).status, .pending)
         XCTAssertNoThrow(try owner.useApproval(firstApproval, request: firstRequest, useID: "collision-use"))
+    }
+
+    func testSnapshotRejectsTamperedInviteSignatureAndCrossOwnerGraph() throws {
+        let (relay, owner, _, _, _) = try harness()
+        let tamperedInvite = try alteredSnapshot(relay) { snapshot in
+            var invitations = snapshot["invitations"] as! [[String: Any]]
+            let signature = invitations[0]["signature"] as! String
+            let replacement = (signature.first == "A" ? "B" : "A") + String(signature.dropFirst())
+            invitations[0]["signature"] = replacement
+            snapshot["invitations"] = invitations
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: tamperedInvite)) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
+
+        let otherOwnerKeys = InMemoryDeviceKeyStore()
+        let otherOwner = try DeviceSigner.create(role: .owner, keyStore: otherOwnerKeys)
+        let crossOwnerPairing = try alteredSnapshot(relay) { snapshot in
+            var pairings = snapshot["pairings"] as! [[String: Any]]
+            pairings[0]["owner"] = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(otherOwner.identity))
+            snapshot["pairings"] = pairings
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: crossOwnerPairing))
+
+        let crossOwnerSnapshot = try alteredSnapshot(relay) { snapshot in
+            snapshot["owner"] = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(otherOwner.identity))
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: crossOwnerSnapshot))
+        _ = owner
+    }
+
+    func testSnapshotRejectsMismatchedRequestTargetBinding() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "snapshot-binding", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let malformed = try alteredSnapshot(relay) { snapshot in
+            var requests = snapshot["requests"] as! [[String: Any]]
+            var bindings = requests[0]["targetBindings"] as! [[String: Any]]
+            bindings[0]["pairEpoch"] = pairing.epoch + 1
+            requests[0]["targetBindings"] = bindings
+            snapshot["requests"] = requests
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: malformed))
+        _ = request
     }
 
     func testSnapshotRejectsMalformedPairingMetadataAndReplayMarkers() throws {
