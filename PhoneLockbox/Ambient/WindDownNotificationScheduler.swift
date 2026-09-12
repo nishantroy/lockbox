@@ -74,8 +74,7 @@ public actor WindDownNotificationScheduler {
     /// Capacity is checked before owned requests are removed. If a later add
     /// fails, the transaction reports whether the old schedule was restored.
     public func replace(
-        occurrences: [WindDownOccurrence],
-        calendar: Calendar
+        occurrences: [WindDownOccurrence]
     ) async throws -> WindDownReplacementOutcome {
         guard occurrences.count <= WindDownConfiguration.maximumScheduledOccurrences else {
             throw SchedulerError.tooManyRequests
@@ -99,9 +98,9 @@ public actor WindDownNotificationScheduler {
             content.title = "Wind-down soon"
             content.body = "Your planned bedtime session begins soon."
             content.sound = .default
-            var components = occurrence.triggerComponents
-            components.timeZone = calendar.timeZone
-            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            // The planner already resolved this absolute occurrence. Never
+            // reinterpret it in a possibly changed device calendar/time zone.
+            let trigger = UNCalendarNotificationTrigger(dateMatching: occurrence.triggerComponents, repeats: false)
             return StoredNotificationRequest(
                 identifier: occurrence.identifier,
                 request: UNNotificationRequest(

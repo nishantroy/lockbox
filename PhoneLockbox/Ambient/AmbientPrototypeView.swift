@@ -91,8 +91,7 @@ public struct AmbientPrototypeView: View {
             )
             if configuration.enabled {
                 let result = try await notifications.replace(
-                    occurrences: occurrences,
-                    calendar: .autoupdatingCurrent
+                    occurrences: occurrences
                 )
                 switch result {
                 case .replaced(let count):

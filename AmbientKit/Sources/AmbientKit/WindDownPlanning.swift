@@ -156,6 +156,7 @@ public enum WindDownPlanner {
                         [.era, .year, .month, .day, .hour, .minute, .second],
                         from: triggerDate
                     )
+                    triggerComponents.calendar = calendar
                     triggerComponents.timeZone = calendar.timeZone
                     result.append(
                         WindDownOccurrence(

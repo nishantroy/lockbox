@@ -22,6 +22,20 @@ final class WindDownPlanningTests: XCTestCase {
         return calendar
     }
 
+    func testPlannedTriggerRetainsAbsoluteInstantAfterCalendarChange() throws {
+        var eastern = calendar("America/New_York")
+        let now = ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z")!
+        let occurrence = try XCTUnwrap(WindDownPlanner.plan(
+            configuration: configuration(), now: now, calendar: eastern, limit: 1
+        ).first)
+        eastern.timeZone = TimeZone(secondsFromGMT: 0)!
+        XCTAssertNotEqual(eastern.timeZone, occurrence.triggerComponents.timeZone)
+        XCTAssertEqual(occurrence.triggerComponents.calendar?.identifier, .gregorian)
+        XCTAssertEqual(occurrence.triggerComponents.timeZone?.identifier, "America/New_York")
+        XCTAssertEqual(occurrence.triggerComponents.date, occurrence.triggerDate)
+        XCTAssertEqual(occurrence.triggerDate, ISO8601DateFormatter().date(from: "2026-01-02T02:30:00Z"))
+    }
+
     func testDisabledConfigurationPlansNothing() throws {
         let config = try configuration(enabled: false)
         let now = ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z")!
