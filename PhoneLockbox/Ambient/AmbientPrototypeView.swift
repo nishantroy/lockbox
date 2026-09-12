@@ -82,7 +82,15 @@ public struct AmbientPrototypeView: View {
         .navigationTitle("Ambient prototypes")
         .task {
             let count = await notifications.pendingOwnedRequestCount()
-            message = "\(count) prototype reminder(s) currently pending. Use Disable wind-down to remove them."
+            if let existingEnd = liveActivity.existingFixedEnd(sessionID: "ambient-demo") {
+                demoActive = true
+                demoEnd = existingEnd
+                message = "Live Activity demo is active. \(count) prototype reminder(s) pending."
+            } else {
+                demoActive = false
+                demoEnd = nil
+                message = "\(count) prototype reminder(s) currently pending. Use Disable wind-down to remove them."
+            }
         }
     }
 
@@ -128,7 +136,8 @@ public struct AmbientPrototypeView: View {
 
     @MainActor
     private func startDemo() async {
-        let end = Date(timeIntervalSinceNow: 2 * 60 * 60)
+        let end = liveActivity.existingFixedEnd(sessionID: "ambient-demo")
+            ?? Date(timeIntervalSinceNow: 2 * 60 * 60)
         let result = await liveActivity.start(
             sessionID: "ambient-demo",
             fixedEnd: end,

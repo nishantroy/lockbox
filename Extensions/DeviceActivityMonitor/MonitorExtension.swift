@@ -164,7 +164,6 @@ final class MonitorExtension: DeviceActivityMonitor {
                     // it after this transaction, then register the new one.
                     scheduleToRegister = context.document.configuration
                 }
-                let hasLiveScheduled = RuntimeLifecycle.scheduledRegistrationShouldRemain(context.document, at: now)
                 // With recurrence disabled, a manual-only aggregate never
                 // keeps the daily OS route alive. Enabled recurrence retains
                 // the route even after this occurrence expires.

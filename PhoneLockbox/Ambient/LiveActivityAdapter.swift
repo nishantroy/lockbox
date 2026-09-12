@@ -12,6 +12,11 @@ public final class LockboxLiveActivityAdapter: Sendable {
         ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
+    @MainActor
+    public func existingFixedEnd(sessionID: String) -> Date? {
+        matchingActivity(sessionID: sessionID)?.attributes.fixedEnd
+    }
+
     /// Best-effort only: no push token and no ActivityKit call is policy-critical.
     @MainActor
     public func start(
