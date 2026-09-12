@@ -8,7 +8,8 @@ public struct AmbientPrototypeView: View {
     @State private var bedtimeHour = 22
     @State private var bedtimeMinute = 0
     @State private var leadMinutes = 30
-    @State private var message = "Wind-down is off."
+    @State private var message = "Checking pending prototype reminders…"
+    @State private var isScheduling = false
     @State private var demoActive = false
     @State private var demoEnd: Date?
 
@@ -20,7 +21,7 @@ public struct AmbientPrototypeView: View {
     public var body: some View {
         Form {
             Section {
-                Toggle("Enable wind-down heads-up", isOn: $windDownEnabled)
+                Toggle("Enable heads-up (draft)", isOn: $windDownEnabled)
                 Stepper("Bedtime \(String(format: "%02d:%02d", bedtimeHour, bedtimeMinute))", value: $bedtimeHour, in: 0...23)
                     .accessibilityLabel("Bedtime hour")
                 Stepper("Bedtime minutes \(String(format: "%02d", bedtimeMinute))", value: $bedtimeMinute, in: 0...59, step: 5)
@@ -29,7 +30,7 @@ public struct AmbientPrototypeView: View {
             } header: {
                 Text("Wind-down prototype")
             } footer: {
-                Text("Optional local heads-up only. It does not enforce a lock or run a background timer.")
+                Text("Standalone reminder demo, not linked to saved bedtime rules. These are draft controls; Schedule or Disable applies them. Up to seven reminders remain scheduled if you leave this screen.")
             }
 
             Button("Request notification permission") {
@@ -44,8 +45,14 @@ public struct AmbientPrototypeView: View {
             }
 
             Button(windDownEnabled ? "Schedule wind-down" : "Disable wind-down") {
-                Task { await applyWindDown() }
+                Task {
+                    guard !isScheduling else { return }
+                    isScheduling = true
+                    defer { isScheduling = false }
+                    await applyWindDown()
+                }
             }
+            .disabled(isScheduling)
 
             Section {
                 Text("LIVE ACTIVITY DEMO — not a real Phone Lockbox lock")
@@ -70,6 +77,10 @@ public struct AmbientPrototypeView: View {
                 .foregroundStyle(.secondary)
         }
         .navigationTitle("Ambient prototypes")
+        .task {
+            let count = await notifications.pendingOwnedRequestCount()
+            message = "\(count) prototype reminder(s) currently pending. Use Disable wind-down to remove them."
+        }
     }
 
     private func makeConfiguration() throws -> WindDownConfiguration {

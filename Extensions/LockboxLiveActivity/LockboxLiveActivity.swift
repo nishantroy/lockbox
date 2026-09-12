@@ -12,7 +12,7 @@ struct LockboxLiveActivity: Widget {
                 isStale: context.isStale
             )
             VStack(alignment: .leading, spacing: 6) {
-                Text("Phone Lockbox")
+                Text("Phone Lockbox · Demo")
                     .font(.headline)
                 Text(display.title)
                     .font(.subheadline)
@@ -24,11 +24,11 @@ struct LockboxLiveActivity: Widget {
             }
             .padding()
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Phone Lockbox. \(display.accessibilityLabel). Fixed end \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
+            .accessibilityLabel("Phone Lockbox demo, not a lock. \(display.accessibilityLabel). Fixed end \(context.state.fixedEnd.formatted(date: .omitted, time: .shortened))")
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Text("Lockbox")
+                    Text("Lockbox demo")
                         .font(.caption)
                 }
                 DynamicIslandExpandedRegion(.center) {
@@ -50,7 +50,7 @@ struct LockboxLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                Text("LB")
+                Text("Demo")
                     .accessibilityLabel(
                         context.isStale
                             ? "Phone Lockbox. \(AmbientLiveActivityPresentation(status: context.state.status, isStale: true).accessibilityLabel)"

@@ -7,12 +7,18 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
 		17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */; };
+		1F71388F46EA07CCFECAC97A /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1DE0FD471013572C51A6819A /* AmbientKit */; };
 		23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
+		29FB4DAFD4FBC0B72B40C055 /* LockboxLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2B3F75B0611C6C2B3E834F4A /* RuntimeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */; };
+		3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */; };
 		510B03F537735BC5AEE4AC36 /* ShieldActionExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */; };
+		51A9820C991E42AD46629222 /* LockboxLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */; };
 		59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */; };
+		5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */; };
 		5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E023311398A901C00301F601 /* ContentView.swift */; };
 		5BE2CD0427061CC6F52A4F20 /* ShieldConfiguration.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		5E0E4133A5633F9B658EC1B4 /* RuntimeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */; };
@@ -23,6 +29,7 @@
 		73999F7904BC73C3342983E1 /* RecoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */; };
 		7CD4DC55BA690B9BBCBC0782 /* RecoveryCommitment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */; };
 		833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */; };
+		83D07AF54EC2BF47C0373B90 /* AmbientPrototypeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */; };
 		92A6E33D92356CC70A15EED4 /* RuntimeContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */; };
 		9FF6D3EF0DB2A752649AEE0A /* ShieldConfigurationExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9A2F803B335F1F67F65C48 /* ShieldConfigurationExtension.swift */; };
 		A6B54197F91197D40CA7C41A /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
@@ -50,6 +57,13 @@
 			remoteGlobalIDString = DC655A074B817D0C4E958D40;
 			remoteInfo = PhoneLockbox;
 		};
+		79DD047FE53CE525CAD25D21 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F33BEA23656C8E82170CB226 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 28156E4257A337B9E15D07BE;
+			remoteInfo = LockboxLiveActivity;
+		};
 		AB6B5D589E3169C9C51FA7DF /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = F33BEA23656C8E82170CB226 /* Project object */;
@@ -73,6 +87,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
+				29FB4DAFD4FBC0B72B40C055 /* LockboxLiveActivity.appex in Embed Foundation Extensions */,
 				E4EE663BF81E00D83BB7D66D /* DeviceActivityMonitor.appex in Embed Foundation Extensions */,
 				5BE2CD0427061CC6F52A4F20 /* ShieldConfiguration.appex in Embed Foundation Extensions */,
 				6173B7D5D61C14BF9AE6195E /* ShieldAction.appex in Embed Foundation Extensions */,
@@ -95,17 +110,24 @@
 		4FC89584D6D8DB677376C818 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldActionExtension.swift; sourceTree = "<group>"; };
 		63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeLifecycle.swift; sourceTree = "<group>"; };
+		6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = LockboxLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		67DB89A18388EAA81743EAEE /* PhoneLockboxTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PhoneLockboxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		68BD59D904BD226107FFF407 /* AmbientKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AmbientKit; path = AmbientKit; sourceTree = SOURCE_ROOT; };
 		6C099D0A5597DB986D40F6F5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		6F9A2F803B335F1F67F65C48 /* ShieldConfigurationExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldConfigurationExtension.swift; sourceTree = "<group>"; };
 		71235E9EB67E16A1A111F82F /* PhoneLockboxMonitor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockboxMonitor.entitlements; sourceTree = "<group>"; };
 		739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryCommitment.swift; sourceTree = "<group>"; };
+		8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmbientPrototypeView.swift; sourceTree = "<group>"; };
 		89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryView.swift; sourceTree = "<group>"; };
+		96DADA707D1D0A3DA8934C5A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxLiveActivity.swift; sourceTree = "<group>"; };
 		B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEngine.swift; sourceTree = "<group>"; };
 		C7F44B15683DBC4D4CC9AE5C /* MonitorExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorExtension.swift; sourceTree = "<group>"; };
+		D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityAdapter.swift; sourceTree = "<group>"; };
 		D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeReconciliation.swift; sourceTree = "<group>"; };
 		DAAFE2A2EFA49C4B24EEFF18 /* PhoneLockbox.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PhoneLockbox.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E023311398A901C00301F601 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindDownNotificationScheduler.swift; sourceTree = "<group>"; };
 		E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeCoordinator.swift; sourceTree = "<group>"; };
 		E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldConfiguration.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicyTests.swift; sourceTree = "<group>"; };
@@ -113,7 +135,36 @@
 		F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = DeviceActivityMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFrameworksBuildPhase section */
+		7DBD9B76A002C78D73239016 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E811588F12411EEB98F5FCA6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1F71388F46EA07CCFECAC97A /* AmbientKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
 /* Begin PBXGroup section */
+		094C1C83EAEA5D4F5C0017A6 /* Ambient */ = {
+			isa = PBXGroup;
+			children = (
+				8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */,
+				D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */,
+				E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */,
+			);
+			path = Ambient;
+			sourceTree = "<group>";
+		};
 		0A48085DC635EC5D1A7DB558 /* ShieldConfiguration */ = {
 			isa = PBXGroup;
 			children = (
@@ -132,6 +183,7 @@
 				097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */,
 				89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */,
 				E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */,
+				094C1C83EAEA5D4F5C0017A6 /* Ambient */,
 				6DE86A7A953F5C21A1AE155A /* Policy */,
 			);
 			path = PhoneLockbox;
@@ -141,11 +193,20 @@
 			isa = PBXGroup;
 			children = (
 				A2E4B0392F525B9F4E4FDF46 /* Extensions */,
+				3D690A013CC84A9707CF502B /* Packages */,
 				1E576EE0A7803C3DC49958D3 /* PhoneLockbox */,
 				5A805F511DE7EFE8BF45461A /* PhoneLockboxTests */,
 				668EAC9BEB1B6AC61D66A42B /* Shared */,
 				EE86C591005E874BF15F02A8 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		3D690A013CC84A9707CF502B /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				68BD59D904BD226107FFF407 /* AmbientKit */,
+			);
+			name = Packages;
 			sourceTree = "<group>";
 		};
 		4412BECAF7F39E180FE9DFA6 /* DeviceActivityMonitor */ = {
@@ -202,16 +263,27 @@
 			isa = PBXGroup;
 			children = (
 				4412BECAF7F39E180FE9DFA6 /* DeviceActivityMonitor */,
+				E0E1FAA43C7313986ED35DD7 /* LockboxLiveActivity */,
 				754FAFF547CB340C681FC1A1 /* ShieldAction */,
 				0A48085DC635EC5D1A7DB558 /* ShieldConfiguration */,
 			);
 			path = Extensions;
 			sourceTree = "<group>";
 		};
+		E0E1FAA43C7313986ED35DD7 /* LockboxLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				96DADA707D1D0A3DA8934C5A /* Info.plist */,
+				A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */,
+			);
+			path = LockboxLiveActivity;
+			sourceTree = "<group>";
+		};
 		EE86C591005E874BF15F02A8 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */,
+				6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */,
 				DAAFE2A2EFA49C4B24EEFF18 /* PhoneLockbox.app */,
 				67DB89A18388EAA81743EAEE /* PhoneLockboxTests.xctest */,
 				46D1BDB824396E786A66CAEE /* ShieldAction.appex */,
@@ -240,6 +312,25 @@
 			productReference = 46D1BDB824396E786A66CAEE /* ShieldAction.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		28156E4257A337B9E15D07BE /* LockboxLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 66B5FC6E5E7879021C16D0E8 /* Build configuration list for PBXNativeTarget "LockboxLiveActivity" */;
+			buildPhases = (
+				BD208A1D06D7125B34DF7E56 /* Sources */,
+				E811588F12411EEB98F5FCA6 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LockboxLiveActivity;
+			packageProductDependencies = (
+				1DE0FD471013572C51A6819A /* AmbientKit */,
+			);
+			productName = LockboxLiveActivity;
+			productReference = 6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		92FAA9EE2131E7C538F5413B /* ShieldConfiguration */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 82B4C01BEA166BFC10AF65FE /* Build configuration list for PBXNativeTarget "ShieldConfiguration" */;
@@ -262,17 +353,20 @@
 			buildConfigurationList = 4669D1AB924D06B8D48D493D /* Build configuration list for PBXNativeTarget "PhoneLockbox" */;
 			buildPhases = (
 				36C7249A0BAD34D23F9CB3F3 /* Sources */,
+				7DBD9B76A002C78D73239016 /* Frameworks */,
 				9D2F0F0A5B056AC4AE1D2F06 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				95AE73951ADC38992E1B80F7 /* PBXTargetDependency */,
 				0417EE0C5D906BFD942C190F /* PBXTargetDependency */,
 				04E235C4950DEFB7CEC8D053 /* PBXTargetDependency */,
 				7C8108ED357E96F9980A5BB1 /* PBXTargetDependency */,
 			);
 			name = PhoneLockbox;
 			packageProductDependencies = (
+				E7F924562C1BF347810FB1E2 /* AmbientKit */,
 			);
 			productName = PhoneLockbox;
 			productReference = DAAFE2A2EFA49C4B24EEFF18 /* PhoneLockbox.app */;
@@ -325,6 +419,9 @@
 					096093E824BB9C3B3F2A47C2 = {
 						DevelopmentTeam = "";
 					};
+					28156E4257A337B9E15D07BE = {
+						DevelopmentTeam = "";
+					};
 					92FAA9EE2131E7C538F5413B = {
 						DevelopmentTeam = "";
 					};
@@ -348,12 +445,16 @@
 			);
 			mainGroup = 39F4C57E8A4CA54532DC99BA;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5FE544809D3FEBB84D3F25B1 /* XCLocalSwiftPackageReference "AmbientKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = EE86C591005E874BF15F02A8 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				DC655A074B817D0C4E958D40 /* PhoneLockbox */,
+				28156E4257A337B9E15D07BE /* LockboxLiveActivity */,
 				FF2BEF98104BE5573573C6A7 /* PhoneLockboxTests */,
 				F66D6A79BE883D6D6C106EDE /* DeviceActivityMonitor */,
 				92FAA9EE2131E7C538F5413B /* ShieldConfiguration */,
@@ -382,7 +483,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				83D07AF54EC2BF47C0373B90 /* AmbientPrototypeView.swift in Sources */,
 				5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */,
+				3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */,
 				DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */,
 				1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */,
 				BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */,
@@ -394,6 +497,7 @@
 				17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */,
 				59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */,
 				AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */,
+				5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -410,6 +514,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BD208A1D06D7125B34DF7E56 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				51A9820C991E42AD46629222 /* LockboxLiveActivity.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -443,6 +555,11 @@
 			isa = PBXTargetDependency;
 			target = 096093E824BB9C3B3F2A47C2 /* ShieldAction */;
 			targetProxy = DACB2487D549551507EFE2FF /* PBXContainerItemProxy */;
+		};
+		95AE73951ADC38992E1B80F7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 28156E4257A337B9E15D07BE /* LockboxLiveActivity */;
+			targetProxy = 79DD047FE53CE525CAD25D21 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -518,6 +635,23 @@
 			};
 			name = Debug;
 		};
+		7D762D766C3D73AF63F7B815 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				INFOPLIST_FILE = Extensions/LockboxLiveActivity/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.phone-lockbox.app.live-activity";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 		88D4E98401F3472921114676 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -543,6 +677,7 @@
 				CODE_SIGN_ENTITLEMENTS = PhoneLockbox/PhoneLockbox.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -591,7 +726,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
@@ -616,6 +751,23 @@
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
+		};
+		A10341D9ADBE15B695339468 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				INFOPLIST_FILE = Extensions/LockboxLiveActivity/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.phone-lockbox.app.live-activity";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
 		};
 		A3F3F8CE961DCC5AD1583F84 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -642,6 +794,7 @@
 				CODE_SIGN_ENTITLEMENTS = PhoneLockbox/PhoneLockbox.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -690,7 +843,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -788,6 +941,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		66B5FC6E5E7879021C16D0E8 /* Build configuration list for PBXNativeTarget "LockboxLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10341D9ADBE15B695339468 /* Debug */,
+				7D762D766C3D73AF63F7B815 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		82B4C01BEA166BFC10AF65FE /* Build configuration list for PBXNativeTarget "ShieldConfiguration" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -816,6 +978,24 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		5FE544809D3FEBB84D3F25B1 /* XCLocalSwiftPackageReference "AmbientKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = AmbientKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1DE0FD471013572C51A6819A /* AmbientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AmbientKit;
+		};
+		E7F924562C1BF347810FB1E2 /* AmbientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AmbientKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = F33BEA23656C8E82170CB226 /* Project object */;
 }

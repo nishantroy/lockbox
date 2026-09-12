@@ -1,6 +1,6 @@
 # Ambient prototypes
 
-Status: isolated prototype for parent integration. This change does not alter the existing app, coordinator, shared runtime, entitlements, `Package.swift`, or `project.yml`.
+Status: linked into the source-only [build-4 candidate](build4-candidate.md) behind a developer prototype screen. The original isolated lane did not alter the host; parent integration now links `AmbientKit`/the widget and adds an explicit demo entry. No phone deployment or notification/Live Activity device behavior is claimed here.
 
 ## Wind-down notifications
 

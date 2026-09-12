@@ -10,8 +10,11 @@ settings:
     SWIFT_VERSION: 6.0
     TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "0.1"
-    CURRENT_PROJECT_VERSION: "3"
+    CURRENT_PROJECT_VERSION: "4"
     DEVELOPMENT_TEAM: ""
+packages:
+  AmbientKit:
+    path: AmbientKit
 targets:
   PhoneLockbox:
     type: application
@@ -29,13 +32,31 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_NSSupportsLiveActivities: YES
     dependencies:
+      - package: AmbientKit
+      - target: LockboxLiveActivity
+        embed: true
       - target: DeviceActivityMonitor
         embed: true
       - target: ShieldConfiguration
         embed: true
       - target: ShieldAction
         embed: true
+  LockboxLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Extensions/LockboxLiveActivity
+    dependencies:
+      - package: AmbientKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.app.live-activity
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: Extensions/LockboxLiveActivity/Info.plist
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
   PhoneLockboxTests:
     type: bundle.unit-test
     platform: iOS

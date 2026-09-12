@@ -126,6 +126,12 @@ struct ContentView: View {
 
     private var developerSection: some View {
         Section("Developer tools — safety escape hatch") {
+            NavigationLink("Wind-down & Live Activity prototypes") {
+                AmbientPrototypeView()
+            }
+            Text("Optional standalone demos—not connected to your lock schedule. They never apply or release restrictions.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             if coordinator.testScheduleActive {
                 Label("A migrated or active prototype restriction may still be shielding apps.", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)

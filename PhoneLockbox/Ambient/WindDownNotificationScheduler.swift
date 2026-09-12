@@ -47,14 +47,20 @@ public actor WindDownNotificationScheduler {
     }
 
     public func authorization() async -> Authorization {
-        let settings = await notificationSettings()
-        switch settings.authorizationStatus {
-        case .notDetermined: return .notDetermined
-        case .denied: return .denied
-        case .authorized: return .authorized
-        case .provisional: return .provisional
-        case .ephemeral: return .ephemeral
-        @unknown default: return .denied
+        await withCheckedContinuation { continuation in
+            center.getNotificationSettings { settings in
+                let status: Authorization
+                switch settings.authorizationStatus {
+                case .notDetermined: status = .notDetermined
+                case .denied: status = .denied
+                case .authorized: status = .authorized
+                case .provisional: status = .provisional
+                case .ephemeral: status = .ephemeral
+                @unknown default: status = .denied
+                }
+                // Transfer only our Sendable value, not UNNotificationSettings.
+                continuation.resume(returning: status)
+            }
         }
     }
 
@@ -95,8 +101,8 @@ public actor WindDownNotificationScheduler {
 
         let requests = occurrences.map { occurrence in
             let content = UNMutableNotificationContent()
-            content.title = "Wind-down soon"
-            content.body = "Your planned bedtime session begins soon."
+            content.title = "Wind-down prototype"
+            content.body = "Your demo wind-down time has arrived. This reminder is not connected to a lock schedule."
             content.sound = .default
             // The planner already resolved this absolute occurrence. Never
             // reinterpret it in a possibly changed device calendar/time zone.
@@ -126,22 +132,22 @@ public actor WindDownNotificationScheduler {
         }
     }
 
+    public func pendingOwnedRequestCount() async -> Int {
+        await pendingIdentifiers().filter { $0.hasPrefix(WindDownNotificationNamespace.prefix) }.count
+    }
+
     /// Disabling wind-down removes only this adapter's requests.
     public func disable() async {
-        let pending = await pendingRequests()
-        let ownIDs = pending.map(\.identifier).filter { $0.hasPrefix(WindDownNotificationNamespace.prefix) }
+        let pending = await pendingIdentifiers()
+        let ownIDs = pending.filter { $0.hasPrefix(WindDownNotificationNamespace.prefix) }
         center.removePendingNotificationRequests(withIdentifiers: ownIDs)
     }
 
-    private func notificationSettings() async -> UNNotificationSettings {
+    private func pendingIdentifiers() async -> [String] {
         await withCheckedContinuation { continuation in
-            center.getNotificationSettings { continuation.resume(returning: $0) }
-        }
-    }
-
-    private func pendingRequests() async -> [UNNotificationRequest] {
-        await withCheckedContinuation { continuation in
-            center.getPendingNotificationRequests { continuation.resume(returning: $0) }
+            center.getPendingNotificationRequests {
+                continuation.resume(returning: $0.map(\.identifier))
+            }
         }
     }
 
@@ -155,12 +161,17 @@ public actor WindDownNotificationScheduler {
     }
 }
 
+// UNNotificationRequest is an immutable request snapshot. Never expose mutable
+// content through this bridge; replacement constructs a fresh system request.
 private struct StoredNotificationRequest: @unchecked Sendable {
     let identifier: String
     let request: UNNotificationRequest
 }
 
-private struct UserNotificationCenterStore: WindDownNotificationStore {
+// The system notification center supports asynchronous access from multiple
+// queues. This adapter has no mutable Swift state; all mutations go through the
+// center's APIs. The SDK's Objective-C type lacks Sendable annotations.
+private struct UserNotificationCenterStore: WindDownNotificationStore, @unchecked Sendable {
     let center: UNUserNotificationCenter
 
     func pendingRequests() async -> [StoredNotificationRequest] {

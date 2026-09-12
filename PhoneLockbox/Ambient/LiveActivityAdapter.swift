@@ -5,8 +5,7 @@ import AmbientKit
 import ActivityKit
 
 @available(iOS 17.0, *)
-@MainActor
-public final class LockboxLiveActivityAdapter {
+public final class LockboxLiveActivityAdapter: Sendable {
     public init() {}
 
     public func isAvailable() -> Bool {
@@ -14,6 +13,7 @@ public final class LockboxLiveActivityAdapter {
     }
 
     /// Best-effort only: no push token and no ActivityKit call is policy-critical.
+    @MainActor
     public func start(
         sessionID: String,
         fixedEnd: Date,
