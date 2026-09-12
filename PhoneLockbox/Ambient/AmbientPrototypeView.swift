@@ -90,8 +90,20 @@ public struct AmbientPrototypeView: View {
                 calendar: .autoupdatingCurrent
             )
             if configuration.enabled {
-                try await notifications.replace(occurrences: occurrences, calendar: .autoupdatingCurrent)
-                message = "Scheduled \(occurrences.count) local wind-down heads-up(s)."
+                let result = try await notifications.replace(
+                    occurrences: occurrences,
+                    calendar: .autoupdatingCurrent
+                )
+                switch result {
+                case .replaced(let count):
+                    message = "Scheduled \(count) local wind-down heads-up(s)."
+                case .failed(let requestedCount, let addedCount, let previousScheduleRestored):
+                    if previousScheduleRestored {
+                        message = "Wind-down unchanged: adding request \(addedCount + 1) of \(requestedCount) failed; the previous schedule was restored."
+                    } else {
+                        message = "Wind-down partially changed: \(addedCount) of \(requestedCount) request(s) were added; open Phone Lockbox to reconcile."
+                    }
+                }
             } else {
                 await notifications.disable()
                 message = "Wind-down disabled; owned notifications removed."

@@ -100,6 +100,7 @@ public enum WindDownPlanningError: Error, Equatable, Sendable {
     case invalidLeadOffset(seconds: TimeInterval)
     case invalidSessionBoundary
     case invalidLimit
+    case insufficientQueueCapacity(available: Int, requested: Int)
     case unableToConstructCivilDate
 }
 
@@ -200,17 +201,120 @@ public struct WindDownNotificationReplacement: Equatable, Sendable {
     public let removeIdentifiers: [String]
     public let addIdentifiers: [String]
 
-    public init(existingPendingIdentifiers: [String], occurrences: [WindDownOccurrence]) throws {
-        guard occurrences.count <= WindDownConfiguration.maximumScheduledOccurrences else {
+    public let availableSlots: Int
+
+    public init(
+        existingPendingIdentifiers: [String],
+        occurrences: [WindDownOccurrence],
+        systemLimit: Int = 64
+    ) throws {
+        try self.init(
+            existingPendingIdentifiers: existingPendingIdentifiers,
+            newIdentifiers: occurrences.map(\.identifier),
+            systemLimit: systemLimit
+        )
+    }
+
+    public init(
+        existingPendingIdentifiers: [String],
+        newIdentifiers: [String],
+        systemLimit: Int = 64
+    ) throws {
+        guard newIdentifiers.count <= WindDownConfiguration.maximumScheduledOccurrences,
+              systemLimit > 0 else {
             throw WindDownPlanningError.invalidLimit
         }
-        let addIdentifiers = occurrences.map(\.identifier)
-        guard Set(addIdentifiers).count == addIdentifiers.count else {
+        let addIdentifiers = newIdentifiers
+        guard Set(addIdentifiers).count == addIdentifiers.count,
+              addIdentifiers.allSatisfy({ $0.hasPrefix(WindDownNotificationNamespace.prefix) }) else {
             throw WindDownPlanningError.invalidLimit
         }
-        self.removeIdentifiers = existingPendingIdentifiers
-            .filter { $0.hasPrefix(WindDownNotificationNamespace.prefix) }
-            .sorted()
+
+        let owned = existingPendingIdentifiers.filter {
+            $0.hasPrefix(WindDownNotificationNamespace.prefix)
+        }
+        let availableSlots = systemLimit - (existingPendingIdentifiers.count - owned.count)
+        guard availableSlots >= addIdentifiers.count else {
+            throw WindDownPlanningError.insufficientQueueCapacity(
+                available: max(0, availableSlots),
+                requested: addIdentifiers.count
+            )
+        }
+
+        self.removeIdentifiers = owned.sorted()
         self.addIdentifiers = addIdentifiers
+        self.availableSlots = availableSlots
+    }
+}
+
+/// The host-facing result of a replacement transaction. A failure during
+/// `add` is reported rather than being disguised as a successful replacement.
+public enum WindDownReplacementOutcome: Equatable, Sendable {
+    case replaced(count: Int)
+    case failed(
+        requestedCount: Int,
+        addedCount: Int,
+        previousScheduleRestored: Bool
+    )
+}
+
+/// Minimal store contract shared by the native adapter and host fake-center
+/// tests. The transaction removes only the owned namespace, checks capacity
+/// before removing anything, and restores the old requests after an add fails.
+public protocol WindDownNotificationStore {
+    associatedtype Request: Sendable
+
+    func pendingRequests() async -> [Request]
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) async
+    func add(_ request: Request) async throws
+}
+
+public enum WindDownNotificationReplacementEngine {
+    public static let systemPendingRequestLimit = 64
+
+    public static func replace<Store: WindDownNotificationStore>(
+        store: Store,
+        requests: [Store.Request],
+        identifier: (Store.Request) -> String,
+        systemLimit: Int = systemPendingRequestLimit
+    ) async throws -> WindDownReplacementOutcome {
+        let pending = await store.pendingRequests()
+        let plan = try WindDownNotificationReplacement(
+            existingPendingIdentifiers: pending.map(identifier),
+            newIdentifiers: requests.map(identifier),
+            systemLimit: systemLimit
+        )
+
+        let ownedRequests = pending.filter {
+            identifier($0).hasPrefix(WindDownNotificationNamespace.prefix)
+        }
+        await store.removePendingNotificationRequests(withIdentifiers: plan.removeIdentifiers)
+
+        var added = 0
+        do {
+            for request in requests {
+                try await store.add(request)
+                added += 1
+            }
+            return .replaced(count: added)
+        } catch {
+            let addedIDs = requests.prefix(added).map(identifier)
+            await store.removePendingNotificationRequests(withIdentifiers: addedIDs)
+
+            var restored = true
+            for request in ownedRequests {
+                do {
+                    try await store.add(request)
+                } catch {
+                    restored = false
+                    break
+                }
+            }
+            return .failed(
+                requestedCount: requests.count,
+                addedCount: added,
+                previousScheduleRestored: restored
+            )
+        }
     }
 }

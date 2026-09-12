@@ -113,6 +113,99 @@ final class WindDownPlanningTests: XCTestCase {
     }
 }
 
+final actor FakeNotificationCenter: WindDownNotificationStore {
+    struct Request: Equatable, Sendable {
+        let identifier: String
+    }
+
+    private var pending: [Request]
+    private let failingIdentifier: String?
+
+    init(pending: [Request], failingIdentifier: String? = nil) {
+        self.pending = pending
+        self.failingIdentifier = failingIdentifier
+    }
+
+    func pendingRequests() async -> [Request] { pending }
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) async {
+        pending.removeAll { identifiers.contains($0.identifier) }
+    }
+
+    func add(_ request: Request) async throws {
+        if request.identifier == failingIdentifier {
+            throw FakeError.addFailed
+        }
+        pending.append(request)
+    }
+
+    func snapshot() -> [Request] { pending }
+
+    enum FakeError: Error {
+        case addFailed
+    }
+}
+
+final class WindDownReplacementTransactionTests: XCTestCase {
+    private let prefix = WindDownNotificationNamespace.prefix
+
+    func testFullSystemQueueFailsBeforeRemovingOwnedRequests() async throws {
+        let owned = FakeNotificationCenter.Request(identifier: prefix + "old")
+        let other = (0..<63).map { FakeNotificationCenter.Request(identifier: "other.\($0)") }
+        let center = FakeNotificationCenter(pending: [owned] + other)
+        let requests = [
+            FakeNotificationCenter.Request(identifier: prefix + "new-1"),
+            FakeNotificationCenter.Request(identifier: prefix + "new-2")
+        ]
+
+        do {
+            _ = try await WindDownNotificationReplacementEngine.replace(
+                store: center,
+                requests: requests,
+                identifier: \.identifier
+            )
+            XCTFail("A full queue must reject replacement before mutation")
+        } catch {
+            XCTAssertEqual(
+                error as? WindDownPlanningError,
+                .insufficientQueueCapacity(available: 1, requested: 2)
+            )
+        }
+        let snapshot = await center.snapshot()
+        XCTAssertEqual(snapshot, [owned] + other)
+    }
+
+    func testNthAddFailureRestoresOldOwnedRequestsAndReportsUnchanged() async throws {
+        let old = [
+            FakeNotificationCenter.Request(identifier: prefix + "old-1"),
+            FakeNotificationCenter.Request(identifier: prefix + "old-2")
+        ]
+        let retained = FakeNotificationCenter.Request(identifier: "other.app")
+        let center = FakeNotificationCenter(
+            pending: old + [retained],
+            failingIdentifier: prefix + "new-2"
+        )
+        let requests = [
+            FakeNotificationCenter.Request(identifier: prefix + "new-1"),
+            FakeNotificationCenter.Request(identifier: prefix + "new-2"),
+            FakeNotificationCenter.Request(identifier: prefix + "new-3")
+        ]
+
+        let result = try await WindDownNotificationReplacementEngine.replace(
+            store: center,
+            requests: requests,
+            identifier: \.identifier
+        )
+
+        XCTAssertEqual(
+            result,
+            .failed(requestedCount: 3, addedCount: 1, previousScheduleRestored: true)
+        )
+        let snapshot = await center.snapshot().map(\.identifier).sorted()
+        XCTAssertEqual(snapshot, (old + [retained]).map(\.identifier).sorted())
+    }
+}
+
 final class LiveActivityModelTests: XCTestCase {
     func testFixedEndBecomesStaleWithoutClaimingRelease() {
         let end = Date(timeIntervalSince1970: 100)
@@ -129,6 +222,38 @@ final class LiveActivityModelTests: XCTestCase {
         XCTAssertEqual(
             AmbientLiveActivityPolicy.lifetime(for: Date(timeIntervalSince1970: 8 * 60 * 60 + 1), now: now),
             .mayBecomeStaleAfterEightHours
+        )
+    }
+
+    func testWidgetPresentationAlwaysUsesStaleCopyWhenContextIsStale() {
+        let display = AmbientLiveActivityPresentation(status: .releaseObserved, isStale: true)
+        XCTAssertEqual(display.title, "Status stale")
+        XCTAssertEqual(display.compactLabel, "STALE")
+        XCTAssertTrue(display.accessibilityLabel.contains("open Phone Lockbox to reconcile"))
+    }
+
+    func testLiveActivityUpdatesCannotMoveEndOrClaimUnobservedRelease() {
+        let end = Date(timeIntervalSince1970: 100)
+        let attributes = AmbientLiveActivityAttributes(sessionID: "session", fixedEnd: end)
+        XCTAssertEqual(
+            AmbientLiveActivityPolicy.updateRejection(
+                attributes: attributes,
+                requestedFixedEnd: Date(timeIntervalSince1970: 101),
+                status: .plannedSession
+            ),
+            .fixedEndMismatch
+        )
+        XCTAssertEqual(
+            AmbientLiveActivityPolicy.updateRejection(
+                attributes: attributes,
+                requestedFixedEnd: end,
+                status: .releaseObserved
+            ),
+            .releaseObservationRequired
+        )
+        XCTAssertEqual(
+            AmbientLiveActivityPolicy.startRejection(status: .releaseObserved),
+            .releaseObservationRequired
         )
     }
 }

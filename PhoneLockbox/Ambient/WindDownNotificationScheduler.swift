@@ -24,6 +24,7 @@ public actor WindDownNotificationScheduler {
         case authorizationDenied
         case tooManyRequests
         case invalidRequestIdentifier
+        case insufficientQueueCapacity(available: Int, requested: Int)
         case underlying(String)
 
         public var errorDescription: String? {
@@ -32,6 +33,8 @@ public actor WindDownNotificationScheduler {
             case .authorizationDenied: return "Notifications are disabled for Phone Lockbox."
             case .tooManyRequests: return "Wind-down scheduling is limited to seven notifications."
             case .invalidRequestIdentifier: return "A wind-down request had an invalid identifier."
+            case .insufficientQueueCapacity(let available, let requested):
+                return "Wind-down was not changed: only \(available) notification queue slot(s) are available for \(requested) request(s)."
             case .underlying(let message): return message
             }
         }
@@ -68,14 +71,17 @@ public actor WindDownNotificationScheduler {
 
     /// Replaces this adapter's requests and leaves every other app request alone.
     /// The supplied occurrences are already concrete and are never repeating.
-    public func replace(occurrences: [WindDownOccurrence], calendar: Calendar) async throws {
+    /// Capacity is checked before owned requests are removed. If a later add
+    /// fails, the transaction reports whether the old schedule was restored.
+    public func replace(
+        occurrences: [WindDownOccurrence],
+        calendar: Calendar
+    ) async throws -> WindDownReplacementOutcome {
         guard occurrences.count <= WindDownConfiguration.maximumScheduledOccurrences else {
             throw SchedulerError.tooManyRequests
         }
-        guard occurrences.allSatisfy({ $0.identifier.hasPrefix(WindDownNotificationNamespace.prefix) }) else {
-            throw SchedulerError.invalidRequestIdentifier
-        }
-        guard Set(occurrences.map(\.identifier)).count == occurrences.count else {
+        guard occurrences.allSatisfy({ $0.identifier.hasPrefix(WindDownNotificationNamespace.prefix) }),
+              Set(occurrences.map(\.identifier)).count == occurrences.count else {
             throw SchedulerError.invalidRequestIdentifier
         }
 
@@ -88,11 +94,7 @@ public actor WindDownNotificationScheduler {
             throw SchedulerError.authorizationDenied
         }
 
-        let pending = await pendingRequests()
-        let ownIDs = pending.map(\.identifier).filter { $0.hasPrefix(WindDownNotificationNamespace.prefix) }
-        center.removePendingNotificationRequests(withIdentifiers: ownIDs)
-
-        for occurrence in occurrences {
+        let requests = occurrences.map { occurrence in
             let content = UNMutableNotificationContent()
             content.title = "Wind-down soon"
             content.body = "Your planned bedtime session begins soon."
@@ -100,12 +102,28 @@ public actor WindDownNotificationScheduler {
             var components = occurrence.triggerComponents
             components.timeZone = calendar.timeZone
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-            let request = UNNotificationRequest(identifier: occurrence.identifier, content: content, trigger: trigger)
-            do {
-                try await add(request)
-            } catch {
-                throw SchedulerError.underlying(error.localizedDescription)
-            }
+            return StoredNotificationRequest(
+                identifier: occurrence.identifier,
+                request: UNNotificationRequest(
+                    identifier: occurrence.identifier,
+                    content: content,
+                    trigger: trigger
+                )
+            )
+        }
+
+        do {
+            return try await WindDownNotificationReplacementEngine.replace(
+                store: UserNotificationCenterStore(center: center),
+                requests: requests,
+                identifier: \.identifier
+            )
+        } catch WindDownPlanningError.insufficientQueueCapacity(let available, let requested) {
+            throw SchedulerError.insufficientQueueCapacity(available: available, requested: requested)
+        } catch WindDownPlanningError.invalidLimit {
+            throw SchedulerError.tooManyRequests
+        } catch {
+            throw SchedulerError.underlying(error.localizedDescription)
         }
     }
 
@@ -136,10 +154,35 @@ public actor WindDownNotificationScheduler {
             }
         }
     }
+}
 
-    private func add(_ request: UNNotificationRequest) async throws {
+private struct StoredNotificationRequest: @unchecked Sendable {
+    let identifier: String
+    let request: UNNotificationRequest
+}
+
+private struct UserNotificationCenterStore: WindDownNotificationStore {
+    let center: UNUserNotificationCenter
+
+    func pendingRequests() async -> [StoredNotificationRequest] {
+        await withCheckedContinuation { continuation in
+            center.getPendingNotificationRequests { requests in
+                continuation.resume(
+                    returning: requests.map {
+                        StoredNotificationRequest(identifier: $0.identifier, request: $0)
+                    }
+                )
+            }
+        }
+    }
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) async {
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    }
+
+    func add(_ request: StoredNotificationRequest) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            center.add(request) { error in
+            center.add(request.request) { error in
                 if let error { continuation.resume(throwing: error) }
                 else { continuation.resume() }
             }
