@@ -257,6 +257,16 @@ final class ScreenTimeCoordinator: ObservableObject {
 
                 let schedule = manualSchedule(start: startedAt, end: end)
                 try activityCenter.startMonitoring(Self.manualActivityName, during: schedule)
+                guard let registered = activityCenter.schedule(for: Self.manualActivityName),
+                      activityCenter.activities.contains(Self.manualActivityName),
+                      RuntimeScheduleDecision.manualRegistrationMatches(
+                          end: end,
+                          intervalEnd: registered.intervalEnd,
+                          repeats: registered.repeats,
+                          calendar: Calendar.current
+                      ) else {
+                    throw RuntimeValidationError.invalidConfiguration("The OS did not retain the expected finite manual end route.")
+                }
                 manualRegistered = true
                 context.document.manualRegistrationIntent = false
                 context.document.manualRegistrationActive = true
@@ -679,6 +689,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         guard let store else { return }
         var shouldRegisterPending = false
         var shouldStopManual = false
+        var reconciliationSucceeded = false
         do {
             try store.withTransaction { context in
                 var changed = RuntimeLifecycle.expireNaturalSessions(&context.document, at: date)
@@ -722,10 +733,16 @@ final class ScreenTimeCoordinator: ObservableObject {
                 }
                 context.document.record(RuntimeDiagnostic(operation: intent == .clear ? .policyCleared : .policyApplied, observedAt: Date(), detail: intent == .clear ? "Runtime reconciliation cleared this app's named policy." : (mustApplyLegacyPrototype ? "Runtime reconciliation replayed the developer prototype policy." : "Runtime reconciliation applied frozen active policy.")), succeeded: true)
                 try context.commit()
+                // Only a completed policy side effect resolves a prior
+                // reconciliation failure. A no-op guard (for example while
+                // authorization is unavailable) must not make the UI forget
+                // the source error merely because another action foregrounded
+                // the app.
+                reconciliationSucceeded = true
             }
             if shouldStopManual { activityCenter.stopMonitoring([Self.manualActivityName]) }
             if shouldRegisterPending { registerConfiguredSchedule() }
-            reconciliationError = nil
+            if reconciliationSucceeded { reconciliationError = nil }
             refreshDocument()
         } catch {
             refreshDocument()
@@ -754,13 +771,12 @@ final class ScreenTimeCoordinator: ObservableObject {
             try store.transaction { context in
                 if let registered,
                    let session = context.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }) {
-                    let end = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: session.end)
-                    routeMatches = registered.repeats == false
-                        && registered.intervalEnd.hour == end.hour
-                        && registered.intervalEnd.minute == end.minute
-                        && (registered.intervalEnd.year == nil || registered.intervalEnd.year == end.year)
-                        && (registered.intervalEnd.month == nil || registered.intervalEnd.month == end.month)
-                        && (registered.intervalEnd.day == nil || registered.intervalEnd.day == end.day)
+                    routeMatches = RuntimeScheduleDecision.manualRegistrationMatches(
+                        end: session.end,
+                        intervalEnd: registered.intervalEnd,
+                        repeats: registered.repeats,
+                        calendar: Calendar.current
+                    )
                 }
                 let changed = RuntimeLifecycle.normalizeManualRegistration(
                     &context,
@@ -816,7 +832,17 @@ final class ScreenTimeCoordinator: ObservableObject {
             try store.transaction { document in
                 guard document.sessions.contains(where: {
                     $0.id == pending.id && ($0.state == .active || $0.state == .recoveryPending) && $0.isEffective(at: Date())
-                }) else { return }
+                }),
+                let registered = activityCenter.schedule(for: Self.manualActivityName),
+                activityCenter.activities.contains(Self.manualActivityName),
+                RuntimeScheduleDecision.manualRegistrationMatches(
+                    end: pending.end,
+                    intervalEnd: registered.intervalEnd,
+                    repeats: registered.repeats,
+                    calendar: Calendar.current
+                ) else {
+                    throw RuntimeValidationError.invalidConfiguration("The OS did not retain the expected finite manual end route.")
+                }
                 document.manualRegistrationIntent = false
                 document.manualRegistrationActive = true
                 document.policyIntent = .apply

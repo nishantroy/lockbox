@@ -93,14 +93,33 @@ final class MonitorExtension: DeviceActivityMonitor {
         let now = Date()
         do {
             try store.withTransaction { context in
-                guard context.document.manualRegistrationActive || context.document.manualRegistrationIntent else {
-                    try replayCurrentPolicy(in: context, at: now, detail: "Unowned manual start replayed current aggregate.")
-                    return
+                let routeExists = activityCenter.activities.contains(manualActivityName)
+                let registered = activityCenter.schedule(for: manualActivityName)
+                let session = context.document.sessions.first {
+                    $0.origin == .manual && $0.isEffective(at: now) && now < $0.end
                 }
-                guard let session = context.document.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }) else {
-                    context.document.manualRegistrationActive = false
-                    context.document.manualRegistrationIntent = false
-                    try replayCurrentPolicy(in: context, at: now, detail: "Manual start without a current session replayed current aggregate.")
+                let routeMatches = routeExists && registered != nil && session.map {
+                    RuntimeScheduleDecision.manualRegistrationMatches(
+                        end: $0.end,
+                        intervalEnd: registered!.intervalEnd,
+                        repeats: registered!.repeats
+                    )
+                } ?? false
+                // A callback from a stale route must not turn a manual session
+                // back into an enforceable one. Normalize the route flags before
+                // replaying the current aggregate, so an overlapping scheduled
+                // session is preserved while the unowned manual session waits
+                // for replacement registration (or is retired by the shared
+                // normalization rule).
+                _ = RuntimeLifecycle.normalizeManualRegistration(
+                    &context.document,
+                    at: now,
+                    routeExists: routeExists,
+                    routeMatches: routeMatches
+                )
+                guard routeMatches, let session else {
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidStart rejected: no matching finite OS end route; current aggregate replayed."), succeeded: false)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Unowned or mismatched manual start replayed current aggregate.")
                     return
                 }
                 context.document.manualRegistrationActive = true
@@ -173,6 +192,7 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func handleManualEnd() {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
+        var shouldStopManualMonitoring = false
         do {
             try store.withTransaction { context in
                 let hasLiveManual = context.document.sessions.contains {
@@ -185,6 +205,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                     _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
                     context.document.manualRegistrationActive = false
                     context.document.manualRegistrationIntent = false
+                    shouldStopManualMonitoring = true
                     _ = RuntimeLifecycle.normalizeRecoveryCommitment(&context.document, at: now)
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidEnd; natural finite end reconciled."), succeeded: true)
                 } else if !hasLiveManual {
@@ -194,6 +215,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                     // durable intent against any scheduled overlap.
                     context.document.manualRegistrationActive = false
                     context.document.manualRegistrationIntent = false
+                    shouldStopManualMonitoring = true
                     _ = RuntimeLifecycle.normalizeRecoveryCommitment(&context.document, at: now)
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "manual intervalDidEnd replayed a terminal or already-released session."), succeeded: true)
                 } else {
@@ -203,6 +225,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                 }
                 try replayCurrentPolicy(in: context, at: now, detail: "Manual-end reconciliation used the current aggregate.")
             }
+            if shouldStopManualMonitoring { activityCenter.stopMonitoring([manualActivityName]) }
         } catch { try? record(store: store, operation: .policyClearFailed, detail: error.localizedDescription, succeeded: false) }
     }
 
