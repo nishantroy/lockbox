@@ -156,7 +156,9 @@ public struct Pairing: Codable, Hashable, Sendable {
     public var state: PairingState
 
     public func validate() throws {
+        try requireIdentifier(pairingID, name: "pairing ID")
         try owner.validate(); try approver.validate()
+        try requireTimestamp(createdAt, name: "pairing creation time")
         guard owner.role == .owner, approver.role == .trustedApprover, epoch > 0 else { throw CompanionError.malformed("invalid pairing") }
     }
 }
@@ -445,9 +447,10 @@ public struct CompanionClient: Sendable {
         return value
     }
 
-    public func submitApproval(request: TrustedRequest, pairing: Pairing, decision: ApproverDecision) throws -> Approval {
+    public func submitApproval(request: TrustedRequest, pairing: Pairing, decision: ApproverDecision,
+                                approvalID: String = UUID().uuidString) throws -> Approval {
         guard signer.identity == pairing.approver else { throw CompanionError.unauthorized }
-        let unsigned = Approval(approvalID: UUID().uuidString, requestID: request.requestID, pairingID: pairing.pairingID,
+        let unsigned = Approval(approvalID: approvalID, requestID: request.requestID, pairingID: pairing.pairingID,
                                 pairEpoch: pairing.epoch, sessionID: request.sessionID, activeSetID: request.activeSetID,
                                 approver: signer.identity, decision: decision, issuedAt: now(), signature: Data())
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).approval", fields: unsigned.signingFields())

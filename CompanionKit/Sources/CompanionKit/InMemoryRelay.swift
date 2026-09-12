@@ -28,10 +28,19 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         let snapshot: RelaySnapshot
         do { snapshot = try JSONDecoder().decode(RelaySnapshot.self, from: data) }
         catch { throw CompanionError.malformed("invalid relay snapshot") }
-        guard snapshot.invitations.count <= 10_000, snapshot.pendingAcceptances.count <= 10_000,
-              snapshot.pairings.count <= 10_000, snapshot.requests.count <= 10_000,
-              snapshot.approvals.count <= 10_000 else { throw CompanionError.malformed("relay snapshot too large") }
+        guard snapshot.invitations.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.pairings.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.sessions.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.requests.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.approvals.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.usedInviteIDs.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.usedApprovalIDs.count <= CompanionLimits.maxSnapshotRecords else {
+            throw CompanionError.malformed("relay snapshot too large")
+        }
         try snapshot.owner.validate()
+        for inviteID in snapshot.usedInviteIDs { try requireIdentifier(inviteID, name: "used invite ID") }
+        for approvalID in snapshot.usedApprovalIDs { try requireIdentifier(approvalID, name: "used approval ID") }
         try self.init(owner: snapshot.owner, now: snapshot.currentTime)
         for invitation in snapshot.invitations {
             try invitation.payload.validate(at: invitation.payload.issuedAt)
@@ -190,6 +199,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             let approval = try decode(Approval.self, operation.body)
             guard operation.signer == approval.approver else { throw CompanionError.unauthorized }
             try approval.validateSignature()
+            guard approvals[approval.approvalID] == nil,
+                  !usedApprovalIDs.contains(approval.approvalID) else { throw CompanionError.replay }
             guard let request = requests[approval.requestID] else { throw CompanionError.notFound }
             var currentRequest = request; updateExpiry(&currentRequest); requests[request.requestID] = currentRequest
             guard currentRequest.effectiveStatus(at: currentTime) == .pending,
@@ -211,26 +222,50 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             let use = try decode(ApprovalUse.self, operation.body)
             try requireIdentifier(use.useID, name: "use ID")
             guard operation.signer == owner, let request = requests[use.requestID], request.owner == owner else { throw CompanionError.unauthorized }
+            // Only the immutable approval record created by the relay can be
+            // consumed. A valid signature alone is not proof that the relay
+            // accepted the approval or that its target actually approved.
+            guard let acceptedApproval = approvals[use.approval.approvalID],
+                  acceptedApproval == use.approval else { throw CompanionError.replay }
             var currentRequest = request; updateExpiry(&currentRequest); requests[request.requestID] = currentRequest
+            let currentSession = sessions[owner.identityID]
             guard currentRequest.effectiveStatus(at: currentTime) == .approved,
-                  sessions[owner.identityID]?.isActive(at: currentTime) == true,
-                  currentRequest.sessionID == sessions[owner.identityID]?.sessionID,
-                  currentRequest.activeSetID == sessions[owner.identityID]?.activeSetID,
-                  !usedApprovalIDs.contains(use.approval.approvalID),
-                  !usedApprovalIDs.contains(use.useID), use.approval.requestID == use.requestID,
+                  currentSession?.isActive(at: currentTime) == true,
+                  currentRequest.sessionID == currentSession?.sessionID,
+                  currentRequest.activeSetID == currentSession?.activeSetID,
+                  acceptedApproval.requestID == currentRequest.requestID,
+                  acceptedApproval.sessionID == currentRequest.sessionID,
+                  acceptedApproval.activeSetID == currentRequest.activeSetID,
+                  currentRequest.targetedApproverIDs.contains(acceptedApproval.approver.identityID),
+                  currentRequest.decisions[acceptedApproval.approver.identityID] == .approved,
+                  !usedApprovalIDs.contains(acceptedApproval.approvalID),
+                  !usedApprovalIDs.contains(use.useID),
+                  use.approval.requestID == use.requestID,
                   use.approval.decision == .approved else { throw CompanionError.replay }
-            guard let pairing = pairings[use.approval.pairingID], pairing.state == .active,
-                  pairing.epoch == use.approval.pairEpoch, pairing.approver.identityID == use.approval.approver.identityID else {
+            guard let pairing = pairings[acceptedApproval.pairingID], pairing.owner == owner,
+                  pairing.state == .active, pairing.epoch == acceptedApproval.pairEpoch,
+                  pairing.approver == acceptedApproval.approver else {
                 throw CompanionError.revokedPairing
             }
-            try use.approval.validateSignature()
-            usedApprovalIDs.insert(use.approval.approvalID); usedApprovalIDs.insert(use.useID)
-            return .verification(ApprovalVerification(approval: use.approval, verifiedAt: currentTime, useID: use.useID))
+            try acceptedApproval.validateSignature()
+            usedApprovalIDs.insert(acceptedApproval.approvalID); usedApprovalIDs.insert(use.useID)
+            return .verification(ApprovalVerification(approval: acceptedApproval, verifiedAt: currentTime, useID: use.useID))
 
         case "cancel":
             let reference = try decode(RequestReference.self, operation.body)
             guard operation.signer == owner, var request = requests[reference.requestID], request.owner == owner else { throw CompanionError.unauthorized }
-            guard request.effectiveStatus(at: currentTime) == .pending else { throw CompanionError.invalidTransition }
+            updateExpiry(&request)
+            guard request.effectiveStatus(at: currentTime) == .pending || request.effectiveStatus(at: currentTime) == .approved else {
+                throw CompanionError.invalidTransition
+            }
+            if request.effectiveStatus(at: currentTime) == .approved {
+                let hasConsumedApproval = approvals.values.contains {
+                    $0.requestID == request.requestID && $0.decision == .approved && usedApprovalIDs.contains($0.approvalID)
+                }
+                guard !hasConsumedApproval else { throw CompanionError.invalidTransition }
+            }
+            // Cancellation is durable before the acknowledgement is returned;
+            // a later use cannot race this state transition under the relay lock.
             request.status = .cancelled; requests[reference.requestID] = request
             return .acknowledgement
 

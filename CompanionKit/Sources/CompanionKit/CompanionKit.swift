@@ -31,6 +31,7 @@ public enum CompanionLimits {
     public static let maxInviteLifetime: TimeInterval = 7 * 24 * 60 * 60
     public static let maxRequestLifetime: TimeInterval = 24 * 60 * 60
     public static let maxSessionLifetime: TimeInterval = 7 * 24 * 60 * 60
+    public static let maxSnapshotRecords = 10_000
     public static let maxRateOperations = 30
     public static let rateWindow: TimeInterval = 60
 }
