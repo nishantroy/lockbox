@@ -1,7 +1,7 @@
 # Overnight reliability implementation review
 
-Date: 2026-09-12  
-Branch: `overnight/reliability`  
+Date: 2026-09-12
+Branch: `overnight/reliability`
 Scope: shared lifecycle/reconciliation contracts, the app coordinator, and the Device Activity monitor. No device deployment or device QA was performed.
 
 ## Delivered
