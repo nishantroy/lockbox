@@ -73,7 +73,7 @@ struct ConfigurationEditorView: View {
                     coordinator.saveConfiguration(start: coordinator.startComponents, end: coordinator.endComponents)
                 }
                 .frame(maxWidth: .infinity, minHeight: 44)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                 .disabled(!coordinator.canApplySelection || !coordinator.isAuthorized)
                 Text("Saving validates this policy before requesting the OS schedule. A successful request is not proof that every app is blocked or that callbacks arrive on time.")
                     .font(.footnote)

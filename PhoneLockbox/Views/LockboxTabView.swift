@@ -88,7 +88,7 @@ struct UnlockedLockboxView: View {
                     Label("Lock now", systemImage: "lock.fill")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                 .disabled(!coordinator.isAuthorized)
                 .accessibilityHint("Choose a finite focus lock duration")
                 Text("Block distractions for 30 minutes, 1 hour, or until a time you choose.")

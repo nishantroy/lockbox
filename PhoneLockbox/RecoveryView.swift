@@ -40,8 +40,8 @@ struct RecoveryView: View {
                             Button("Request recovery") {
                                 coordinator.requestRecovery()
                             }
+                            .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                             .disabled(!coordinator.isAuthorized)
-                            .frame(maxWidth: .infinity, minHeight: 44)
                         }
                     }
                 } else {
@@ -76,8 +76,7 @@ struct RecoveryView: View {
                         guard coordinator.canConfirmRecovery(at: .now) else { return }
                         showingConfirmation = true
                     }
-                    .buttonStyle(.borderedProminent)
-                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
                 } else if date < eligibleAt {
                     Text("The 15-minute wait is still in progress. Waiting alone never unlocks the phone.")
                         .font(.footnote)
@@ -95,6 +94,7 @@ struct RecoveryView: View {
             Button("Cancel recovery request", role: .destructive) {
                 coordinator.cancelRecovery()
             }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
         }
     }
 }

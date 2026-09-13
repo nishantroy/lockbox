@@ -30,7 +30,7 @@ public struct AmbientPrototypeView: View {
             } header: {
                 Text("Wind-down prototype")
             } footer: {
-                Text("Standalone reminder demo, not linked to saved bedtime rules. These are draft controls; Schedule or Disable applies them. Up to seven reminders remain scheduled if you leave this screen.")
+                Text("Standalone reminder demo, not linked to saved bedtime rules. Scheduled reminders remain until delivered or disabled.")
             }
 
             Button("Request notification permission") {
@@ -44,6 +44,8 @@ public struct AmbientPrototypeView: View {
                 }
             }
 
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+
             Button(windDownEnabled ? "Schedule wind-down" : "Disable wind-down") {
                 Task {
                     guard !isScheduling else { return }
@@ -52,6 +54,7 @@ public struct AmbientPrototypeView: View {
                     await applyWindDown()
                 }
             }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
             .disabled(isScheduling)
 
             Section {
@@ -65,12 +68,15 @@ public struct AmbientPrototypeView: View {
                 Button("Start demo") {
                     Task { await startDemo() }
                 }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                 Button("Update demo: recovery requested") {
                     Task { await updateDemo() }
                 }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 Button("End demo") {
                     Task { await endDemo() }
                 }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
             } footer: {
                 Text("Live Activities are best-effort presentation. They do not unlock or enforce restrictions.")
             }

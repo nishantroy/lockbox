@@ -14,6 +14,7 @@
 		23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		29FB4DAFD4FBC0B72B40C055 /* LockboxLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2B3F75B0611C6C2B3E834F4A /* RuntimeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */; };
+		3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */; };
 		3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */; };
 		3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */; };
 		510B03F537735BC5AEE4AC36 /* ShieldActionExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */; };
@@ -128,6 +129,7 @@
 		739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryCommitment.swift; sourceTree = "<group>"; };
 		78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualLockSheet.swift; sourceTree = "<group>"; };
 		8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmbientPrototypeView.swift; sourceTree = "<group>"; };
+		826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxActionButtonStyle.swift; sourceTree = "<group>"; };
 		89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryView.swift; sourceTree = "<group>"; };
 		9188ECB9FC75CDE19E1D7C66 /* DiagnosticsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsSection.swift; sourceTree = "<group>"; };
 		96DADA707D1D0A3DA8934C5A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -267,6 +269,7 @@
 			children = (
 				9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */,
 				9188ECB9FC75CDE19E1D7C66 /* DiagnosticsSection.swift */,
+				826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */,
 				0D9DB33B46E0F54F4E879C95 /* LockboxTabView.swift */,
 				78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */,
 				21D938BBE7A7D516BD85A479 /* PeopleView.swift */,
@@ -514,6 +517,7 @@
 				5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */,
 				81CF62C2C3A9B00D6340C077 /* DiagnosticsSection.swift in Sources */,
 				3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */,
+				3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */,
 				DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */,
 				70590D325CF4567FB7A7B12C /* LockboxTabView.swift in Sources */,
 				3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */,

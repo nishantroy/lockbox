@@ -48,6 +48,7 @@ struct SettingsView: View {
                 Button("Allow notifications") {
                     Task { await coordinator.requestWindDownNotificationAuthorization() }
                 }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 LabeledContent("Notification access", value: coordinator.windDownAuthorizationStatus)
                 if coordinator.windDownEnabled {
                     Text(coordinator.pendingWindDownNotificationCount == 0
@@ -132,7 +133,7 @@ private struct DeveloperToolsSection: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: 44)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
             .disabled(!coordinator.canApplySelection || coordinator.testScheduleActive || coordinator.hasOSRegistration || coordinator.recurringEnabledIntent || !coordinator.isAuthorized)
             Text(coordinator.testScheduleActive
                  ? "This developer restriction remains until Developer unlock now is used."
@@ -144,13 +145,16 @@ private struct DeveloperToolsSection: View {
                 Button("Disable recurring schedule", role: .destructive) {
                     coordinator.stopSchedule()
                 }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
             }
             Button("Developer unlock now", role: .destructive) {
                 showingDeveloperUnlock = true
             }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
             Button("Emergency reset shared state", role: .destructive) {
                 showingEmergencyReset = true
             }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
             Text("Use these controls only for development cleanup. Manual cleanup is not proof of automatic release.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)

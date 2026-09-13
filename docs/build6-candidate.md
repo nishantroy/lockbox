@@ -10,4 +10,6 @@ Changes from build 5:
 - Internal notification queue counts and long verification text are not shown in ordinary UI.
 - Developer Live Activity screen reconciles an existing demo after navigation instead of incorrectly saying inactive.
 
-Evidence: 84 root tests and 15 AmbientKit tests passed; simulator and signed device builds passed; Terra found no P0/P1 blocker and one P2 demo-state issue, fixed before this build. Device presentation remains owner QA, not established by compilation.
+Evidence: 84 root tests and 15 AmbientKit tests passed; simulator and signed device builds passed; Terra found no P0/P1 blocker and one P2 demo-state issue, fixed before this build. Owner subsequently confirmed the requested physical-device wind-down and Live Activity checks passed.
+
+Owner feedback after QA: ordinary action buttons needed a clearer touch-down state. Source now uses a consistent full-width press style (scale, darkening and opacity) for primary, secondary and destructive actions; toolbar/navigation controls retain native behavior. This follow-up passed 84 tests and a simulator build but is not installed in build 6.
