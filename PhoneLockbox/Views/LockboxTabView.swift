@@ -167,6 +167,8 @@ struct UnlockedLockboxView: View {
 
 private struct TonightCard: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @State private var proposedBedtimeEnd: Date?
+    @State private var showingBedtimeConfirmation = false
 
     var body: some View {
         LockboxCard {
@@ -186,8 +188,21 @@ private struct TonightCard: View {
                         Divider().frame(height: 38).overlay(LockboxTheme.border)
                         scheduleTime(title: "Opens at", value: occurrence.end.formatted(date: .abbreviated, time: .shortened))
                     }
-                    // Leave this card's lower area open for the approved bedtime-start action.
-                    Color.clear.frame(height: 18)
+                    Button {
+                        // Freeze the absolute boundary at preview time. The
+                        // confirmation submits this same Date unchanged;
+                        // runtime rejects it if the saved occurrence is stale.
+                        let previewedAt = Date()
+                        guard let end = coordinator.bedtimeNowProposedEnd(at: previewedAt) else { return }
+                        proposedBedtimeEnd = end
+                        showingBedtimeConfirmation = true
+                    } label: {
+                        Label("Start bedtime now", systemImage: "moon.fill")
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                    .disabled(!coordinator.canStartBedtimeNow)
+                    .accessibilityLabel("Start bedtime now")
+                    .accessibilityHint("Uses your saved bedtime rules and opens at the configured morning time")
                 } else {
                     Label("Automatic bedtime schedule is off", systemImage: "calendar.badge.exclamationmark")
                         .font(.headline)
@@ -195,6 +210,22 @@ private struct TonightCard: View {
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
+            }
+        }
+        .alert("Start bedtime now?", isPresented: $showingBedtimeConfirmation) {
+            Button("Start bedtime now") {
+                guard let proposedBedtimeEnd else { return }
+                coordinator.startBedtimeNow(expectedEnd: proposedBedtimeEnd)
+                self.proposedBedtimeEnd = nil
+            }
+            Button("Cancel", role: .cancel) {
+                proposedBedtimeEnd = nil
+            }
+        } message: {
+            if let proposedBedtimeEnd {
+                Text("Saved bedtime rules will be used. Your apps will open at \(proposedBedtimeEnd.formatted(date: .complete, time: .complete)). Future nights remain scheduled.")
+            } else {
+                Text("Saved bedtime rules will be used, and future nights remain scheduled.")
             }
         }
     }

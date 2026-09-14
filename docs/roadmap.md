@@ -23,6 +23,7 @@ No further product questionnaire is needed. The user wants autonomous progress. 
 - Real manual locks must have confirmed finite ends. The existing immediate prototype test is intentionally manually cleared and is not the finished Lock now feature.
 - No casual temporary unlock. Pending edits/disable affect future locks, not the current committed occurrence.
 - Maintain a tested developer cleanup route until automatic release is validated. Do not remove the prototype escape hatch before its replacement is safe.
+- **Midnight Original** is the selected production visual direction; its current implementation remains a source QA candidate, not device-passed evidence. **Start bedtime now** is integrated as a bounded runtime/UI source candidate and still requires the validation gates below; no device pass is implied.
 - Launcher/widgets, NFC, weekday profiles, distribution, and cosmetic redesign are deferred.
 
 ## R1 — Honest operational state and observable scheduling
