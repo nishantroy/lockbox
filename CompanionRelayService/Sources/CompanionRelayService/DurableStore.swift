@@ -221,7 +221,12 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
     private var database: DurableRelayDatabase
     private var failurePoint: DurableStoreFailurePoint?
 
-    public init(database: DurableRelayDatabase = DurableRelayDatabase()) {
+    public init() {
+        self.database = DurableRelayDatabase()
+    }
+
+    public init(database: DurableRelayDatabase) throws {
+        try Self.validate(database)
         self.database = database
     }
 
@@ -231,7 +236,7 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
             throw DurableStoreError.invalidSnapshot
         }
         try Self.validate(database)
-        self.init(database: database)
+        try self.init(database: database)
     }
 
     public func read() throws -> DurableRelayDatabase {
@@ -254,6 +259,7 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
         lock.lock(); defer { lock.unlock() }
         var working = database
         let value = try body(&working)
+        try Self.validate(working)
         switch failurePoint {
         case .beforeCommit:
             failurePoint = nil
@@ -268,29 +274,100 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
         }
     }
 
-    private static func validate(_ database: DurableRelayDatabase) throws {
+    static func validate(_ database: DurableRelayDatabase) throws {
         guard database.owners.count <= 10_000 else { throw DurableStoreError.oversizedState }
         for (ownerID, ledger) in database.owners {
             guard ownerID == ledger.owner.identityID, ledger.owner.role == .owner,
-                  ledger.revision >= 0, ledger.operations.count <= 10_000,
-                  ledger.audit.count <= DurableRelayLimits.maxAuditEvents else {
+                  ledger.revision >= 0, ledger.operations.count <= DurableRelayLimits.maxOperationRecords,
+                  ledger.audit.count <= DurableRelayLimits.maxAuditEvents,
+                  ledger.invitations.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.pairings.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.sessions.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.requests.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.approvals.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.approvalUses.count <= CompanionLimits.maxSnapshotRecords else {
                 throw DurableStoreError.invalidSnapshot
             }
             try ledger.owner.validate()
-            for record in ledger.operations.values {
-                guard record.ownerID == ownerID, record.committedRevision > 0,
+
+            for (key, record) in ledger.operations {
+                guard key == record.operationID, record.ownerID == ownerID,
+                      record.committedRevision > 0, record.committedRevision <= ledger.revision,
                       record.bodyDigest.count == 32, record.responseDigest.count == 32,
                       record.responseDigest == Data(SHA256.hash(data: record.responseBody)) else {
                     throw DurableStoreError.invalidSnapshot
                 }
+                try record.signer.validate()
+                try requireValidDate(record.committedAt)
             }
-            for invitation in ledger.invitations.values {
+            for (key, invitation) in ledger.invitations {
+                guard key == invitation.invitation.payload.inviteID,
+                      invitation.invitation.payload.owner == ledger.owner else {
+                    throw DurableStoreError.invalidSnapshot
+                }
                 try invitation.invitation.validateSignature()
+                if let consumedAt = invitation.consumedAt { try requireValidDate(consumedAt) }
             }
-            for pairing in ledger.pairings.values { try pairing.pairing.validate() }
-            for session in ledger.sessions.values { try session.session.validate() }
-            for request in ledger.requests.values { try request.request.validateShapeForDurableStore() }
-            for approval in ledger.approvals.values { try approval.approval.validateSignature() }
+            for (key, acceptance) in ledger.pendingAcceptances {
+                guard key == acceptance.acceptanceID, acceptance.owner == ledger.owner else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try acceptance.validate()
+            }
+            for (key, pairing) in ledger.pairings {
+                guard key == pairing.pairing.pairingID, pairing.pairing.owner == ledger.owner else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try pairing.pairing.validate()
+                if let revokedAt = pairing.revokedAt { try requireValidDate(revokedAt) }
+            }
+            for (key, epoch) in ledger.pairingEpochs {
+                guard isValidIdentifier(key), epoch > 0 else { throw DurableStoreError.invalidSnapshot }
+            }
+            for (key, session) in ledger.sessions {
+                guard key == session.session.sessionID, session.session.owner == ledger.owner else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try session.session.validate(); try requireValidDate(session.publishedAt)
+            }
+            if let currentSessionID = ledger.currentSessionID {
+                guard ledger.sessions[currentSessionID] != nil else { throw DurableStoreError.invalidSnapshot }
+            }
+            for (key, request) in ledger.requests {
+                guard key == request.request.requestID, request.request.owner == ledger.owner else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try request.request.validateShapeForDurableStore()
+                if let date = request.cancelledAt { try requireValidDate(date) }
+                if let date = request.expiredAt { try requireValidDate(date) }
+                if let date = request.supersededAt { try requireValidDate(date) }
+            }
+            for (key, approval) in ledger.approvals {
+                guard key == approval.approval.approvalID else { throw DurableStoreError.invalidSnapshot }
+                try approval.approval.validateSignature(); try requireValidDate(approval.acceptedAt)
+            }
+            for (key, use) in ledger.approvalUses {
+                guard key == use.useID, isValidIdentifier(use.useID),
+                      isValidIdentifier(use.approvalID), isValidIdentifier(use.requestID),
+                      use.committedRevision > 0, use.committedRevision <= ledger.revision else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try requireValidDate(use.usedAt)
+            }
+            for (key, limit) in ledger.rateLimits {
+                guard isValidIdentifier(key), limit.acceptedOperationTimes.count <= DurableRelayLimits.maxRateTimestamps,
+                      limit.acceptedOperationTimes.allSatisfy({ $0.timeIntervalSince1970.isFinite }) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                for timestamp in limit.acceptedOperationTimes { try requireValidDate(timestamp) }
+            }
+            for event in ledger.audit {
+                guard event.revision > 0, event.revision <= ledger.revision,
+                      isValidIdentifier(event.operationID), isValidIdentifier(event.kind),
+                      isValidIdentifier(event.signerID) else { throw DurableStoreError.invalidSnapshot }
+                try requireValidDate(event.occurredAt)
+            }
         }
     }
 }

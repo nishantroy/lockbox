@@ -11,6 +11,8 @@ public enum DurableRelayError: Error, Equatable, Sendable {
     case responseCorrupt
     case revisionOverflow
     case unsupportedOperation(String)
+    case unauthorized
+    case mutationChangedRevision(expected: Int64, actual: Int64)
 }
 
 /// Metadata is part of the signed operation body. It cannot be supplied by a

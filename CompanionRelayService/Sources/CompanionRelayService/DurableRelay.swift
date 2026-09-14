@@ -4,11 +4,66 @@ import CompanionKit
 /// The service-core boundary for a durable mutation. The caller resolves the
 /// owner from the authenticated request before invoking this method; the
 /// mutation itself runs while that owner's ledger is exclusively locked.
+public struct DurableAuthorizationPolicy: Sendable {
+    public typealias ApproverAuthorization = @Sendable
+        (_ operation: SignedOperation, _ owner: DeviceIdentity, _ ledger: DurableOwnerLedger) throws -> Bool
+
+    private let ownerOnlyKinds: Set<String>
+    private let approverKinds: Set<String>
+    private let approverAuthorization: ApproverAuthorization
+
+    public init(ownerOnlyKinds: Set<String>, approverKinds: Set<String>,
+                approverAuthorization: @escaping ApproverAuthorization) {
+        self.ownerOnlyKinds = ownerOnlyKinds
+        self.approverKinds = approverKinds
+        self.approverAuthorization = approverAuthorization
+    }
+
+    /// Safe default for the reference tests: only the explicitly listed kind
+    /// can be submitted, and it must be signed by the target owner.
+    public static func ownerOnly(kinds: Set<String> = ["ack"]) -> Self {
+        Self(ownerOnlyKinds: kinds, approverKinds: [], approverAuthorization: { _, _, _ in false })
+    }
+
+    /// Convenience policy for operations whose approver must have an active,
+    /// validated pairing in the target owner's ledger.
+    public static func ownerAndActivePairing(ownerOnlyKinds: Set<String> = ["ack"],
+                                             approverKinds: Set<String>) -> Self {
+        Self(ownerOnlyKinds: ownerOnlyKinds, approverKinds: approverKinds) { operation, owner, ledger in
+            guard operation.signer.role == .trustedApprover else { return false }
+            return ledger.pairings.values.contains { record in
+                record.pairing.owner == owner && record.pairing.approver == operation.signer &&
+                record.pairing.state == .active && (try? record.pairing.validate()) != nil
+            }
+        }
+    }
+
+    fileprivate func authorize(operation: SignedOperation, owner: DeviceIdentity,
+                               ledger: DurableOwnerLedger) throws {
+        let ownerOperation = ownerOnlyKinds.contains(operation.kind)
+        let approverOperation = approverKinds.contains(operation.kind)
+        guard ownerOperation != approverOperation else {
+            throw DurableRelayError.unsupportedOperation(operation.kind)
+        }
+        if ownerOperation {
+            guard operation.signer == owner else { throw DurableRelayError.unauthorized }
+        } else {
+            guard operation.signer.role == .trustedApprover,
+                  try approverAuthorization(operation, owner, ledger) else {
+                throw DurableRelayError.unauthorized
+            }
+        }
+    }
+}
+
 public final class DurableRelayService: @unchecked Sendable {
     public let store: any DurableRelayStore
+    public let authorization: DurableAuthorizationPolicy
 
-    public init(store: any DurableRelayStore) {
+    public init(store: any DurableRelayStore,
+                authorization: DurableAuthorizationPolicy = .ownerOnly()) {
         self.store = store
+        self.authorization = authorization
     }
 
     /// Applies one signed mutation and records its response in the same store
@@ -42,6 +97,7 @@ public final class DurableRelayService: @unchecked Sendable {
         let bodyDigest = CompanionCanonical.digest(operation.body)
         return try store.transaction { database in
             var ledger = try ledger(for: owner, in: &database)
+            try authorization.authorize(operation: operation, owner: owner, ledger: ledger)
 
             if let prior = ledger.operations[envelope.operationID] {
                 guard prior.ownerID == owner.identityID,
@@ -66,11 +122,16 @@ public final class DurableRelayService: @unchecked Sendable {
                 throw DurableRelayError.staleRevision(expected: envelope.expectedRevision,
                                                        actual: ledger.revision)
             }
-            guard ledger.revision < Int64.max else { throw DurableRelayError.revisionOverflow }
+            let baseRevision = ledger.revision
+            guard baseRevision < Int64.max else { throw DurableRelayError.revisionOverflow }
 
             let result = try mutation(&ledger, envelope)
+            guard ledger.revision == baseRevision else {
+                throw DurableRelayError.mutationChangedRevision(expected: baseRevision,
+                                                                 actual: ledger.revision)
+            }
             let encoded = try DurableResultCodec.encode(result)
-            let committedRevision = ledger.revision + 1
+            let committedRevision = baseRevision + 1
             let record = DurableOperationRecord(
                 operationID: envelope.operationID,
                 ownerID: owner.identityID,
@@ -89,6 +150,7 @@ public final class DurableRelayService: @unchecked Sendable {
                 throw DurableStoreError.oversizedState
             }
             database.owners[owner.identityID] = ledger
+            try InMemoryDurableRelayStore.validate(database)
             let receipt = DurableOperationReceipt(operationID: record.operationID,
                                                   ownerID: record.ownerID,
                                                   revision: record.committedRevision,
@@ -163,7 +225,8 @@ public enum PostgreSQLDurableStoreContract {
     CREATE TABLE companion_owner (
         owner_id TEXT PRIMARY KEY,
         owner_identity JSONB NOT NULL,
-        revision BIGINT NOT NULL CHECK (revision >= 0)
+        revision BIGINT NOT NULL CHECK (revision >= 0),
+        state JSONB NOT NULL
     );
 
     CREATE TABLE companion_operation (
@@ -173,7 +236,7 @@ public enum PostgreSQLDurableStoreContract {
         signer_identity JSONB NOT NULL,
         request_digest BYTEA NOT NULL CHECK (octet_length(request_digest) = 32),
         response_kind TEXT NOT NULL,
-        response_body BYTEA NOT NULL,
+        response_body BYTEA NOT NULL CHECK (octet_length(response_body) <= 32768),
         response_digest BYTEA NOT NULL CHECK (octet_length(response_digest) = 32),
         committed_revision BIGINT NOT NULL CHECK (committed_revision > 0),
         committed_at TIMESTAMPTZ NOT NULL,
@@ -182,26 +245,54 @@ public enum PostgreSQLDurableStoreContract {
     );
     """
 
+    /// Executable transaction template. The adapter binds the numbered
+    /// parameters documented below and supplies the already validated state
+    /// produced by the service-core mutation.
     public static let transactionSQL = """
-    -- Every mutation, including the idempotency record, is one transaction.
     BEGIN;
-    SELECT revision FROM companion_owner WHERE owner_id = $1 FOR UPDATE;
-    -- Missing owner rows are inserted with revision 0 under the same transaction.
-    SELECT kind, signer_identity, request_digest, response_kind, response_body,
-           response_digest, committed_revision
+    SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+    INSERT INTO companion_owner (owner_id, owner_identity, revision, state)
+    VALUES ($1, $2::jsonb, 0, $3::jsonb)
+    ON CONFLICT (owner_id) DO NOTHING;
+
+    SELECT owner_id, owner_identity, revision, state
+      FROM companion_owner
+     WHERE owner_id = $1
+     FOR UPDATE;
+
+    SELECT operation_id, kind, signer_identity, request_digest,
+           response_kind, response_body, response_digest, committed_revision,
+           committed_at
       FROM companion_operation
-     WHERE owner_id = $1 AND operation_id = $2;
-    -- If found: require kind, signer identity, and request_digest to match;
-    -- return the stored response without invoking the mutation.
-    -- Otherwise require expected_revision = locked owner.revision.
-    -- Apply the mutation, increment revision, insert operation, then:
-    UPDATE companion_owner SET revision = $new_revision WHERE owner_id = $1;
+     WHERE owner_id = $1 AND operation_id = $4;
+
+    -- If the operation row exists, compare kind, signer_identity, and
+    -- request_digest. Return its response after COMMIT without mutating state.
+    -- For a new operation, the service checks expected_revision against the
+    -- locked revision and binds the following values:
+    -- $5 new JSON state, $6 response kind, $7 response body, $8 response
+    -- digest, $9 request digest, $10 kind, $11 signer JSON, $12 timestamp,
+    -- $13 committed revision (locked revision + 1).
+    UPDATE companion_owner
+       SET state = $5::jsonb, revision = $13
+     WHERE owner_id = $1 AND revision = $13 - 1;
+
+    INSERT INTO companion_operation (
+        owner_id, operation_id, kind, signer_identity, request_digest,
+        response_kind, response_body, response_digest, committed_revision,
+        committed_at
+    ) VALUES ($1, $4, $10, $11::jsonb, $9, $6, $7, $8, $13, $12::timestamptz);
+
     COMMIT;
-    -- Send the acknowledgement only after COMMIT succeeds. A retry after a
-    -- lost acknowledgement finds the committed operation above.
+    -- Acknowledgement is emitted only after COMMIT succeeds. On SQLSTATE
+    -- 40001 (serialization_failure), ROLLBACK and retry the complete
+    -- transaction with the same operation ID and expected revision.
     """
 
-    public static let isolationLevel = "SERIALIZABLE (or an equivalent owner-row FOR UPDATE lock)"
+    public static let parameterContract = "owner, ownerIdentityJSON, initialStateJSON, operationID, newStateJSON, responseKind, responseBody, responseDigest, requestDigest, kind, signerIdentityJSON, committedAt, committedRevision"
+    public static let serializationRetrySQLState = "40001"
+    public static let isolationLevel = "SERIALIZABLE with complete-transaction retry on SQLSTATE 40001"
 }
 
 public extension DurableOperationRecord {

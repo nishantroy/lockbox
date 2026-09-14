@@ -11,8 +11,9 @@ final class DurableRelayServiceTests: XCTestCase {
         try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
     }
 
-    private func operation(signer: DeviceSigner, id: String, revision: Int64, value: Int = 1) throws -> SignedOperation {
-        try DurableOperationFactory.make(kind: "ack", operationID: id,
+    private func operation(signer: DeviceSigner, id: String, revision: Int64,
+                           value: Int = 1, kind: String = "ack") throws -> SignedOperation {
+        try DurableOperationFactory.make(kind: kind, operationID: id,
                                          expectedRevision: revision,
                                          payload: Payload(value: value), signer: signer)
     }
@@ -112,5 +113,95 @@ final class DurableRelayServiceTests: XCTestCase {
         XCTAssertEqual(database.owners[second.identity.identityID]?.revision, 1)
         XCTAssertEqual(database.owners[first.identity.identityID]?.operations.count, 1)
         XCTAssertEqual(database.owners[second.identity.identityID]?.operations.count, 1)
+    }
+
+    func testOwnerOnlyPolicyRejectsHostileCrossOwnerSubmission() throws {
+        let ownerA = try owner()
+        let ownerB = try owner()
+        let store = InMemoryDurableRelayStore()
+        let service = DurableRelayService(store: store, authorization: .ownerOnly())
+        let hostile = try operation(signer: ownerA, id: "cross-owner", revision: 0)
+
+        XCTAssertThrowsError(try service.submit(hostile, owner: ownerB.identity) { _, _ in
+            XCTFail("authorization must run before mutation")
+            return .acknowledgement
+        }) { error in
+            XCTAssertEqual(error as? DurableRelayError, .unauthorized)
+        }
+        XCTAssertTrue(try store.read().owners.isEmpty)
+    }
+
+    func testApproverPolicyRequiresOwnerScopedPairingAuthorization() throws {
+        let targetOwner = try owner()
+        let approver = try DeviceSigner.create(role: .trustedApprover,
+                                               keyStore: InMemoryDeviceKeyStore())
+        let policy = DurableAuthorizationPolicy(ownerOnlyKinds: [], approverKinds: ["approve"]) {
+            operation, owner, ledger in
+            // This callback is the explicit integration seam: a production
+            // caller must validate an active pairing in this owner's ledger.
+            operation.signer == approver.identity && owner == targetOwner.identity &&
+                ledger.owner == targetOwner.identity && !ledger.pairings.isEmpty
+        }
+        let service = DurableRelayService(store: InMemoryDurableRelayStore(), authorization: policy)
+        let operation = try operation(signer: approver, id: "approver", revision: 0,
+                                      kind: "approve")
+
+        XCTAssertThrowsError(try service.submit(operation, owner: targetOwner.identity) { _, _ in
+            XCTFail("an unpaired approver must not mutate the owner ledger")
+            return .acknowledgement
+        }) { error in
+            XCTAssertEqual(error as? DurableRelayError, .unauthorized)
+        }
+    }
+
+    func testMutationCannotChangeServiceOwnedRevision() throws {
+        let signer = try owner()
+        let store = InMemoryDurableRelayStore()
+        let service = DurableRelayService(store: store)
+        let op = try operation(signer: signer, id: "revision-attack", revision: 0)
+
+        XCTAssertThrowsError(try service.submit(op, owner: signer.identity) { ledger, _ in
+            ledger.revision = Int64.max
+            return .acknowledgement
+        }) { error in
+            XCTAssertEqual(error as? DurableRelayError,
+                           .mutationChangedRevision(expected: 0, actual: Int64.max))
+        }
+        XCTAssertTrue(try store.read().owners.isEmpty)
+    }
+
+    func testInvalidMutationLedgerIsRejectedBeforeCommit() throws {
+        let signer = try owner()
+        let store = InMemoryDurableRelayStore()
+        let service = DurableRelayService(store: store)
+        let op = try operation(signer: signer, id: "invalid-ledger", revision: 0)
+
+        XCTAssertThrowsError(try service.submit(op, owner: signer.identity) { ledger, _ in
+            ledger.audit.append(DurableAuditEvent(revision: 0, operationID: "bad",
+                                                   kind: "ack", signerID: signer.identity.identityID,
+                                                   occurredAt: Date(), outcome: "bad"))
+            return .acknowledgement
+        }) { error in
+            XCTAssertEqual(error as? DurableStoreError, .invalidSnapshot)
+        }
+        XCTAssertTrue(try store.read().owners.isEmpty)
+    }
+
+    func testInitialDatabaseRejectsOperationDictionaryKeyMismatch() throws {
+        let signer = try owner()
+        let response = Data("{}".utf8)
+        let record = DurableOperationRecord(operationID: "actual", ownerID: signer.identity.identityID,
+                                            signer: signer.identity, kind: "ack",
+                                            bodyDigest: Data(repeating: 1, count: 32),
+                                            responseKind: "acknowledgement", responseBody: response,
+                                            responseDigest: CompanionCanonical.digest(response),
+                                            committedRevision: 1, committedAt: Date())
+        let ledger = DurableOwnerLedger(owner: signer.identity, revision: 1,
+                                        operations: ["wrong-key": record])
+        let database = DurableRelayDatabase(owners: [signer.identity.identityID: ledger])
+
+        XCTAssertThrowsError(try InMemoryDurableRelayStore(database: database)) { error in
+            XCTAssertEqual(error as? DurableStoreError, .invalidSnapshot)
+        }
     }
 }
