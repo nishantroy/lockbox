@@ -326,6 +326,21 @@ public enum RuntimeLifecycle {
                 // occurrence has naturally ended. This covers edits made just
                 // before midnight as well as after-midnight recovery.
                 document.scheduledActivationFence = updatedFence(document.scheduledActivationFence, with: session.end, preservingCalendar: calendar)
+            } else if session.purpose == .bedtime, let binding = session.scheduledOccurrence {
+                // Bedtime-now uses the finite manual route, but releasing it
+                // must still suppress the exact recurring occurrence that it
+                // intentionally took over. The key and fence are absolute,
+                // so a later time-zone change cannot reopen that old window.
+                let key = binding.key
+                document.suppressedOccurrenceKeys.insert(key)
+                if document.suppressedOccurrenceKeys.count > 64 {
+                    document.suppressedOccurrenceKeys.remove(document.suppressedOccurrenceKeys.first!)
+                }
+                document.scheduledActivationFence = updatedFence(
+                    document.scheduledActivationFence,
+                    with: binding.end,
+                    preservingCalendar: calendar
+                )
             }
         }
         _ = normalizeRecoveryCommitment(&document, at: date)

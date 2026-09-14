@@ -84,20 +84,35 @@ public enum RuntimeManualLockDecision {
 /// next occurrence, but its committed end is an absolute Date frozen at the
 /// transaction boundary.
 public enum RuntimeBedtimeNowDecision {
+    public static func proposedOccurrence(
+        configuration: RuntimeConfiguration?,
+        recurringEnabled: Bool,
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> RuntimeScheduledOccurrenceBinding? {
+        guard recurringEnabled,
+              let configuration,
+              (try? configuration.validate()) != nil,
+              let occurrence = RuntimeOccurrenceResolver.currentOrNext(
+                  start: configuration.start,
+                  end: configuration.end,
+                  enabled: true,
+                  after: date,
+                  calendar: calendar
+              ) else { return nil }
+        return RuntimeScheduledOccurrenceBinding(start: occurrence.start, end: occurrence.end)
+    }
+
     public static func proposedEnd(
         configuration: RuntimeConfiguration?,
         recurringEnabled: Bool,
         at date: Date,
         calendar: Calendar = .current
     ) -> Date? {
-        guard recurringEnabled,
-              let configuration,
-              (try? configuration.validate()) != nil else { return nil }
-        return RuntimeOccurrenceResolver.currentOrNext(
-            start: configuration.start,
-            end: configuration.end,
-            enabled: true,
-            after: date,
+        proposedOccurrence(
+            configuration: configuration,
+            recurringEnabled: recurringEnabled,
+            at: date,
             calendar: calendar
         )?.end
     }
@@ -114,8 +129,8 @@ public enum RuntimeBedtimeNowDecision {
         calendar: Calendar = .current
     ) -> Bool {
         guard expectedEnd.timeIntervalSinceReferenceDate.isFinite,
-              let proposed = proposedEnd(configuration: configuration, recurringEnabled: recurringEnabled, at: date, calendar: calendar),
-              proposed == expectedEnd else { return false }
+              let proposed = proposedOccurrence(configuration: configuration, recurringEnabled: recurringEnabled, at: date, calendar: calendar),
+              proposed.end == expectedEnd else { return false }
         return RuntimeManualLockDecision.accepts(expectedEnd: expectedEnd, startedAt: date)
     }
 }
@@ -370,6 +385,31 @@ public enum RuntimeSessionPurpose: String, Codable, Sendable {
     case focus
 }
 
+/// Absolute identity of the saved recurring occurrence covered by a manually
+/// started bedtime. Civil components are intentionally not persisted here:
+/// after a time-zone change, the original absolute bounds remain authoritative.
+public struct RuntimeScheduledOccurrenceBinding: Codable, Equatable, Sendable {
+    public let start: Date
+    public let end: Date
+
+    public init(start: Date, end: Date) {
+        self.start = start
+        self.end = end
+    }
+
+    public var key: String {
+        RuntimeSessionDecision.occurrenceKey(origin: .scheduled, start: start, end: end)
+    }
+
+    public func validate() throws {
+        guard start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              end > start else {
+            throw RuntimeValidationError.corruptSharedData
+        }
+    }
+}
+
 public enum RuntimeSessionState: String, Codable, Sendable {
     case active
     case recoveryPending
@@ -410,6 +450,9 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
     /// decode from the historical origin (`scheduled` bedtime, `manual`
     /// focus), preserving existing stored sessions unchanged.
     public let purpose: RuntimeSessionPurpose
+    /// Frozen absolute recurring occurrence covered by a bedtime-now session.
+    /// Older sessions leave this nil and use conservative fallback matching.
+    public let scheduledOccurrence: RuntimeScheduledOccurrenceBinding?
     public let start: Date
     public let end: Date
     public let sourceRevision: Int
@@ -424,12 +467,14 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
         sourceRevision: Int,
         policy: RuntimePolicySnapshot,
         purpose: RuntimeSessionPurpose? = nil,
+        scheduledOccurrence: RuntimeScheduledOccurrenceBinding? = nil,
         state: RuntimeSessionState = .active
     ) {
         self.schemaVersion = Self.currentSchema
         self.id = id
         self.origin = origin
         self.purpose = purpose ?? (origin == .scheduled ? .bedtime : .focus)
+        self.scheduledOccurrence = scheduledOccurrence
         self.start = start
         self.end = end
         self.sourceRevision = sourceRevision
@@ -459,11 +504,16 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
               end.timeIntervalSinceReferenceDate.isFinite,
               end > start,
               sourceRevision >= 0 else { throw RuntimeValidationError.corruptSharedData }
+        if let scheduledOccurrence {
+            try scheduledOccurrence.validate()
+            guard end == scheduledOccurrence.end,
+                  start < scheduledOccurrence.end else { throw RuntimeValidationError.corruptSharedData }
+        }
         try policy.validate()
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, origin, purpose, start, end, sourceRevision, policy, state
+        case schemaVersion, id, origin, purpose, scheduledOccurrence, start, end, sourceRevision, policy, state
     }
 
     public init(from decoder: Decoder) throws {
@@ -473,6 +523,7 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
         origin = try container.decode(RuntimeSessionOrigin.self, forKey: .origin)
         purpose = try container.decodeIfPresent(RuntimeSessionPurpose.self, forKey: .purpose)
             ?? (origin == .scheduled ? .bedtime : .focus)
+        scheduledOccurrence = try container.decodeIfPresent(RuntimeScheduledOccurrenceBinding.self, forKey: .scheduledOccurrence)
         start = try container.decode(Date.self, forKey: .start)
         end = try container.decode(Date.self, forKey: .end)
         sourceRevision = try container.decode(Int.self, forKey: .sourceRevision)

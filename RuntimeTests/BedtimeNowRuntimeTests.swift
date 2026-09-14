@@ -14,11 +14,12 @@ final class BedtimeNowRuntimeTests: XCTestCase {
     }
 
     private func configuration(
+        revision: Int = 4,
         start: RuntimeTime = RuntimeTime(hour: 22, minute: 0),
         end: RuntimeTime = RuntimeTime(hour: 7, minute: 0)
     ) -> RuntimeConfiguration {
         RuntimeConfiguration(
-            revision: 4,
+            revision: revision,
             start: start,
             end: end,
             mode: .blockSelected,
@@ -110,16 +111,131 @@ final class BedtimeNowRuntimeTests: XCTestCase {
         XCTAssertFalse(RuntimeSessionDecision.isReleased(sessions: document.sessions, releasedOccurrences: document.releasedOccurrences, origin: .manual, start: restarted.start, end: restarted.end))
     }
 
-    func testManualBedtimeOwnsMatchingRecurringOccurrenceWithoutDisablingRecurrence() {
+    func testDelayedBedtimeStartOwnsMatchingRecurringOccurrenceWithoutDisablingRecurrence() {
         let occurrenceStart = date(DateComponents(year: 2026, month: 9, day: 10, hour: 22))
         let occurrenceEnd = date(DateComponents(year: 2026, month: 9, day: 11, hour: 7))
-        let manual = RuntimeSession(origin: .manual, start: date(DateComponents(year: 2026, month: 9, day: 10, hour: 20)), end: occurrenceEnd, sourceRevision: 1, policy: policy(), purpose: .bedtime)
-        XCTAssertTrue(RuntimeSessionDecision.suppressesScheduledStart(sessions: [manual], occurrenceStart: occurrenceStart, occurrenceEnd: occurrenceEnd, at: occurrenceStart))
+        let manual = RuntimeSession(
+            origin: .manual,
+            start: date(DateComponents(year: 2026, month: 9, day: 10, hour: 23)),
+            end: occurrenceEnd,
+            sourceRevision: 1,
+            policy: policy(),
+            purpose: .bedtime,
+            scheduledOccurrence: RuntimeScheduledOccurrenceBinding(start: occurrenceStart, end: occurrenceEnd)
+        )
+        XCTAssertTrue(RuntimeSessionDecision.suppressesScheduledStart(sessions: [manual], occurrenceStart: occurrenceStart, occurrenceEnd: occurrenceEnd, at: date(DateComponents(year: 2026, month: 9, day: 11, hour: 1))))
         XCTAssertFalse(RuntimeSessionDecision.suppressesScheduledStart(sessions: [manual], occurrenceStart: occurrenceStart, occurrenceEnd: occurrenceEnd.addingTimeInterval(1), at: occurrenceStart))
         var recurring = RuntimeStoreDocument()
         recurring.configuration = configuration()
         recurring.recurringEnabledIntent = true
         XCTAssertTrue(RuntimeLifecycle.scheduledRegistrationShouldRemain(recurring, at: occurrenceStart))
+    }
+
+    func testReleasedEarlyBedtimeFencesLateScheduledCallbackButAllowsManualRestart() throws {
+        let occurrenceStart = date(DateComponents(year: 2026, month: 9, day: 10, hour: 22))
+        let occurrenceEnd = date(DateComponents(year: 2026, month: 9, day: 11, hour: 7))
+        let manual = RuntimeSession(
+            origin: .manual,
+            start: date(DateComponents(year: 2026, month: 9, day: 10, hour: 20)),
+            end: occurrenceEnd,
+            sourceRevision: 1,
+            policy: policy(),
+            purpose: .bedtime,
+            scheduledOccurrence: RuntimeScheduledOccurrenceBinding(start: occurrenceStart, end: occurrenceEnd)
+        )
+        var document = RuntimeStoreDocument()
+        document.configuration = configuration()
+        document.recurringEnabledIntent = true
+        document.sessions = [manual]
+        try RuntimeLifecycle.release(&document, sessionIDs: [manual.id], at: date(DateComponents(year: 2026, month: 9, day: 10, hour: 23)))
+
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: occurrenceStart, end: occurrenceEnd, calendar: utc))
+        XCTAssertEqual(document.scheduledActivationFence?.notBeforeOccurrenceStart, occurrenceEnd)
+
+        // A fresh manual session has a new identity and is not released by the
+        // prior manual marker, even while the old recurring callback is fenced.
+        let restarted = RuntimeSession(
+            origin: .manual,
+            start: date(DateComponents(year: 2026, month: 9, day: 11, hour: 1)),
+            end: occurrenceEnd,
+            sourceRevision: 1,
+            policy: policy(),
+            purpose: .bedtime,
+            scheduledOccurrence: RuntimeScheduledOccurrenceBinding(start: occurrenceStart, end: occurrenceEnd)
+        )
+        XCTAssertNotEqual(restarted.id, manual.id)
+        XCTAssertFalse(RuntimeSessionDecision.isReleased(sessions: document.sessions, releasedOccurrences: document.releasedOccurrences, origin: .manual, start: restarted.start, end: restarted.end))
+        XCTAssertTrue(RuntimeSessionDecision.suppressesScheduledStart(sessions: [restarted], occurrenceStart: occurrenceStart, occurrenceEnd: occurrenceEnd, at: restarted.start))
+    }
+
+    func testFrozenOccurrenceBindingSurvivesCalendarTimeZoneChange() {
+        var eastern = Calendar(identifier: .gregorian)
+        eastern.timeZone = TimeZone(identifier: "America/New_York")!
+        let occurrenceStart = eastern.date(from: DateComponents(year: 2026, month: 11, day: 1, hour: 22))!
+        let occurrenceEnd = eastern.date(from: DateComponents(year: 2026, month: 11, day: 2, hour: 7))!
+        let session = RuntimeSession(
+            origin: .manual,
+            start: occurrenceStart.addingTimeInterval(60 * 60),
+            end: occurrenceEnd,
+            sourceRevision: 1,
+            policy: policy(),
+            purpose: .bedtime,
+            scheduledOccurrence: RuntimeScheduledOccurrenceBinding(start: occurrenceStart, end: occurrenceEnd)
+        )
+        var utcDocument = RuntimeStoreDocument()
+        utcDocument.sessions = [session]
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        // The callback is matched by frozen absolute bounds, not by the new
+        // calendar's civil 22:00/07:00 components.
+        XCTAssertTrue(RuntimeSessionDecision.suppressesScheduledStart(sessions: [session], occurrenceStart: occurrenceStart, occurrenceEnd: occurrenceEnd, at: occurrenceStart.addingTimeInterval(2 * 60 * 60)))
+        XCTAssertNoThrow(try utcDocument.validate())
+    }
+
+    func testManualEndPendingConfigurationActivatesAndStopsOldReplacementRoute() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        let manual = RuntimeSession(origin: .manual, start: now.addingTimeInterval(-3_600), end: now, sourceRevision: 1, policy: policy(), purpose: .bedtime)
+        var document = RuntimeStoreDocument()
+        document.configuration = configuration()
+        document.recurringEnabledIntent = true
+        document.sessions = [manual]
+        document.manualRegistrationActive = true
+        document.pendingConfiguration = RuntimeConfiguration(
+            revision: 5,
+            start: RuntimeTime(hour: 23, minute: 0),
+            end: RuntimeTime(hour: 6, minute: 0),
+            mode: .blockSelected,
+            selectionSummary: policy().selectionSummary,
+            selectionData: Data([2])
+        )
+
+        XCTAssertTrue(RuntimeCallbackDecision.prepareManualEnd(&document, at: now))
+        XCTAssertTrue(RuntimeLifecycle.activatePendingConfigurationIfIdle(&document, at: now))
+        XCTAssertEqual(document.configuration?.revision, 5)
+        XCTAssertNil(document.pendingConfiguration)
+        XCTAssertFalse(RuntimeLifecycle.scheduledRegistrationShouldRemain(document, at: now, replacementActivated: true))
+        XCTAssertEqual(RuntimeCallbackDecision.desiredPolicyIntent(document, at: now), .clear)
+    }
+
+    func testPendingActivationRollsBackWithTheTransactionBeforePolicySideEffect() throws {
+        enum SimulatedCrash: Error { case afterActivation }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("phone-lockbox-bedtime-")
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try SharedRuntimeStore(directoryURL: directory)
+        let pending = configuration(revision: 5, start: RuntimeTime(hour: 23, minute: 0), end: RuntimeTime(hour: 6, minute: 0))
+        try store.transaction { document in
+            document.configuration = configuration()
+            document.pendingConfiguration = pending
+            document.recurringEnabledIntent = true
+        }
+        XCTAssertThrowsError(try store.withTransaction { context in
+            XCTAssertTrue(RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: Date(timeIntervalSinceReferenceDate: 10_000)))
+            throw SimulatedCrash.afterActivation
+        })
+        let recovered = try store.read()
+        XCTAssertEqual(recovered.configuration?.revision, 4)
+        XCTAssertEqual(recovered.pendingConfiguration?.start, pending.start)
     }
 
     func testLateOldManualEndCannotReleaseNewerBedtimeSession() {

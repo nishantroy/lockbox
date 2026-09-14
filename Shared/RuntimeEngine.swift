@@ -57,12 +57,19 @@ public enum RuntimeSessionDecision {
         occurrenceEnd: Date,
         at date: Date
     ) -> Bool {
-        sessions.contains {
-            $0.origin == .manual
-                && $0.purpose == .bedtime
-                && $0.isEffective(at: date)
-                && $0.start <= occurrenceStart
-                && $0.end == occurrenceEnd
+        sessions.contains { session in
+            guard session.origin == .manual,
+                  session.purpose == .bedtime,
+                  session.isEffective(at: date) else { return false }
+            if let binding = session.scheduledOccurrence {
+                return binding.start == occurrenceStart && binding.end == occurrenceEnd
+            }
+            // Backward-compatible fallback for a bedtime value written before
+            // explicit absolute occurrence bindings existed. New sessions
+            // always take the exact binding branch above.
+            return session.end == occurrenceEnd
+                && session.start < occurrenceEnd
+                && session.end > occurrenceStart
         }
     }
 

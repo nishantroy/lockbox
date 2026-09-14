@@ -217,13 +217,59 @@ final class MonitorExtension: DeviceActivityMonitor {
     private func handleManualEnd() {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
+        var shouldStopManual = false
+        var shouldStopDaily = false
+        var scheduleToRegister: RuntimeConfiguration?
         do {
             try store.withTransaction { context in
-                let shouldStop = RuntimeCallbackDecision.prepareManualEnd(&context.document, at: now)
-                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: shouldStop ? "manual intervalDidEnd reconciled terminal sessions." : "stale manual intervalDidEnd preserved the live manual route."), succeeded: true)
+                shouldStopManual = RuntimeCallbackDecision.prepareManualEnd(&context.document, at: now)
+                // Manual natural expiry is also a configuration activation
+                // boundary. Keep the pending edit and the clear/apply intent
+                // in the same durable transaction before stopping routes.
+                let activated = RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: now)
+                if activated && context.document.recurringEnabledIntent {
+                    scheduleToRegister = context.document.configuration
+                }
+                shouldStopDaily = activated || !RuntimeLifecycle.scheduledRegistrationShouldRemain(
+                    context.document,
+                    at: now,
+                    replacementActivated: activated
+                )
+                context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: shouldStopManual ? (activated ? "manual intervalDidEnd activated pending configuration." : "manual intervalDidEnd reconciled terminal sessions.") : "stale manual intervalDidEnd preserved the live manual route."), succeeded: true)
                 try replayCurrentPolicy(in: context, at: now, detail: "Manual-end reconciliation used the current aggregate.")
-                // Serialize route teardown with a possible new manual start.
-                if shouldStop { activityCenter.stopMonitoring([manualActivityName]) }
+            }
+            // Serialize route teardown with a possible new manual start only
+            // after the durable terminal state and clear intent are committed.
+            if shouldStopManual { activityCenter.stopMonitoring([manualActivityName]) }
+            if shouldStopDaily { activityCenter.stopMonitoring([activityName]) }
+            if let configuration = scheduleToRegister {
+                do {
+                    let schedule = DeviceActivitySchedule(
+                        intervalStart: DateComponents(hour: configuration.start.hour, minute: configuration.start.minute),
+                        intervalEnd: DateComponents(hour: configuration.end.hour, minute: configuration.end.minute),
+                        repeats: true
+                    )
+                    try store.withTransaction { context in
+                        guard context.document.configuration?.revision == configuration.revision,
+                              context.document.activeOwner == nil,
+                              context.document.sessions.allSatisfy({ !$0.isEffective(at: Date()) }) else {
+                            throw RuntimeValidationError.invalidConfiguration("A lock became active while replacing the daily schedule.")
+                        }
+                        context.document.recurringEnabledIntent = true
+                        context.document.record(RuntimeDiagnostic(operation: .registrationAttempted, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Pending configuration registration requested after natural manual end."))
+                        try context.commit()
+                    }
+                    try activityCenter.startMonitoring(activityName, during: schedule)
+                    try store.transaction { context in
+                        context.record(RuntimeDiagnostic(operation: .registrationSucceeded, observedAt: Date(), requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Pending configuration registration accepted by OS after natural manual end."), succeeded: true)
+                    }
+                } catch {
+                    activityCenter.stopMonitoring([activityName])
+                    try? store.transaction { context in
+                        context.recurringEnabledIntent = false
+                        context.record(RuntimeDiagnostic(operation: .registrationFailed, observedAt: Date(), requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: error.localizedDescription), succeeded: false)
+                    }
+                }
             }
         } catch { try? record(store: store, operation: .policyClearFailed, detail: error.localizedDescription, succeeded: false) }
     }

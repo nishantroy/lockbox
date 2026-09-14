@@ -347,6 +347,11 @@ final class ScreenTimeCoordinator: ObservableObject {
         transactionStart: Date?
     ) {
         guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
+        // Reconcile a queued edit before reading the policy snapshot. This
+        // keeps an idle start from committing an old configuration after a
+        // prior session ended without its callback being observed.
+        reconcileRuntime()
+        refreshDocument()
         var sessionID: UUID?
         var manualRegistered = false
         do {
@@ -362,17 +367,32 @@ final class ScreenTimeCoordinator: ObservableObject {
                       !context.document.legacyRegistrationNeedsReview else {
                     throw RuntimeValidationError.invalidConfiguration("Finish the current recovery or developer restriction before starting another lock.")
                 }
-                if bedtimeNow {
-                    guard context.document.effectiveSessions(at: startedAt).isEmpty else {
-                        throw RuntimeValidationError.invalidConfiguration("A lock is already active; bedtime cannot be started over it.")
+                _ = RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: startedAt)
+                if context.document.recurringEnabledIntent {
+                    guard hasMatchingRecurringRegistration(context.document.configuration) else {
+                        throw RuntimeValidationError.invalidConfiguration("The saved bedtime schedule is not registered exactly.")
                     }
-                    guard RuntimeBedtimeNowDecision.accepts(
-                        expectedEnd: expectedEnd,
+                }
+                let bedtimeOccurrence = bedtimeNow
+                    ? RuntimeBedtimeNowDecision.proposedOccurrence(
                         configuration: context.document.configuration,
                         recurringEnabled: context.document.recurringEnabledIntent,
                         at: startedAt,
                         calendar: Calendar.current
-                    ) else {
+                    )
+                    : nil
+                if bedtimeNow {
+                    guard context.document.effectiveSessions(at: startedAt).isEmpty else {
+                        throw RuntimeValidationError.invalidConfiguration("A lock is already active; bedtime cannot be started over it.")
+                    }
+                    guard let bedtimeOccurrence,
+                          RuntimeBedtimeNowDecision.accepts(
+                              expectedEnd: expectedEnd,
+                              configuration: context.document.configuration,
+                              recurringEnabled: context.document.recurringEnabledIntent,
+                              at: startedAt,
+                              calendar: Calendar.current
+                          ) else {
                         throw RuntimeValidationError.invalidConfiguration("The bedtime confirmation is stale or does not match the next saved morning end.")
                     }
                     guard hasMatchingRecurringRegistration(context.document.configuration) else {
@@ -431,7 +451,8 @@ final class ScreenTimeCoordinator: ObservableObject {
                     end: expectedEnd,
                     sourceRevision: configuration.revision,
                     policy: policy,
-                    purpose: purpose
+                    purpose: purpose,
+                    scheduledOccurrence: bedtimeNow ? bedtimeOccurrence : nil
                 )
                 sessionID = session.id
                 context.document.sessions.append(session)
