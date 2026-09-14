@@ -54,6 +54,20 @@ struct GalleryCard<Content: View>: View {
     }
 }
 
+/// A visual-only action specimen. Gallery fixtures must never imply that a
+/// static preview can change a lock, schedule, or recovery request.
+struct GalleryPreviewAction<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label), preview only")
+            .accessibilityAddTraits(.isStaticText)
+    }
+}
+
 struct LockboxGalleryView: View {
     @ObservedObject var model: GalleryModel
     let palette: GalleryPalette
@@ -68,8 +82,6 @@ struct LockboxGalleryView: View {
                 ActiveFixtureView(fixture: model.fixture, palette: palette)
             }
         }
-        .navigationTitle("Lockbox")
-        .toolbarBackground(palette.background, for: .navigationBar)
         .accessibilityElement(children: .contain)
     }
 
@@ -83,7 +95,7 @@ private struct UnlockedFixtureView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Button {} label: {
+            GalleryPreviewAction(label: "Lock now") {
                 HStack(spacing: 14) {
                     Image(systemName: "lock.fill")
                         .font(.title2.weight(.semibold))
@@ -105,9 +117,6 @@ private struct UnlockedFixtureView: View {
                 .frame(maxWidth: .infinity, minHeight: 92, alignment: .leading)
                 .background(palette.accent, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Lock now")
-            .accessibilityHint("Choose a finite focus lock duration")
 
             GalleryCard(palette: palette) {
                 VStack(alignment: .leading, spacing: 15) {
@@ -127,13 +136,11 @@ private struct UnlockedFixtureView: View {
                         Divider().frame(height: 38).overlay(palette.border)
                         ScheduleTime(title: "Opens", value: "7:00 AM", palette: palette)
                     }
-                    Button {} label: {
+                    GalleryPreviewAction(label: "Start bedtime now") {
                         Label("Start bedtime now", systemImage: "play.fill")
                             .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(palette.accent)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(palette.accent)
-                    .accessibilityHint("Starts the saved bedtime session without changing future recurrence")
                 }
             }
 
@@ -225,13 +232,11 @@ private struct ActiveFixtureView: View {
                     Text("Recovery waits 15 minutes, then asks you to confirm. Waiting alone never unlocks your phone.")
                         .font(.subheadline)
                         .foregroundStyle(palette.secondary)
-                    Button {} label: {
+                    GalleryPreviewAction(label: "Start recovery") {
                         Text("Start recovery")
                             .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(palette.accent)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(palette.accent)
-                    .accessibilityHint("Begins the fixed recovery wait")
                 }
             }
 
@@ -329,8 +334,6 @@ struct PeopleGalleryView: View {
                 }
             }
         }
-        .navigationTitle("People")
-        .toolbarBackground(palette.background, for: .navigationBar)
     }
 }
 

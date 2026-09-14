@@ -148,7 +148,5 @@ struct SettingsGalleryView: View {
                 }
             }
         }
-        .navigationTitle("Settings")
-        .toolbarBackground(palette.background, for: .navigationBar)
     }
 }
