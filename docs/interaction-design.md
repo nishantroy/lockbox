@@ -99,7 +99,15 @@ At eligibility, expose “End this lock” with confirmation. No automatic unloc
 - Completion marks only the active occurrence released so reconciliation does not immediately reblock it.
 - The 15-minute duration is provisional and not an in-lock adjustable setting.
 
-### 5. Authorization or enforcement problem
+### 5. Future optional accountability (after production relay)
+
+This does not appear in the bedtime MVP. Once the authenticated, durable trusted-person relay is production-ready, the owner can opt in and select accepted trusted people one at a time. Sender consent and recipient consent are explicit; event notices and weekly summaries are separate per-person choices. A recipient can opt out, and the owner can cancel a pending relationship or delivery. Multiple recipients remain independent. A mutual pact is two one-way relationships, so neither person controls or inspects the other's lock.
+
+Use calm copy such as “Your Lockbox session ended early.” Never call an early end a failure or shame the owner. Natural end, recovery, trusted approval, authorization loss/integrity warning, and developer/emergency cleanup have distinct statuses. Event recording occurs locally before ordinary release clears policy and queues for offline delivery; emergency access never waits for the network. The server inbox/fetch is authoritative, while APNs/text are wake/reminder hints only.
+
+Notification previews are generic by default, and quiet hours defer presentation rather than bypassing them. The default payload includes no app selections, app/site usage, messages, or raw schedules. An optional weekly summary shows only planned, naturally completed, ended early, and unavailable/integrity-unknown counts/statuses—no streaks, scores, rankings, or shame. Delivery cancellation/late delivery, retention/deletion, reinstall/clock limits, and recipient opt-out are specified in [accountability design](accountability-design.md). Do not expose this flow while only the in-memory core or a relay simulation exists.
+
+### 6. Authorization or enforcement problem
 
 Examples:
 

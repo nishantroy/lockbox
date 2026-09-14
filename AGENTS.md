@@ -9,6 +9,7 @@ Before implementation, read:
 4. `docs/development.md` — build/test/install commands and source map.
 5. `docs/overnight-build-plan.md` — approved feature scope, lane ownership and source-only delivery constraints.
 6. `docs/layout-v1-contract.md` — owner-approved tab structure, Lock now choices and UI/presentation boundaries.
+7. `docs/accountability-design.md` — deferred accountability contract and production acceptance gates, when working on that future capability.
 
 Product/interaction/technical plans specify intended behavior; they do not certify implementation. Update roadmap/QA evidence as work lands. Do not repeat already-passed owner QA without a relevant code change.
 
@@ -18,3 +19,4 @@ Product/interaction/technical plans specify intended behavior; they do not certi
 - Build into `DerivedData`/`.build-device`, leaving `.build` for SwiftPM. Do not delete build caches routinely.
 - Keep a safe prototype cleanup route until bounded session/recovery integration is device-validated. Never present manual cleanup as proof of automatic release.
 - Do not install/update or change device schedules during a scheduled-release QA interval. Ask only for necessary system prompts/device participation or material decisions; otherwise proceed through the roadmap autonomously.
+- Owner delegation standard: all substantive code-building or feature implementation must use native Fleet delegation with executable Luna model variants at high/xhigh thinking as appropriate, isolated writer ownership, and independent review; the parent retains integration authority. This does not require a subagent for trivial status reporting or mechanical integration, and infrastructure-failure safety rules still apply (never claim delegation or validation that did not occur).

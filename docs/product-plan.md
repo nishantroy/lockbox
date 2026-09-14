@@ -54,7 +54,7 @@ Recovery must suppress reapplication for that same occurrence across callbacks a
 
 - Custom Home Screen launcher or widget.
 - Daytime denylist, usage quotas, weekday-specific schedules, or multiple profiles.
-- NFC, accountability partners, remote approval, or a backend.
+- NFC, accountability partners, remote approval, or a backend in the first release; the separately gated future accountability capability is described below.
 - Usage dashboards, sleep tracking, HealthKit integration, and behavioral scoring.
 - MDM, supervised-device setup, parental-control workflows, or private APIs.
 - Preventing uninstall, authorization revocation, or all owner-controlled bypasses.
@@ -92,8 +92,24 @@ If software bypass becomes routine, consider a physical timed lockbox rather tha
 1. **Feasibility:** prove Apple authorization, shielding, scheduling, essential access, and cleanup on a real device.
 2. **Bedtime MVP:** implement the interaction model, persistent policy, and deliberate recovery.
 3. **Hardening and trial:** test edge cases and use nightly; revise from observed behavior.
-4. **Optional expansion:** NFC, daytime restrictions, launcher widget, and public distribution.
+4. **Production trusted-person relay (future prerequisite):** deploy the authenticated, durable relay and identity lifecycle; simulations do not qualify.
+5. **Opt-in accountability (future):** add the separately consented early-end notices and weekly summaries only after the relay gate passes.
+6. **Optional expansion:** NFC, daytime restrictions, launcher widget, and public distribution, after the accountability decision gate.
 
 Before public release, revisit entitlement approval, installation reliability, privacy disclosures, accessibility, support, and the tested device/OS matrix. Personal development signing is not an unattended long-term installation strategy without provisioning planning.
 
-Related: [interaction design](interaction-design.md), [technical plan](technical-plan.md).
+## Approved future capability: opt-in accountability
+
+This is deliberately **after the bedtime MVP**. It may be enabled only after the production trusted-person relay has a real PostgreSQL adapter, authenticated transport, durable server inbox/fetch, and a tested identity/consent lifecycle. The current in-memory core, pairing demo, or relay simulation is not production-ready. See the [accountability design](accountability-design.md) for the protocol and acceptance gates.
+
+An owner may opt in and select accepted trusted people individually. For each person, the owner chooses whether to share a privacy-minimal notice when an active lock ends early and, separately, whether to share a plain weekly summary. Both sender and recipient give explicit consent; either can cancel or opt out. Multiple trusted people are independent, and a mutual pact is two independent one-way relationships: neither person controls, inspects, or extends the other's lock.
+
+The event is durably recorded locally before ordinary recovery or trusted release clears policy and is queued for offline delivery. Emergency access never depends on network delivery. The authenticated server inbox/fetch is authoritative; APNs and text are wake/reminder hints only. Use supportive “ended early” language, never shame or failure language. Natural ends, recovery, trusted approval, authorization loss/integrity warnings, and developer/emergency cleanup remain distinct outcomes.
+
+The default payload exposes no app selections, app/site usage, messages, or raw schedules. A weekly summary contains only planned, naturally completed, ended early, and unavailable/integrity-unknown counts/statuses—never streaks, scores, rankings, or shame. Quiet hours, notification previews, late delivery, cancellation, recipient opt-out, retention/deletion, and the limitation that a locally controlled, reinstalled, or offline device cannot be tamper-proof without deployed durable authority are part of the design, not follow-up polish.
+
+### Production accountability gates
+
+Before ordinary UI exposure, acceptance tests must cover exact-session binding, idempotent delivery, offline queue/retry, no duplicate weekly counts, revocation, cross-owner isolation, quiet hours, natural-versus-early classification, approval/recovery races, reinstall and clock rollback, privacy payload inspection, and accessibility/supportive copy. Product QA must exercise the deployed PostgreSQL/authenticated path and identity lifecycle; the local in-memory implementation must not be represented as production accountability.
+
+Related: [interaction design](interaction-design.md), [technical plan](technical-plan.md), [accountability design](accountability-design.md).

@@ -97,9 +97,30 @@ Acceptance:
 - Automatic release works without opening the app under the recorded test conditions. Failures are not silently reclassified as passes because foreground cleanup worked.
 - Trial evidence records reliability and usefulness without collecting sensitive app choices or telemetry.
 
-## R5 — Polish, then optional expansion
+## R5 — Production trusted-person relay and identity lifecycle (future prerequisite)
 
-After R4: replace bare Form layout with the calm visual design, then separately evaluate launcher/widget, NFC recovery, daytime features, and distribution entitlement/provisioning renewal. Do not bundle these with lifecycle work.
+This begins only after the R4 reliability gate. The existing same-app companion/pairing foundation and relay simulations are useful for protocol exploration, but they are not a deployed service and the in-memory core is not production-ready.
+
+Work:
+- Replace simulations with the real PostgreSQL adapter, authenticated transport, durable server inbox/fetch, and explicit identity/key lifecycle.
+- Preserve accountless companion use where approved, but require explicit pairing, sender/recipient consent, per-person revocation, re-pairing, and cross-owner isolation. APNs/text may wake or remind only; they are never approval credentials or authoritative delivery.
+- Persist and reconcile a bounded, idempotent outbox without making recovery or emergency access depend on network delivery. Define bounded retention/deletion and offline, reinstall, and clock-rollback behavior.
+
+Acceptance:
+- Deployed-path tests prove authentication, identity lifecycle, revocation, cross-owner isolation, server-authoritative fetch, duplicate/late delivery handling, and emergency/network independence.
+- No ordinary UI claims that a local demo or in-memory implementation is a production relay. Any failed infrastructure or security gate keeps accountability deferred.
+
+## R6 — Opt-in accountability (future, after R5)
+
+Build the owner-approved capability only after R5. The owner selects accepted trusted people individually and separately consents to event notices and optional weekly summaries. Record the exact-session terminal event locally before ordinary recovery or trusted release clears policy; queue it offline with a stable idempotency key. Use supportive “ended early” language and distinguish natural end, recovery, trusted approval, authorization loss/integrity warning, and developer/emergency cleanup.
+
+Share no app selections, app/site usage, messages, or raw schedules by default. Weekly summaries contain only planned, naturally completed, ended early, and unavailable/integrity-unknown counts/statuses, with no streaks, scores, rankings, or shame. Quiet hours, generic notification previews, cancellation/late delivery, recipient opt-out, retention/deletion, multiple approvers, one-way/mutual independence, and reinstall/clock limitations are part of the feature contract. The server inbox/fetch remains authoritative; APNs/text remain wake/reminder hints. See [accountability design](accountability-design.md).
+
+Acceptance gates are specification-level tests for exact-session binding, idempotent delivery, offline queue/retry, no duplicate weekly counts, revocation, cross-owner isolation, quiet hours, classification, approval/recovery races, reinstall/clock rollback, privacy payload inspection, and accessibility/copy. Product QA must exercise the deployed PostgreSQL/authenticated path and identity lifecycle before exposure. Do not widen the existing local recovery flow or claim tamper-proof accountability when the device is locally controlled, reinstalled, or offline.
+
+## R7 — Polish, then optional expansion
+
+After R6 (or an explicit decision to defer it): replace bare Form layout with the calm visual design, then separately evaluate launcher/widget, NFC recovery, daytime features, and distribution entitlement/provisioning renewal. Do not bundle these with lifecycle or accountability work.
 
 ## Sol review disposition
 
