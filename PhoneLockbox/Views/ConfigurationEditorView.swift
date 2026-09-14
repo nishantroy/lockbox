@@ -8,86 +8,105 @@ struct ConfigurationEditorView: View {
     @State private var draftSelection = FamilyActivitySelection(includeEntireCategory: true)
 
     var body: some View {
-        Form {
+        LockboxScrollView {
+            LockboxPageHeader(title: isInitialSetup ? "Set up bedtime" : "Bedtime rules")
+
             if isInitialSetup {
-                Section {
+                LockboxCard {
                     Text("Choose the rules Phone Lockbox will use during the saved bedtime window.")
-                        .foregroundStyle(.secondary)
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.secondary)
                 }
             }
 
-            Section("Restriction") {
-                Picker("Mode", selection: modeBinding) {
-                    ForEach(ScreenTimeCoordinator.RestrictionMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    LockboxSectionLabel("Restriction", systemImage: "slider.horizontal.3")
+                    Picker("Mode", selection: modeBinding) {
+                        ForEach(ScreenTimeCoordinator.RestrictionMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
                     }
-                }
-                .disabled(!coordinator.canEditDraft)
-                Text(coordinator.mode == .blockSelected
-                     ? "Selected apps, categories, and websites will be blocked."
-                     : "Everything except selected apps will be blocked. Allow-only mode needs at least one app token.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Bedtime window") {
-                DatePicker("Starts", selection: startBinding, displayedComponents: .hourAndMinute)
+                    .pickerStyle(.menu)
                     .disabled(!coordinator.canEditDraft)
-                DatePicker("Ends", selection: endBinding, displayedComponents: .hourAndMinute)
-                    .disabled(!coordinator.canEditDraft)
-                Text("Repeats daily and may cross midnight. The saved window must be at least 15 minutes; the system remains authoritative about delivery.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Apps and websites") {
-                Button {
-                    draftSelection = coordinator.selection
-                    showingPicker = true
-                } label: {
-                    HStack {
-                        Text("Choose apps or categories")
-                        Spacer()
-                        Text("\(coordinator.selectedItemCount) selected")
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .disabled(!coordinator.canEditDraft)
-                .accessibilityLabel("Choose apps, categories, or websites")
-                Text(coordinator.mode == .blockSelected
-                     ? "Choose individual apps, categories, or websites to block."
-                     : "Choose apps, categories, or websites to allow. Categories are expanded to their apps.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                if coordinator.mode == .allowOnlySelected && coordinator.selectedItemCount > 0 && !coordinator.canApplySelection {
-                    Label("Allow-only mode needs at least one app token.", systemImage: "info.circle")
+                    Text(coordinator.mode == .blockSelected
+                         ? "Selected apps, categories, and websites will be blocked."
+                         : "Everything except selected apps will be blocked. Allow-only mode needs at least one app token.")
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(LockboxTheme.secondary)
                 }
             }
 
-            Section {
-                Button(isInitialSetup ? "Save and register bedtime schedule" : "Save bedtime rules") {
-                    coordinator.saveConfiguration(start: coordinator.startComponents, end: coordinator.endComponents)
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    LockboxSectionLabel("Bedtime window", systemImage: "calendar.badge.clock")
+                    DatePicker("Starts", selection: startBinding, displayedComponents: .hourAndMinute)
+                        .disabled(!coordinator.canEditDraft)
+                    DatePicker("Ends", selection: endBinding, displayedComponents: .hourAndMinute)
+                        .disabled(!coordinator.canEditDraft)
+                    Text("Repeats daily and may cross midnight. The saved window must be at least 15 minutes; the system remains authoritative about delivery.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
                 }
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                .disabled(!coordinator.canApplySelection || !coordinator.isAuthorized)
-                Text("Saving validates this policy before requesting the OS schedule. A successful request is not proof that every app is blocked or that callbacks arrive on time.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            }
+
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    LockboxSectionLabel("Apps and websites", systemImage: "square.grid.2x2")
+                    Button {
+                        draftSelection = coordinator.selection
+                        showingPicker = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text("Choose apps or categories")
+                            Spacer()
+                            Text("\(coordinator.selectedItemCount) selected")
+                                .foregroundStyle(LockboxTheme.secondary)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(LockboxTheme.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!coordinator.canEditDraft)
+                    .accessibilityLabel("Choose apps, categories, or websites")
+                    Text(coordinator.mode == .blockSelected
+                         ? "Choose individual apps, categories, or websites to block."
+                         : "Choose apps, categories, or websites to allow. Categories are expanded to their apps.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    if coordinator.mode == .allowOnlySelected && coordinator.selectedItemCount > 0 && !coordinator.canApplySelection {
+                        Label("Allow-only mode needs at least one app token.", systemImage: "info.circle")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Button(isInitialSetup ? "Save and register bedtime schedule" : "Save bedtime rules") {
+                        coordinator.saveConfiguration(start: coordinator.startComponents, end: coordinator.endComponents)
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    .disabled(!coordinator.canApplySelection || !coordinator.isAuthorized)
+                    Text("Saving validates this policy before requesting the OS schedule. A successful request is not proof that every app is blocked or that callbacks arrive on time.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                }
             }
 
             if let error = coordinator.lastError {
-                Section("Needs attention") {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
+                LockboxCard {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.destructive)
                 }
             }
         }
-        .navigationTitle(isInitialSetup ? "Set up bedtime" : "Bedtime rules")
+        .lockboxScreen()
         .onAppear {
             draftSelection = coordinator.selection
         }
@@ -109,6 +128,7 @@ struct ConfigurationEditorView: View {
                         }
                     }
             }
+            .lockboxScreen()
         }
     }
 

@@ -5,32 +5,38 @@ struct DiagnosticsSection: View {
 
     var body: some View {
         DisclosureGroup {
-            LabeledContent("Registration", value: coordinator.registrationLabel)
-            if let operation = coordinator.lastOperation.operation {
-                LabeledContent("Last operation", value: diagnosticLabel(operation))
-                if let observedAt = coordinator.lastOperation.observedAt {
-                    LabeledContent("Observed", value: observedAt.formatted(date: .abbreviated, time: .shortened))
+            VStack(alignment: .leading, spacing: 10) {
+                LabeledContent("Registration", value: coordinator.registrationLabel)
+                if let operation = coordinator.lastOperation.operation {
+                    LabeledContent("Last operation", value: diagnosticLabel(operation))
+                    if let observedAt = coordinator.lastOperation.observedAt {
+                        LabeledContent("Observed", value: observedAt.formatted(date: .abbreviated, time: .shortened))
+                    }
+                    if let detail = coordinator.lastOperation.detail {
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundStyle(coordinator.lastOperation.succeeded == false ? LockboxTheme.destructive : LockboxTheme.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
-                if let detail = coordinator.lastOperation.detail {
-                    Text(detail)
+                ForEach(Array(coordinator.recentDiagnostics.enumerated()), id: \.offset) { _, diagnostic in
+                    Text(diagnosticLine(diagnostic))
                         .font(.footnote)
-                        .foregroundStyle(coordinator.lastOperation.succeeded == false ? .red : .secondary)
+                        .foregroundStyle(LockboxTheme.secondary)
                         .textSelection(.enabled)
+                        .accessibilityElement(children: .combine)
                 }
+                Text("Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown")")
+                    .font(.caption)
+                    .foregroundStyle(LockboxTheme.secondary)
             }
-            ForEach(Array(coordinator.recentDiagnostics.enumerated()), id: \.offset) { _, diagnostic in
-                Text(diagnosticLine(diagnostic))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .accessibilityElement(children: .combine)
-            }
-            Text("Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .padding(.top, 8)
         } label: {
             Label("Operational status", systemImage: "stethoscope")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(LockboxTheme.primary)
         }
+        .tint(LockboxTheme.accent)
     }
 
     private func diagnosticLine(_ diagnostic: RuntimeDiagnostic) -> String {

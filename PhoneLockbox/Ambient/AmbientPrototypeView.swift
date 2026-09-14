@@ -19,73 +19,88 @@ public struct AmbientPrototypeView: View {
     public init() {}
 
     public var body: some View {
-        Form {
-            Section {
-                Toggle("Enable heads-up (draft)", isOn: $windDownEnabled)
-                Stepper("Bedtime \(String(format: "%02d:%02d", bedtimeHour, bedtimeMinute))", value: $bedtimeHour, in: 0...23)
-                    .accessibilityLabel("Bedtime hour")
-                Stepper("Bedtime minutes \(String(format: "%02d", bedtimeMinute))", value: $bedtimeMinute, in: 0...59, step: 5)
-                    .accessibilityLabel("Bedtime minutes")
-                Stepper("Lead time \(leadMinutes) minutes", value: $leadMinutes, in: 1...1_440)
-            } header: {
-                Text("Wind-down prototype")
-            } footer: {
-                Text("Standalone reminder demo, not linked to saved bedtime rules. Scheduled reminders remain until delivered or disabled.")
+        LockboxScrollView {
+            LockboxPageHeader(title: "Ambient prototypes")
+
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    LockboxSectionLabel("Wind-down prototype", systemImage: "bell.badge")
+                    Toggle("Enable heads-up (draft)", isOn: $windDownEnabled)
+                        .tint(LockboxTheme.accent)
+                    Stepper("Bedtime \(String(format: "%02d:%02d", bedtimeHour, bedtimeMinute))", value: $bedtimeHour, in: 0...23)
+                        .accessibilityLabel("Bedtime hour")
+                    Stepper("Bedtime minutes \(String(format: "%02d", bedtimeMinute))", value: $bedtimeMinute, in: 0...59, step: 5)
+                        .accessibilityLabel("Bedtime minutes")
+                    Stepper("Lead time \(leadMinutes) minutes", value: $leadMinutes, in: 1...1_440)
+                    Text("Standalone reminder demo, not linked to saved bedtime rules. Scheduled reminders remain until delivered or disabled.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                }
             }
 
-            Button("Request notification permission") {
-                Task {
-                    do {
-                        let result = try await notifications.requestAuthorization()
-                        message = "Notification authorization: \(result)."
-                    } catch {
-                        message = "Notification permission error: \(error.localizedDescription)"
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Button("Request notification permission") {
+                        Task {
+                            do {
+                                let result = try await notifications.requestAuthorization()
+                                message = "Notification authorization: \(result)."
+                            } catch {
+                                message = "Notification permission error: \(error.localizedDescription)"
+                            }
+                        }
                     }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+
+                    Button(windDownEnabled ? "Schedule wind-down" : "Disable wind-down") {
+                        Task {
+                            guard !isScheduling else { return }
+                            isScheduling = true
+                            defer { isScheduling = false }
+                            await applyWindDown()
+                        }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    .disabled(isScheduling)
                 }
             }
 
-            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-
-            Button(windDownEnabled ? "Schedule wind-down" : "Disable wind-down") {
-                Task {
-                    guard !isScheduling else { return }
-                    isScheduling = true
-                    defer { isScheduling = false }
-                    await applyWindDown()
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 13) {
+                    LockboxSectionLabel("Live Activity demo", systemImage: "rectangle.inset.filled.and.person.filled")
+                    Text("This screen is a demo outside the lock and notification status.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    Text(demoActive
+                         ? "Demo presentation active until \(demoEnd?.formatted(date: .omitted, time: .shortened) ?? "unknown")."
+                         : "Demo presentation inactive.")
+                        .font(.subheadline)
+                    Button("Start demo") {
+                        Task { await startDemo() }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    Button("Update demo: recovery requested") {
+                        Task { await updateDemo() }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                    Button("End demo", role: .destructive) {
+                        Task { await endDemo() }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                    Text("Live Activities are best-effort presentation. They do not unlock or enforce restrictions.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
                 }
             }
-            .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-            .disabled(isScheduling)
 
-            Section {
-                Text("Live Activity demo")
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-                Text("This screen is a demo outside the lock and notification status.")
+            LockboxCard {
+                Text(message)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text(demoActive ? "Demo presentation active until \(demoEnd?.formatted(date: .omitted, time: .shortened) ?? "unknown")." : "Demo presentation inactive.")
-                Button("Start demo") {
-                    Task { await startDemo() }
-                }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                Button("Update demo: recovery requested") {
-                    Task { await updateDemo() }
-                }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                Button("End demo") {
-                    Task { await endDemo() }
-                }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-            } footer: {
-                Text("Live Activities are best-effort presentation. They do not unlock or enforce restrictions.")
+                    .foregroundStyle(LockboxTheme.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
         }
-        .navigationTitle("Ambient prototypes")
+        .lockboxScreen()
         .task {
             let count = await notifications.pendingOwnedRequestCount()
             if let existingEnd = liveActivity.existingFixedEnd(sessionID: "ambient-demo") {

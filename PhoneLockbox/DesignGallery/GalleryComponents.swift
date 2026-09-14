@@ -68,8 +68,6 @@ struct LockboxGalleryView: View {
                 ActiveFixtureView(fixture: model.fixture, palette: palette)
             }
         }
-        .navigationTitle("Lockbox")
-        .toolbarBackground(palette.background, for: .navigationBar)
         .accessibilityElement(children: .contain)
     }
 
@@ -329,8 +327,6 @@ struct PeopleGalleryView: View {
                 }
             }
         }
-        .navigationTitle("People")
-        .toolbarBackground(palette.background, for: .navigationBar)
     }
 }
 

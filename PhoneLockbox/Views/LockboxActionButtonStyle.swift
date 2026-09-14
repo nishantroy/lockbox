@@ -36,25 +36,25 @@ struct LockboxActionButtonStyle: ButtonStyle {
 
     private var foregroundColor: Color {
         switch emphasis {
-        case .primary: .white
-        case .secondary: .accentColor
-        case .destructive: .red
+        case .primary: LockboxTheme.onAccent
+        case .secondary: LockboxTheme.accent
+        case .destructive: LockboxTheme.destructive
         }
     }
 
     private var backgroundColor: Color {
         switch emphasis {
-        case .primary: .accentColor
-        case .secondary: Color.accentColor.opacity(0.1)
-        case .destructive: Color.red.opacity(0.1)
+        case .primary: LockboxTheme.accent
+        case .secondary: LockboxTheme.accent.opacity(0.1)
+        case .destructive: LockboxTheme.destructive.opacity(0.1)
         }
     }
 
     private var borderColor: Color {
         switch emphasis {
         case .primary: .clear
-        case .secondary: Color.accentColor.opacity(0.35)
-        case .destructive: Color.red.opacity(0.35)
+        case .secondary: LockboxTheme.accent.opacity(0.35)
+        case .destructive: LockboxTheme.destructive.opacity(0.35)
         }
     }
 }

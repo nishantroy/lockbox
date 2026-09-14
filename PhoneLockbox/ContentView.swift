@@ -28,6 +28,8 @@ struct ContentView: View {
                 Label("Settings", systemImage: "gearshape")
             }
         }
+        .tint(LockboxTheme.accent)
+        .lockboxScreen()
         .task { coordinator.refreshAuthorization() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {

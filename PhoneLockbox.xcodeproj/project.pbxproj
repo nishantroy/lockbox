@@ -10,6 +10,7 @@
 		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
 		17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */; };
+		1E4089EC6B84BBFABE620B5C /* LockboxDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */; };
 		1F71388F46EA07CCFECAC97A /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1DE0FD471013572C51A6819A /* AmbientKit */; };
 		23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		29FB4DAFD4FBC0B72B40C055 /* LockboxLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -115,6 +116,7 @@
 		0D9DB33B46E0F54F4E879C95 /* LockboxTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxTabView.swift; sourceTree = "<group>"; };
 		12CBE4AE757AB595A56B246A /* PhoneLockboxShieldAction.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockboxShieldAction.entitlements; sourceTree = "<group>"; };
 		15617864C3787EEB6026FE8B /* GalleryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryModel.swift; sourceTree = "<group>"; };
+		17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxDesignSystem.swift; sourceTree = "<group>"; };
 		21D938BBE7A7D516BD85A479 /* PeopleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleView.swift; sourceTree = "<group>"; };
 		2A5D95C14D31DEE7B354AE57 /* PhoneLockboxShieldConfiguration.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockboxShieldConfiguration.entitlements; sourceTree = "<group>"; };
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
@@ -207,10 +209,19 @@
 				E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */,
 				094C1C83EAEA5D4F5C0017A6 /* Ambient */,
 				99E729940E68111620073684 /* DesignGallery */,
+				2220B579BB10A3C7F0F9CA79 /* DesignSystem */,
 				6DE86A7A953F5C21A1AE155A /* Policy */,
 				713A10BF127B54AEC27D1857 /* Views */,
 			);
 			path = PhoneLockbox;
+			sourceTree = "<group>";
+		};
+		2220B579BB10A3C7F0F9CA79 /* DesignSystem */ = {
+			isa = PBXGroup;
+			children = (
+				17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */,
+			);
+			path = DesignSystem;
 			sourceTree = "<group>";
 		};
 		39F4C57E8A4CA54532DC99BA = {
@@ -542,6 +553,7 @@
 				62C0853D0A0EFD859C73F999 /* GalleryViews.swift in Sources */,
 				3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */,
 				3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */,
+				1E4089EC6B84BBFABE620B5C /* LockboxDesignSystem.swift in Sources */,
 				DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */,
 				70590D325CF4567FB7A7B12C /* LockboxTabView.swift in Sources */,
 				3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */,

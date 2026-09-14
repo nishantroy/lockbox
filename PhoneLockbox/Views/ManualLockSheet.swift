@@ -17,47 +17,53 @@ struct ManualLockSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Picker("Duration", selection: $choice) {
-                        ForEach(ManualLockChoice.allCases) { choice in
-                            Text(choice.title).tag(choice)
+            LockboxScrollView {
+                LockboxCard {
+                    VStack(alignment: .leading, spacing: 14) {
+                        LockboxSectionLabel("Choose an end", systemImage: "clock")
+                        Picker("Duration", selection: $choice) {
+                            ForEach(ManualLockChoice.allCases) { choice in
+                                Text(choice.title).tag(choice)
+                            }
                         }
-                    }
-                    .pickerStyle(.inline)
+                        .pickerStyle(.segmented)
 
-                    if choice == .custom {
-                        DatePicker(
-                            "End",
-                            selection: $customEnd,
-                            in: coordinator.manualLockCustomRange(at: referenceDate),
-                            displayedComponents: [.date, .hourAndMinute]
-                        )
+                        if choice == .custom {
+                            DatePicker(
+                                "End",
+                                selection: $customEnd,
+                                in: coordinator.manualLockCustomRange(at: referenceDate),
+                                displayedComponents: [.date, .hourAndMinute]
+                            )
+                        }
+                        Text("The end is finite and is checked again when you confirm. A manual lock never silently uses the bedtime end.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
                     }
-                } header: {
-                    Text("Choose an end")
-                } footer: {
-                    Text("The end is finite and is checked again when you confirm. A manual lock never silently uses the bedtime end.")
                 }
 
-                Section("Review before locking") {
-                    if let proposedEnd {
-                        LabeledContent("Immutable proposed end", value: proposedEnd.formatted(date: .abbreviated, time: .shortened))
-                    } else {
-                        Label("This end is no longer available.", systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
+                LockboxCard {
+                    VStack(alignment: .leading, spacing: 14) {
+                        LockboxSectionLabel("Review before locking", systemImage: "checkmark.shield")
+                        if let proposedEnd {
+                            LockboxValueRow(label: "Immutable proposed end", value: proposedEnd.formatted(date: .abbreviated, time: .shortened))
+                        } else {
+                            Label("This end is no longer available.", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                        }
+                        LockboxValueRow(label: "Restriction", value: coordinator.savedModeTitle)
+                        LockboxValueRow(label: "Selection", value: "\(coordinator.savedSelectedItemCount) selected")
+                        Text("Unsaved settings edits are not included. The saved policy is frozen for this lock.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
                     }
-                    LabeledContent("Restriction", value: coordinator.savedModeTitle)
-                    LabeledContent("Selection", value: "\(coordinator.savedSelectedItemCount) selected")
-                    Text("Unsaved settings edits are not included. The saved policy is frozen for this lock.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
 
                 if attempted, let error = coordinator.lastError {
-                    Section("Could not start lock") {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
+                    LockboxCard {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.destructive)
                     }
                 }
             }
@@ -83,6 +89,7 @@ struct ManualLockSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .lockboxScreen()
     }
 
     private var proposedEnd: Date? {
