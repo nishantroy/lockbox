@@ -103,6 +103,60 @@ final class RuntimeContractsTests: XCTestCase {
     }
     #endif
 
+    func testManualRouteOwnershipCommitSurvivesCrashBeforeOSStart() throws {
+        enum SimulatedCrash: Error { case beforeOSStart }
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try SharedRuntimeStore(directoryURL: directory)
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let end = start.addingTimeInterval(1_800)
+        let session = RuntimeSession(
+            origin: .manual,
+            start: start,
+            end: end,
+            sourceRevision: 1,
+            policy: RuntimePolicySnapshot(
+                mode: .blockSelected,
+                selectionSummary: RuntimeSelectionSummary(applicationCount: 1, categoryCount: 0, webDomainCount: 0),
+                selectionData: Data([1])
+            )
+        )
+        let route = RuntimeManualRouteBinding(sessionID: session.id, registeredStart: start, registeredEnd: end)
+        XCTAssertThrowsError(try store.withTransaction { context in
+            context.document.sessions = [session]
+            context.document.manualRoute = route
+            context.document.manualRegistrationIntent = true
+            try context.commit()
+            throw SimulatedCrash.beforeOSStart
+        })
+        let recovered = try store.read()
+        XCTAssertEqual(recovered.manualRoute, route)
+        XCTAssertTrue(recovered.manualRegistrationIntent)
+    }
+
+    func testLegacyDocumentWithoutManualRouteDecodesSafely() throws {
+        let session = RuntimeSession(
+            origin: .manual,
+            start: Date(timeIntervalSinceReferenceDate: 1_000),
+            end: Date(timeIntervalSinceReferenceDate: 2_000),
+            sourceRevision: 1,
+            policy: RuntimePolicySnapshot(
+                mode: .blockSelected,
+                selectionSummary: RuntimeSelectionSummary(applicationCount: 1, categoryCount: 0, webDomainCount: 0),
+                selectionData: Data([1])
+            )
+        )
+        var document = RuntimeStoreDocument()
+        document.sessions = [session]
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(document)) as? [String: Any])
+        object.removeValue(forKey: "manualRoute")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(RuntimeStoreDocument.self, from: legacyData)
+        XCTAssertNil(decoded.manualRoute)
+        XCTAssertEqual(decoded.sessions.first?.id, session.id)
+        XCTAssertNoThrow(try decoded.validate())
+    }
+
     func testBlockAndAllowPlansAreExplicit() throws {
         let selected = RuntimeSelectionSummary(applicationCount: 2, categoryCount: 1, webDomainCount: 1)
         let block = try RuntimePolicyPlan.make(mode: .blockSelected, selection: selected)

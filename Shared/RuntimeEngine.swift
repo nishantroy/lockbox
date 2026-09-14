@@ -51,6 +51,22 @@ public enum RuntimeSessionDecision {
     /// repeating callback will later announce (for example an early start).
     /// Keep the recurring route registered for future nights, but do not create
     /// a second scheduled session or misreport the active origin as automatic.
+    /// Adapter-level ownership decision that does not need the current civil
+    /// calendar. This is the end-to-end frozen-identity seam used before an
+    /// adapter recomputes any scheduled bounds.
+    public static func suppressesScheduledCallback(
+        sessions: [RuntimeSession],
+        at date: Date
+    ) -> Bool {
+        sessions.contains { session in
+            guard session.origin == .manual,
+                  session.purpose == .bedtime,
+                  session.isEffective(at: date),
+                  let binding = session.scheduledOccurrence else { return false }
+            return date >= binding.start && date < binding.end
+        }
+    }
+
     public static func suppressesScheduledStart(
         sessions: [RuntimeSession],
         occurrenceStart: Date,
@@ -111,7 +127,59 @@ public enum RuntimeSessionDecision {
     }
 }
 
-/// Decisions used at callback boundaries by both the monitor and the app.
+/// Pure ownership checks for the nonrepeating manual route. Adapters perform
+/// the OS stop/start while holding the shared store transaction lock, but use
+/// these decisions to prove that the route still belongs to the expected
+/// session generation and exact registered bounds.
+public enum RuntimeManualRouteDecision {
+    public static func registeredRouteMatches(
+        _ route: RuntimeManualRouteBinding,
+        sessionID: UUID,
+        intervalStart: DateComponents,
+        intervalEnd: DateComponents,
+        repeats: Bool,
+        calendar: Calendar = .current,
+        tolerance: TimeInterval = RuntimeManualLockDecision.registrationClockTolerance
+    ) -> Bool {
+        route.sessionID == sessionID
+            && RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                start: route.registeredStart,
+                end: route.registeredEnd,
+                intervalStart: intervalStart,
+                intervalEnd: intervalEnd,
+                repeats: repeats,
+                calendar: calendar,
+                tolerance: tolerance
+            )
+    }
+
+    public static func mayStop(
+        document: RuntimeStoreDocument,
+        expected: RuntimeManualRouteBinding,
+        at date: Date,
+        intervalStart: DateComponents?,
+        intervalEnd: DateComponents?,
+        repeats: Bool,
+        calendar: Calendar = .current,
+        tolerance: TimeInterval = RuntimeManualLockDecision.registrationClockTolerance
+    ) -> Bool {
+        guard document.manualRoute == expected,
+              !document.sessions.contains(where: { $0.id == expected.sessionID && $0.isEffective(at: date) }),
+              let intervalStart,
+              let intervalEnd else { return false }
+        return registeredRouteMatches(
+            expected,
+            sessionID: expected.sessionID,
+            intervalStart: intervalStart,
+            intervalEnd: intervalEnd,
+            repeats: repeats,
+            calendar: calendar,
+            tolerance: tolerance
+        )
+    }
+}
+
+/// Decisions used at callback boundaries by both the app and DeviceActivity.
 /// The callback may be late, duplicated, or arrive after a crash between a
 /// durable intent and Managed Settings. It must always reduce the *current*
 /// aggregate, rather than replaying an unconditional clear from the callback's

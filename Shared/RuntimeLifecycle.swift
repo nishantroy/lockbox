@@ -12,6 +12,9 @@ public enum RuntimeLifecycle {
     ) {
         let maximum = min(max(0, limit), 64)
         var protectedIDs = Set(document.recoveryCommitment?.sessionIDs ?? [])
+        if let manualRoute = document.manualRoute {
+            protectedIDs.insert(manualRoute.sessionID)
+        }
         protectedIDs.formUnion(document.releasedOccurrences.compactMap { occurrence in
             occurrence.origin == .scheduled && occurrence.end > date ? occurrence.sessionID : nil
         })
@@ -72,6 +75,31 @@ public enum RuntimeLifecycle {
         // manual overlap to finish. The callback that actually activates the
         // replacement passes `replacementActivated` above.
         return scheduledIsLive || document.recurringEnabledIntent
+    }
+
+    /// Adapter boundary for callbacks whose civil bounds may have been
+    /// recomputed under a changed time zone. Frozen manual bedtime ownership
+    /// and the absolute release fence are evaluated from the callback instant
+    /// before trusting those bounds.
+    public static func shouldSuppressScheduledCallback(
+        _ document: RuntimeStoreDocument,
+        at date: Date,
+        occurrenceStart: Date? = nil,
+        occurrenceEnd: Date? = nil,
+        calendar: Calendar = .current
+    ) -> Bool {
+        if RuntimeSessionDecision.suppressesScheduledCallback(sessions: document.sessions, at: date) {
+            return true
+        }
+        if let cutoff = document.scheduledActivationFence?.notBeforeOccurrenceStart,
+           date < cutoff {
+            return true
+        }
+        if let occurrenceStart, let occurrenceEnd,
+           shouldSuppressScheduledOccurrence(document, start: occurrenceStart, end: occurrenceEnd, calendar: calendar) {
+            return true
+        }
+        return false
     }
 
     public static func shouldSuppressScheduledOccurrence(
@@ -202,13 +230,18 @@ public enum RuntimeLifecycle {
                     document.sessions[index].state = .expired
                     changed = true
                 }
+                if document.manualRoute != nil {
+                    document.manualRoute = nil
+                    changed = true
+                }
             } else if !hasCurrentManual && document.manualRegistrationIntent {
                 document.manualRegistrationIntent = false
                 changed = true
             }
-            if !hasCurrentManual && (document.manualRegistrationActive || document.manualRegistrationIntent) {
+            if !hasCurrentManual && (document.manualRegistrationActive || document.manualRegistrationIntent || document.manualRoute != nil) {
                 document.manualRegistrationActive = false
                 document.manualRegistrationIntent = false
+                document.manualRoute = nil
                 changed = true
             }
         } else if hasCurrentManual {
@@ -217,9 +250,10 @@ public enum RuntimeLifecycle {
                 document.manualRegistrationIntent = false
                 changed = true
             }
-        } else if document.manualRegistrationActive || document.manualRegistrationIntent {
+        } else if document.manualRegistrationActive || document.manualRegistrationIntent || (!routeExists && document.manualRoute != nil) {
             document.manualRegistrationActive = false
             document.manualRegistrationIntent = false
+            document.manualRoute = nil
             changed = true
         }
 

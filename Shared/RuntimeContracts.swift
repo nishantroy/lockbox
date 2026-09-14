@@ -410,6 +410,29 @@ public struct RuntimeScheduledOccurrenceBinding: Codable, Equatable, Sendable {
     }
 }
 
+/// Persisted ownership of the nonrepeating manual DeviceActivity route.
+/// The session ID is the route generation; registered bounds identify the
+/// exact OS interval that may be stopped or reconciled after a crash.
+public struct RuntimeManualRouteBinding: Codable, Equatable, Sendable {
+    public let sessionID: UUID
+    public let registeredStart: Date
+    public let registeredEnd: Date
+
+    public init(sessionID: UUID, registeredStart: Date, registeredEnd: Date) {
+        self.sessionID = sessionID
+        self.registeredStart = registeredStart
+        self.registeredEnd = registeredEnd
+    }
+
+    public func validate() throws {
+        guard registeredStart.timeIntervalSinceReferenceDate.isFinite,
+              registeredEnd.timeIntervalSinceReferenceDate.isFinite,
+              registeredEnd > registeredStart else {
+            throw RuntimeValidationError.corruptSharedData
+        }
+    }
+}
+
 public enum RuntimeSessionState: String, Codable, Sendable {
     case active
     case recoveryPending
@@ -844,6 +867,9 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
     /// schedule and is never considered successful until the OS accepts it.
     public var manualRegistrationIntent: Bool
     public var manualRegistrationActive: Bool
+    /// The manual route generation and exact registered bounds. This is
+    /// optional for documents written before route ownership was persisted.
+    public var manualRoute: RuntimeManualRouteBinding?
     /// A pre-runtime schedule may still be registered in DeviceActivity, but
     /// its shield owner is unknowable. It must be surfaced and cleaned up, not
     /// treated as unlocked.
@@ -867,13 +893,14 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
         recoveryCommitment = nil
         manualRegistrationIntent = false
         manualRegistrationActive = false
+        manualRoute = nil
         legacyRegistrationNeedsReview = false
         operationStatus = RuntimeOperationStatus()
         diagnostics = []
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, legacyMigrationCompleted, configuration, pendingConfiguration, draft, recurringEnabledIntent, activeOwner, policyIntent, testLockActive, sessions, releasedOccurrences, suppressedOccurrenceKeys, scheduledActivationFence, recoveryCommitment, manualRegistrationIntent, manualRegistrationActive, legacyRegistrationNeedsReview, operationStatus, diagnostics
+        case schemaVersion, legacyMigrationCompleted, configuration, pendingConfiguration, draft, recurringEnabledIntent, activeOwner, policyIntent, testLockActive, sessions, releasedOccurrences, suppressedOccurrenceKeys, scheduledActivationFence, recoveryCommitment, manualRegistrationIntent, manualRegistrationActive, manualRoute, legacyRegistrationNeedsReview, operationStatus, diagnostics
     }
 
     public init(from decoder: Decoder) throws {
@@ -898,6 +925,7 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
         recoveryCommitment = try container.decodeIfPresent(RecoveryCommitment.self, forKey: .recoveryCommitment)
         manualRegistrationIntent = try container.decodeIfPresent(Bool.self, forKey: .manualRegistrationIntent) ?? false
         manualRegistrationActive = try container.decodeIfPresent(Bool.self, forKey: .manualRegistrationActive) ?? false
+        manualRoute = try container.decodeIfPresent(RuntimeManualRouteBinding.self, forKey: .manualRoute)
         legacyRegistrationNeedsReview = try container.decodeIfPresent(Bool.self, forKey: .legacyRegistrationNeedsReview) ?? false
         operationStatus = try container.decodeIfPresent(RuntimeOperationStatus.self, forKey: .operationStatus) ?? RuntimeOperationStatus()
         diagnostics = try container.decodeIfPresent([RuntimeDiagnostic].self, forKey: .diagnostics) ?? []
@@ -965,6 +993,14 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
             guard releasedIDs.contains(session.id) else { throw RuntimeValidationError.corruptSharedData }
         }
         try scheduledActivationFence?.validate()
+        if let manualRoute {
+            try manualRoute.validate()
+            guard let routeSession = sessions.first(where: { $0.id == manualRoute.sessionID }),
+                  routeSession.origin == .manual,
+                  routeSession.end == manualRoute.registeredEnd else {
+                throw RuntimeValidationError.corruptSharedData
+            }
+        }
 
         // Recovery is a relationship between the immutable request and the
         // session states, not merely a set of UUIDs. Expired natural targets

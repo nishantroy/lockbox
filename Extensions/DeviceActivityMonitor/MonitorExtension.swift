@@ -32,16 +32,25 @@ final class MonitorExtension: DeviceActivityMonitor {
                       context.document.recurringEnabledIntent,
                       let registered = activityCenter.schedule(for: activityName),
                       activityCenter.activities.contains(activityName),
-                      RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats),
-                      let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: now).first(where: { now >= $0.start && now < $0.end }) else {
+                      RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats) else {
                     // If recurrence was durably disabled, a callback from the
                     // old route is the recovery opportunity after a crash
                     // between the state commit and stopMonitoring. Preserve a
                     // current scheduled end route, but remove an otherwise
                     // stale daily registration.
                     shouldStopStaleRegistration = !RuntimeLifecycle.scheduledRegistrationShouldRemain(context.document, at: now)
-                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: registration, intent, or current occurrence did not match."), succeeded: false)
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: registration or recurrence intent did not match."), succeeded: false)
                     try replayCurrentPolicy(in: context, at: now, detail: "Rejected scheduled start callback replayed current aggregate.")
+                    return
+                }
+                if RuntimeLifecycle.shouldSuppressScheduledCallback(context.document, at: now) {
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: frozen bedtime ownership or release fence covers the callback instant."), succeeded: true)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Frozen scheduled callback ownership replayed current aggregate.")
+                    return
+                }
+                guard let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: now).first(where: { now >= $0.start && now < $0.end }) else {
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: no current civil occurrence matched."), succeeded: false)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Non-current scheduled start replayed current aggregate.")
                     return
                 }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
@@ -52,7 +61,12 @@ final class MonitorExtension: DeviceActivityMonitor {
                     try replayCurrentPolicy(in: context, at: now, detail: "Invalid scheduled selection replayed current aggregate.")
                     return
                 }
-                if RuntimeLifecycle.shouldSuppressScheduledOccurrence(context.document, start: occurrence.start, end: occurrence.end) {
+                if RuntimeLifecycle.shouldSuppressScheduledCallback(
+                    context.document,
+                    at: now,
+                    occurrenceStart: occurrence.start,
+                    occurrenceEnd: occurrence.end
+                ) {
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: a durable activation fence deferred this already-open occurrence."), succeeded: true)
                     try replayCurrentPolicy(in: context, at: now, detail: "Suppressed scheduled start replayed current aggregate.")
                     return
@@ -116,15 +130,46 @@ final class MonitorExtension: DeviceActivityMonitor {
                 let session = context.document.sessions.first {
                     $0.origin == .manual && $0.isEffective(at: now) && now < $0.end
                 }
-                let routeMatches = routeExists && registered != nil && session.map {
-                    RuntimeScheduleDecision.manualRegistrationMatchesExact(
-                        end: $0.end,
-                        intervalEnd: registered!.intervalEnd,
-                        repeats: registered!.repeats,
-                        calendar: Calendar.current,
-                        tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                let routeMatches: Bool
+                if let session, let registered {
+                    if let route = context.document.manualRoute {
+                        routeMatches = RuntimeManualRouteDecision.registeredRouteMatches(
+                            route,
+                            sessionID: session.id,
+                            intervalStart: registered.intervalStart,
+                            intervalEnd: registered.intervalEnd,
+                            repeats: registered.repeats,
+                            calendar: Calendar.current,
+                            tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                        )
+                    } else {
+                        // Legacy documents are accepted only when their
+                        // persisted session start/end exactly own the route.
+                        routeMatches = RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                            start: session.start,
+                            end: session.end,
+                            intervalStart: registered.intervalStart,
+                            intervalEnd: registered.intervalEnd,
+                            repeats: registered.repeats,
+                            calendar: Calendar.current,
+                            tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                        )
+                    }
+                } else {
+                    routeMatches = false
+                }
+                if routeMatches,
+                   context.document.manualRoute == nil,
+                   let session,
+                   let registered,
+                   let registeredStart = Calendar.current.date(from: registered.intervalStart),
+                   let registeredEnd = Calendar.current.date(from: registered.intervalEnd) {
+                    context.document.manualRoute = RuntimeManualRouteBinding(
+                        sessionID: session.id,
+                        registeredStart: registeredStart,
+                        registeredEnd: registeredEnd
                     )
-                } ?? false
+                }
                 // A callback from a stale route must not turn a manual session
                 // back into an enforceable one. Normalize the route flags before
                 // replaying the current aggregate, so an overlapping scheduled
@@ -220,8 +265,33 @@ final class MonitorExtension: DeviceActivityMonitor {
         var shouldStopManual = false
         var shouldStopDaily = false
         var scheduleToRegister: RuntimeConfiguration?
+        var endedManualRoute: RuntimeManualRouteBinding?
         do {
             try store.withTransaction { context in
+                // Safely upgrade a legacy route only when its OS start/end
+                // exactly match the persisted session before taking ownership.
+                if context.document.manualRoute == nil,
+                   let session = context.document.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }),
+                   let registered = activityCenter.schedule(for: manualActivityName),
+                   activityCenter.activities.contains(manualActivityName),
+                   RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                       start: session.start,
+                       end: session.end,
+                       intervalStart: registered.intervalStart,
+                       intervalEnd: registered.intervalEnd,
+                       repeats: registered.repeats,
+                       calendar: Calendar.current,
+                       tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                   ),
+                   let registeredStart = Calendar.current.date(from: registered.intervalStart),
+                   let registeredEnd = Calendar.current.date(from: registered.intervalEnd) {
+                    context.document.manualRoute = RuntimeManualRouteBinding(
+                        sessionID: session.id,
+                        registeredStart: registeredStart,
+                        registeredEnd: registeredEnd
+                    )
+                }
+                endedManualRoute = context.document.manualRoute
                 shouldStopManual = RuntimeCallbackDecision.prepareManualEnd(&context.document, at: now)
                 // Manual natural expiry is also a configuration activation
                 // boundary. Keep the pending edit and the clear/apply intent
@@ -240,7 +310,9 @@ final class MonitorExtension: DeviceActivityMonitor {
             }
             // Serialize route teardown with a possible new manual start only
             // after the durable terminal state and clear intent are committed.
-            if shouldStopManual { activityCenter.stopMonitoring([manualActivityName]) }
+            if shouldStopManual, let endedManualRoute {
+                try stopManualRouteIfOwned(store: store, expected: endedManualRoute)
+            }
             if shouldStopDaily { activityCenter.stopMonitoring([activityName]) }
             if let configuration = scheduleToRegister {
                 do {
@@ -272,6 +344,51 @@ final class MonitorExtension: DeviceActivityMonitor {
                 }
             }
         } catch { try? record(store: store, operation: .policyClearFailed, detail: error.localizedDescription, succeeded: false) }
+    }
+
+    /// Stop only the manual route generation that ended. The shared store lock
+    /// spans the ownership check, durable route clearing, and OS stop, so a
+    /// newer manual start cannot be stopped by this stale callback.
+    private func stopManualRouteIfOwned(
+        store: SharedRuntimeStore,
+        expected: RuntimeManualRouteBinding
+    ) throws {
+        try store.withTransaction { context in
+            let registered = activityCenter.schedule(for: manualActivityName)
+            if let registered,
+               activityCenter.activities.contains(manualActivityName) {
+                guard RuntimeManualRouteDecision.mayStop(
+                    document: context.document,
+                    expected: expected,
+                    at: Date(),
+                    intervalStart: registered.intervalStart,
+                    intervalEnd: registered.intervalEnd,
+                    repeats: registered.repeats,
+                    calendar: Calendar.current,
+                    tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                ) else { return }
+            } else if activityCenter.activities.contains(manualActivityName) {
+                // An activity without inspectable exact bounds is not ours to
+                // stop; retain durable ownership for a later reconciliation.
+                return
+            } else {
+                // The OS route is already absent; clear only our durable
+                // ended-generation ownership, never an unknown replacement.
+                guard context.document.manualRoute == expected,
+                      !context.document.sessions.contains(where: { $0.id == expected.sessionID && $0.isEffective(at: Date()) }) else { return }
+            }
+            // Stop while the persisted generation and exact bounds still
+            // prove ownership. Clearing follows the side effect; if a crash
+            // occurs before this commit, relaunch sees the same binding and
+            // retries the owned stop rather than adopting an unknown route.
+            if registered != nil {
+                activityCenter.stopMonitoring([manualActivityName])
+            }
+            context.document.manualRoute = nil
+            context.document.manualRegistrationIntent = false
+            context.document.manualRegistrationActive = false
+            try context.commit()
+        }
     }
 
     /// Persist the current desired intent before applying Managed Settings.

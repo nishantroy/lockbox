@@ -39,6 +39,88 @@ final class RuntimeLifecycleTests: XCTestCase {
         try document.validate()
     }
 
+    func testManualRouteGenerationRejectsSameEndReplacementAndLateStop() throws {
+        let old = session(origin: .manual, duration: 900)
+        let replacement = session(origin: .manual, start: old.start.addingTimeInterval(30), duration: old.end.timeIntervalSince(old.start) - 30)
+        var document = RuntimeStoreDocument()
+        document.sessions = [old, replacement]
+        let oldRoute = RuntimeManualRouteBinding(sessionID: old.id, registeredStart: old.start, registeredEnd: old.end)
+        let replacementRoute = RuntimeManualRouteBinding(sessionID: replacement.id, registeredStart: replacement.start, registeredEnd: replacement.end)
+        document.manualRoute = replacementRoute
+        let calendar = Calendar.current
+        let replacementStartComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: replacement.start)
+        let replacementEndComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: replacement.end)
+        XCTAssertFalse(RuntimeManualRouteDecision.registeredRouteMatches(
+            oldRoute,
+            sessionID: old.id,
+            intervalStart: replacementStartComponents,
+            intervalEnd: replacementEndComponents,
+            repeats: false,
+            calendar: calendar
+        ))
+
+        XCTAssertFalse(RuntimeManualRouteDecision.mayStop(
+            document: document,
+            expected: oldRoute,
+            at: replacement.start.addingTimeInterval(1),
+            intervalStart: DateComponents(),
+            intervalEnd: DateComponents(),
+            repeats: false
+        ))
+        XCTAssertNoThrow(try document.validate())
+    }
+
+    func testFrozenManualBedtimeCallbackSuppressesCivilTimezoneRecomputation() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let occurrenceStart = calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 22))!
+        let occurrenceEnd = calendar.date(from: DateComponents(year: 2026, month: 9, day: 11, hour: 7))!
+        let now = occurrenceStart.addingTimeInterval(60)
+        let manual = RuntimeSession(
+            origin: .manual,
+            start: now,
+            end: occurrenceEnd,
+            sourceRevision: 1,
+            policy: policy(),
+            purpose: .bedtime,
+            scheduledOccurrence: RuntimeScheduledOccurrenceBinding(start: occurrenceStart, end: occurrenceEnd)
+        )
+        var document = RuntimeStoreDocument()
+        document.sessions = [manual]
+
+        let shiftedStart = occurrenceStart.addingTimeInterval(24 * 60 * 60)
+        let shiftedEnd = occurrenceEnd.addingTimeInterval(24 * 60 * 60)
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledCallback(
+            document,
+            at: now,
+            occurrenceStart: shiftedStart,
+            occurrenceEnd: shiftedEnd,
+            calendar: Calendar.current
+        ))
+
+        try RuntimeLifecycle.release(
+            &document,
+            sessionIDs: [manual.id],
+            at: manual.start.addingTimeInterval(30),
+            calendar: calendar
+        )
+        XCTAssertTrue(RuntimeLifecycle.shouldSuppressScheduledCallback(
+            document,
+            at: manual.start.addingTimeInterval(60),
+            occurrenceStart: shiftedStart,
+            occurrenceEnd: shiftedEnd,
+            calendar: Calendar.current
+        ))
+        XCTAssertFalse(RuntimeLifecycle.shouldSuppressScheduledCallback(
+            document,
+            at: occurrenceEnd.addingTimeInterval(1),
+            occurrenceStart: shiftedStart,
+            occurrenceEnd: shiftedEnd,
+            calendar: Calendar.current
+        ))
+        try document.validate()
+    }
+
     func testManualEndReplaysTerminalClearAndPreservesScheduledOverlap() throws {
         let manual = session(origin: .manual, duration: 900)
         let scheduled = session(start: manual.start, duration: 3600)

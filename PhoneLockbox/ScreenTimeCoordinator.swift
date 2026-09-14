@@ -260,6 +260,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
         var shouldRegisterPending = false
         var shouldStopManualMonitoring = false
+        var manualRouteToStop: RuntimeManualRouteBinding?
         do {
             try store.withTransaction { context in
                 let now = Date()
@@ -281,6 +282,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                     $0.origin == .manual && $0.isEffective(at: now)
                 }
                 if shouldStopManualMonitoring {
+                    manualRouteToStop = context.document.manualRoute
                     context.document.manualRegistrationActive = false
                     context.document.manualRegistrationIntent = false
                 }
@@ -296,7 +298,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                 context.document.record(RuntimeDiagnostic(operation: .policyCleared, observedAt: Date(), detail: "Recovery release applied; future occurrences remain configured."), succeeded: true)
                 try context.commit()
             }
-            if shouldStopManualMonitoring { activityCenter.stopMonitoring([Self.manualActivityName]) }
+            if shouldStopManualMonitoring, let manualRouteToStop {
+                try stopManualRouteIfOwned(store: store, expected: manualRouteToStop)
+            }
             refreshDocument()
             clearLastErrorAfterSuccessfulOperation()
             scheduleLiveActivityReconciliation()
@@ -353,6 +357,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         reconcileRuntime()
         refreshDocument()
         var sessionID: UUID?
+        var manualRouteToCleanup: RuntimeManualRouteBinding?
         var manualRegistered = false
         do {
             try store.withTransaction { context in
@@ -373,6 +378,14 @@ final class ScreenTimeCoordinator: ObservableObject {
                         throw RuntimeValidationError.invalidConfiguration("The saved bedtime schedule is not registered exactly.")
                     }
                 }
+                // A route binding is an ownership generation. Never reuse an
+                // existing or unknown route for a new session; reconciliation
+                // must retire it first while holding the same store lock.
+                guard context.document.manualRoute == nil,
+                      !activityCenter.activities.contains(Self.manualActivityName),
+                      activityCenter.schedule(for: Self.manualActivityName) == nil else {
+                    throw RuntimeValidationError.invalidConfiguration("A finite manual end route is already registered.")
+                }
                 let bedtimeOccurrence = bedtimeNow
                     ? RuntimeBedtimeNowDecision.proposedOccurrence(
                         configuration: context.document.configuration,
@@ -385,7 +398,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                     guard context.document.effectiveSessions(at: startedAt).isEmpty else {
                         throw RuntimeValidationError.invalidConfiguration("A lock is already active; bedtime cannot be started over it.")
                     }
-                    guard let bedtimeOccurrence,
+                    guard bedtimeOccurrence != nil,
                           RuntimeBedtimeNowDecision.accepts(
                               expectedEnd: expectedEnd,
                               configuration: context.document.configuration,
@@ -397,12 +410,6 @@ final class ScreenTimeCoordinator: ObservableObject {
                     }
                     guard hasMatchingRecurringRegistration(context.document.configuration) else {
                         throw RuntimeValidationError.invalidConfiguration("The saved bedtime schedule is not registered exactly.")
-                    }
-                    // A stale manual route is an ownership conflict, not a
-                    // reason to overwrite an unknown finite end.
-                    guard !activityCenter.activities.contains(Self.manualActivityName),
-                          activityCenter.schedule(for: Self.manualActivityName) == nil else {
-                        throw RuntimeValidationError.invalidConfiguration("A finite manual end route is already registered.")
                     }
                 } else {
                     guard !context.document.sessions.contains(where: { $0.origin == .manual && $0.isEffective(at: startedAt) }) else {
@@ -456,6 +463,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                 )
                 sessionID = session.id
                 context.document.sessions.append(session)
+                let route = RuntimeManualRouteBinding(sessionID: session.id, registeredStart: startedAt, registeredEnd: expectedEnd)
+                manualRouteToCleanup = route
+                context.document.manualRoute = route
                 context.document.manualRegistrationIntent = true
                 context.document.manualRegistrationActive = false
                 context.document.policyIntent = .apply
@@ -466,9 +476,10 @@ final class ScreenTimeCoordinator: ObservableObject {
                 try activityCenter.startMonitoring(Self.manualActivityName, during: schedule)
                 guard let registered = activityCenter.schedule(for: Self.manualActivityName),
                       activityCenter.activities.contains(Self.manualActivityName),
-                      RuntimeScheduleDecision.manualRegistrationMatchesExact(
-                          start: startedAt,
-                          end: expectedEnd,
+                      context.document.manualRoute == route,
+                      RuntimeManualRouteDecision.registeredRouteMatches(
+                          route,
+                          sessionID: session.id,
                           intervalStart: registered.intervalStart,
                           intervalEnd: registered.intervalEnd,
                           repeats: registered.repeats,
@@ -493,7 +504,6 @@ final class ScreenTimeCoordinator: ObservableObject {
                 // A rejected second manual lock has no sessionID and must not
                 // stop the first lock's only end route.
                 if let sessionID {
-                    activityCenter.stopMonitoring([Self.manualActivityName])
                     try? store.transaction { document in
                         document.sessions.removeAll { $0.id == sessionID }
                         document.manualRegistrationIntent = false
@@ -501,6 +511,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                         let remaining = enforcementSessions(in: document, at: currentDate())
                         document.policyIntent = remaining.isEmpty ? .clear : .apply
                         document.record(RuntimeDiagnostic(operation: .registrationFailed, observedAt: currentDate(), detail: error.localizedDescription), succeeded: false)
+                    }
+                    if let manualRouteToCleanup {
+                        try? stopManualRouteIfOwned(store: store, expected: manualRouteToCleanup)
                     }
                     reconcileRuntime()
                 }
@@ -522,6 +535,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     func developerUnlockNow() {
         guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
         var shouldStopManualMonitoring = false
+        var manualRouteToStop: RuntimeManualRouteBinding?
         do {
             try store.withTransaction { context in
                 let now = Date()
@@ -538,6 +552,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                 shouldStopManualMonitoring = !context.document.sessions.contains {
                     $0.origin == .manual && $0.isEffective(at: now)
                 }
+                if shouldStopManualMonitoring {
+                    manualRouteToStop = context.document.manualRoute
+                }
                 context.document.manualRegistrationIntent = false
                 context.document.manualRegistrationActive = false
                 context.document.policyIntent = .clear
@@ -550,7 +567,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                 context.document.record(RuntimeDiagnostic(operation: .policyCleared, observedAt: Date(), detail: "Developer unlock cleared current owned policy; future schedule preserved."), succeeded: true)
                 try context.commit()
             }
-            if shouldStopManualMonitoring { activityCenter.stopMonitoring([Self.manualActivityName]) }
+            if shouldStopManualMonitoring, let manualRouteToStop {
+                try stopManualRouteIfOwned(store: store, expected: manualRouteToStop)
+            }
             refreshDocument(); clearLastErrorAfterSuccessfulOperation()
         } catch { refreshDocument(); lastError = error.localizedDescription }
     }
@@ -1109,6 +1128,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         guard let store else { return }
         var shouldRegisterPending = false
         var shouldStopManual = false
+        var manualRouteToStop: RuntimeManualRouteBinding?
         var reconciliationSucceeded = false
         do {
             try store.withTransaction { context in
@@ -1118,6 +1138,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 let effective = RuntimeCallbackDecision.currentAggregate(context.document, at: date)
                 if !context.document.sessions.contains(where: { $0.origin == .manual && $0.isEffective(at: date) }) {
                     shouldStopManual = context.document.manualRegistrationActive || context.document.manualRegistrationIntent
+                    manualRouteToStop = context.document.manualRoute
                     context.document.manualRegistrationActive = false
                     context.document.manualRegistrationIntent = false
                 }
@@ -1160,7 +1181,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                 // the app.
                 reconciliationSucceeded = true
             }
-            if shouldStopManual { activityCenter.stopMonitoring([Self.manualActivityName]) }
+            if shouldStopManual, let manualRouteToStop {
+                try stopManualRouteIfOwned(store: store, expected: manualRouteToStop)
+            }
             if shouldRegisterPending { registerConfiguredSchedule() }
             if reconciliationSucceeded { reconciliationError = nil }
             refreshDocument()
@@ -1187,17 +1210,40 @@ final class ScreenTimeCoordinator: ObservableObject {
         let routeExists = activityCenter.activities.contains(Self.manualActivityName)
         let registered = activityCenter.schedule(for: Self.manualActivityName)
         var routeMatches = false
-        var shouldStopStaleRegistration = false
+        var staleManualRoute: RuntimeManualRouteBinding?
         do {
             try store.transaction { context in
+                let priorManualRoute = context.manualRoute
                 if let registered,
                    let session = context.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }) {
-                    routeMatches = RuntimeScheduleDecision.manualRegistrationMatchesExact(
-                        // A relaunch can replay a durable session from the
-                        // current instant while retaining its frozen end. The
-                        // end is the ownership boundary; route start is not.
-                        start: nil,
-                        end: session.end,
+                    if let route = context.manualRoute {
+                        routeMatches = RuntimeManualRouteDecision.registeredRouteMatches(
+                            route,
+                            sessionID: session.id,
+                            intervalStart: registered.intervalStart,
+                            intervalEnd: registered.intervalEnd,
+                            repeats: registered.repeats,
+                            calendar: Calendar.current,
+                            tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                        )
+                    } else {
+                        // Legacy documents have no route generation. Accept
+                        // only the exact frozen session start/end once, then
+                        // persist a binding through normal reconciliation.
+                        routeMatches = RuntimeScheduleDecision.manualRegistrationMatchesExact(
+                            start: session.start,
+                            end: session.end,
+                            intervalStart: registered.intervalStart,
+                            intervalEnd: registered.intervalEnd,
+                            repeats: registered.repeats,
+                            calendar: Calendar.current,
+                            tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                        )
+                    }
+                } else if let registered = registered, let route = context.manualRoute {
+                    routeMatches = RuntimeManualRouteDecision.registeredRouteMatches(
+                        route,
+                        sessionID: route.sessionID,
                         intervalStart: registered.intervalStart,
                         intervalEnd: registered.intervalEnd,
                         repeats: registered.repeats,
@@ -1205,15 +1251,23 @@ final class ScreenTimeCoordinator: ObservableObject {
                         tolerance: RuntimeManualLockDecision.registrationClockTolerance
                     )
                 }
+                if routeMatches,
+                   context.manualRoute == nil,
+                   let registered,
+                   let session = context.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }),
+                   let registeredStart = Calendar.current.date(from: registered.intervalStart),
+                   let registeredEnd = Calendar.current.date(from: registered.intervalEnd) {
+                    context.manualRoute = RuntimeManualRouteBinding(sessionID: session.id, registeredStart: registeredStart, registeredEnd: registeredEnd)
+                }
                 let changed = RuntimeLifecycle.normalizeManualRegistration(
                     &context,
                     at: now,
                     routeExists: routeExists,
                     routeMatches: routeExists && registered != nil && routeMatches
                 )
-                shouldStopStaleRegistration = routeExists && (!routeMatches || !context.sessions.contains {
-                    $0.origin == .manual && $0.isEffective(at: now)
-                })
+                if routeExists && !context.sessions.contains(where: { $0.origin == .manual && $0.isEffective(at: now) }) {
+                    staleManualRoute = priorManualRoute
+                }
                 if changed {
                     context.record(RuntimeDiagnostic(
                         operation: .callbackReceived,
@@ -1224,13 +1278,58 @@ final class ScreenTimeCoordinator: ObservableObject {
                     ), succeeded: routeExists && routeMatches)
                 }
             }
-            if shouldStopStaleRegistration { activityCenter.stopMonitoring([Self.manualActivityName]) }
+            if let staleManualRoute {
+                try stopManualRouteIfOwned(store: store, expected: staleManualRoute)
+            }
             // A pending intent is retried only after normalization. Until the
             // OS accepts the route it remains outside the enforcement aggregate.
             refreshDocument()
             reconcilePendingManualRegistration()
             reconcileRuntime()
         } catch { lastError = error.localizedDescription }
+    }
+
+    /// Stop only an ended manual route generation while holding the shared
+    /// transaction lock across ownership verification and the OS side effect.
+    /// A newer start therefore cannot interleave a successful route update.
+    private func stopManualRouteIfOwned(
+        store: SharedRuntimeStore,
+        expected: RuntimeManualRouteBinding
+    ) throws {
+        try store.withTransaction { context in
+            let registered = activityCenter.schedule(for: Self.manualActivityName)
+            if let registered,
+               activityCenter.activities.contains(Self.manualActivityName) {
+                guard RuntimeManualRouteDecision.mayStop(
+                    document: context.document,
+                    expected: expected,
+                    at: currentDate(),
+                    intervalStart: registered.intervalStart,
+                    intervalEnd: registered.intervalEnd,
+                    repeats: registered.repeats,
+                    calendar: Calendar.current,
+                    tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                ) else { return }
+            } else if activityCenter.activities.contains(Self.manualActivityName) {
+                // An activity without inspectable exact bounds is not ours to
+                // stop; retain durable ownership for a later reconciliation.
+                return
+            } else {
+                guard context.document.manualRoute == expected,
+                      !context.document.sessions.contains(where: { $0.id == expected.sessionID && $0.isEffective(at: currentDate()) }) else { return }
+            }
+            // Stop while the persisted generation and exact bounds still
+            // prove ownership. Clearing follows the side effect; if a crash
+            // occurs before this commit, relaunch sees the same binding and
+            // retries the owned stop rather than adopting an unknown route.
+            if registered != nil {
+                activityCenter.stopMonitoring([Self.manualActivityName])
+            }
+            context.document.manualRoute = nil
+            context.document.manualRegistrationIntent = false
+            context.document.manualRegistrationActive = false
+            try context.commit()
+        }
     }
 
     private func reconcilePendingManualRegistration() {
@@ -1255,28 +1354,51 @@ final class ScreenTimeCoordinator: ObservableObject {
         do {
             // The original start may be in the past after a crash. The session
             // end remains frozen, while the OS registration starts from now.
+            // Persist the replay generation and exact bounds before touching
+            // DeviceActivity so an unrelated same-end route cannot be adopted.
             let replayStart = currentDate()
-            try activityCenter.startMonitoring(Self.manualActivityName, during: manualSchedule(start: replayStart, end: pending.end))
-            try store.transaction { document in                guard document.sessions.contains(where: {
+            let replayRoute = RuntimeManualRouteBinding(
+                sessionID: pending.id,
+                registeredStart: replayStart,
+                registeredEnd: pending.end
+            )
+            try store.withTransaction { context in
+                guard context.document.sessions.contains(where: {
                     $0.id == pending.id && ($0.state == .active || $0.state == .recoveryPending) && $0.isEffective(at: Date())
-                }),
-                let registered = activityCenter.schedule(for: Self.manualActivityName),
-                activityCenter.activities.contains(Self.manualActivityName),
-                RuntimeScheduleDecision.manualRegistrationMatchesExact(
-                    start: replayStart,
-                    end: pending.end,
-                    intervalStart: registered.intervalStart,
-                    intervalEnd: registered.intervalEnd,
-                    repeats: registered.repeats,
-                    calendar: Calendar.current,
-                    tolerance: RuntimeManualLockDecision.registrationClockTolerance
-                ) else {
+                }) else {
+                    throw RuntimeValidationError.invalidConfiguration("The pending finite manual session is no longer current.")
+                }
+                context.document.manualRoute = replayRoute
+                context.document.manualRegistrationIntent = true
+                context.document.manualRegistrationActive = false
+                context.document.policyIntent = .apply
+                context.document.record(RuntimeDiagnostic(operation: .registrationAttempted, requestedEnd: RuntimeTime(hour: Calendar.current.component(.hour, from: pending.end), minute: Calendar.current.component(.minute, from: pending.end)), detail: "Pending finite manual registration replay persisted before OS registration."))
+                try context.commit()
+            }
+            try activityCenter.startMonitoring(Self.manualActivityName, during: manualSchedule(start: replayStart, end: pending.end))
+            try store.withTransaction { context in
+                guard context.document.manualRoute == replayRoute,
+                      context.document.sessions.contains(where: {
+                          $0.id == pending.id && ($0.state == .active || $0.state == .recoveryPending) && $0.isEffective(at: Date())
+                      }),
+                      let registered = activityCenter.schedule(for: Self.manualActivityName),
+                      activityCenter.activities.contains(Self.manualActivityName),
+                      RuntimeManualRouteDecision.registeredRouteMatches(
+                          replayRoute,
+                          sessionID: pending.id,
+                          intervalStart: registered.intervalStart,
+                          intervalEnd: registered.intervalEnd,
+                          repeats: registered.repeats,
+                          calendar: Calendar.current,
+                          tolerance: RuntimeManualLockDecision.registrationClockTolerance
+                      ) else {
                     throw RuntimeValidationError.invalidConfiguration("The OS did not retain the expected finite manual end route.")
                 }
-                document.manualRegistrationIntent = false
-                document.manualRegistrationActive = true
-                document.policyIntent = .apply
-                document.record(RuntimeDiagnostic(operation: .registrationSucceeded, requestedEnd: RuntimeTime(hour: Calendar.current.component(.hour, from: pending.end), minute: Calendar.current.component(.minute, from: pending.end)), detail: "Pending finite manual registration replayed."), succeeded: true)
+                context.document.manualRegistrationIntent = false
+                context.document.manualRegistrationActive = true
+                context.document.policyIntent = .apply
+                context.document.record(RuntimeDiagnostic(operation: .registrationSucceeded, requestedEnd: RuntimeTime(hour: Calendar.current.component(.hour, from: pending.end), minute: Calendar.current.component(.minute, from: pending.end)), detail: "Pending finite manual registration replayed."), succeeded: true)
+                try context.commit()
             }
             reconcileRuntime()
         } catch { lastError = error.localizedDescription }
@@ -1341,9 +1463,15 @@ final class ScreenTimeCoordinator: ObservableObject {
               let configuration = state.configuration,
               let registered = activityCenter.schedule(for: Self.activityName),
               activityCenter.activities.contains(Self.activityName),
-              RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats),
-              let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: date).first(where: { date >= $0.start && date < $0.end }) else { return false }
-        if RuntimeLifecycle.shouldSuppressScheduledOccurrence(state, start: occurrence.start, end: occurrence.end) { return false }
+              RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats) else { return false }
+        if RuntimeLifecycle.shouldSuppressScheduledCallback(state, at: date) { return false }
+        guard let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: date).first(where: { date >= $0.start && date < $0.end }) else { return false }
+        if RuntimeLifecycle.shouldSuppressScheduledCallback(
+            state,
+            at: date,
+            occurrenceStart: occurrence.start,
+            occurrenceEnd: occurrence.end
+        ) { return false }
         if RuntimeSessionDecision.suppressesScheduledStart(
             sessions: state.sessions,
             occurrenceStart: occurrence.start,
