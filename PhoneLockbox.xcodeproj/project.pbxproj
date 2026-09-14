@@ -18,6 +18,7 @@
 		3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */; };
 		3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */; };
 		3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */; };
+		4A9722B7D8F0DFCC690D5667 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = C752EA0B9C9FF6865B25243D /* AmbientKit */; };
 		510B03F537735BC5AEE4AC36 /* ShieldActionExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */; };
 		51A9820C991E42AD46629222 /* LockboxLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */; };
 		59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */; };
@@ -160,6 +161,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		6A4B5C8B8AAEF5855CCC958D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4A9722B7D8F0DFCC690D5667 /* AmbientKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		7DBD9B76A002C78D73239016 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -437,6 +446,7 @@
 			buildConfigurationList = CC9EDBAEE8414D948C9B9981 /* Build configuration list for PBXNativeTarget "DeviceActivityMonitor" */;
 			buildPhases = (
 				252035180041AB3E77D443F9 /* Sources */,
+				6A4B5C8B8AAEF5855CCC958D /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -444,6 +454,7 @@
 			);
 			name = DeviceActivityMonitor;
 			packageProductDependencies = (
+				C752EA0B9C9FF6865B25243D /* AmbientKit */,
 			);
 			productName = DeviceActivityMonitor;
 			productReference = F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */;
@@ -1060,6 +1071,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		1DE0FD471013572C51A6819A /* AmbientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AmbientKit;
+		};
+		C752EA0B9C9FF6865B25243D /* AmbientKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AmbientKit;
 		};

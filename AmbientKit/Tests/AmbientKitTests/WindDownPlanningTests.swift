@@ -333,4 +333,49 @@ final class LiveActivityModelTests: XCTestCase {
             .releaseObservationRequired
         )
     }
+
+    func testExactTerminationRequiresSessionIdentityAndImmutableEnd() {
+        let end = Date(timeIntervalSince1970: 100)
+        let attributes = AmbientLiveActivityAttributes(sessionID: "old", fixedEnd: end, kind: .bedtime)
+        XCTAssertTrue(AmbientLiveActivityTermination.matchesExactSession(
+            activity: attributes,
+            sessionID: "old",
+            fixedEnd: end,
+            kind: .bedtime
+        ))
+        XCTAssertFalse(AmbientLiveActivityTermination.matchesExactSession(
+            activity: attributes,
+            sessionID: "new",
+            fixedEnd: end,
+            kind: .bedtime
+        ))
+        XCTAssertFalse(AmbientLiveActivityTermination.matchesExactSession(
+            activity: attributes,
+            sessionID: "old",
+            fixedEnd: Date(timeIntervalSince1970: 101),
+            kind: .bedtime
+        ))
+        XCTAssertFalse(AmbientLiveActivityTermination.matchesExactSession(
+            activity: attributes,
+            sessionID: "old",
+            fixedEnd: end,
+            kind: .focus
+        ))
+    }
+
+    func testPastFixedEndSweepIncludesBoundaryButNeverCurrentOrFutureOrDemo() {
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertTrue(AmbientLiveActivityTermination.shouldSweepPastFixedEnd(
+            activity: .init(sessionID: "ended", fixedEnd: now, kind: .focus),
+            now: now
+        ))
+        XCTAssertFalse(AmbientLiveActivityTermination.shouldSweepPastFixedEnd(
+            activity: .init(sessionID: "future", fixedEnd: now.addingTimeInterval(1), kind: .bedtime),
+            now: now
+        ))
+        XCTAssertFalse(AmbientLiveActivityTermination.shouldSweepPastFixedEnd(
+            activity: .init(sessionID: "demo", fixedEnd: now.addingTimeInterval(-1), kind: .demo),
+            now: now
+        ))
+    }
 }

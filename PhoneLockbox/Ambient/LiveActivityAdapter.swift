@@ -120,9 +120,13 @@ public final class LockboxLiveActivityAdapter: Sendable {
         guard let activity = matchingActivity(sessionID: sessionID) else {
             return .unavailable(.noMatchingActivity)
         }
-        let current = activity.content.state.staleIfNeeded(at: now)
-        await activity.end(.init(state: current, staleDate: current.fixedEnd), dismissalPolicy: .immediate)
-        return .ended
+        let ended = await AmbientLiveActivityTerminator.endExactSession(
+            sessionID: sessionID,
+            fixedEnd: activity.attributes.fixedEnd,
+            kind: activity.attributes.kind,
+            status: activity.content.state.staleIfNeeded(at: now).status
+        )
+        return ended == 0 ? .unavailable(.noMatchingActivity) : .ended
     }
 
     /// This API is intentionally named for the only condition that permits
@@ -133,25 +137,43 @@ public final class LockboxLiveActivityAdapter: Sendable {
         guard let activity = matchingActivity(sessionID: sessionID) else {
             return .unavailable(.noMatchingActivity)
         }
-        let fixedEnd = activity.attributes.fixedEnd
-        let state = AmbientActivityContentState(fixedEnd: fixedEnd, status: .releaseObserved)
-        await activity.end(.init(state: state, staleDate: fixedEnd), dismissalPolicy: .immediate)
-        return .ended
+        let ended = await AmbientLiveActivityTerminator.endExactSession(
+            sessionID: sessionID,
+            fixedEnd: activity.attributes.fixedEnd,
+            kind: activity.attributes.kind,
+            status: .releaseObserved
+        )
+        return ended == 0 ? .unavailable(.noMatchingActivity) : .ended
     }
 
     /// Natural expiry is observed by the persisted runtime, but it is not an
     /// independently observed Managed Settings release. Keep that distinction
     /// in the final Activity state.
     public func endAfterObservedExpiry(
-        sessionID: String
+        sessionID: String,
+        fixedEnd: Date? = nil,
+        kind: AmbientLiveActivityKind? = nil
     ) async -> AmbientLiveActivityOutcome {
-        guard let activity = matchingActivity(sessionID: sessionID) else {
+        guard let activity = matchingActivity(sessionID: sessionID),
+              fixedEnd == nil || activity.attributes.fixedEnd == fixedEnd,
+              kind == nil || activity.attributes.kind == kind else {
             return .unavailable(.noMatchingActivity)
         }
-        let fixedEnd = activity.attributes.fixedEnd
-        let state = AmbientActivityContentState(fixedEnd: fixedEnd, status: .expired)
-        await activity.end(.init(state: state, staleDate: fixedEnd), dismissalPolicy: .immediate)
-        return .ended
+        let ended = await AmbientLiveActivityTerminator.endExactSession(
+            sessionID: sessionID,
+            fixedEnd: activity.attributes.fixedEnd,
+            kind: activity.attributes.kind,
+            status: .expired
+        )
+        return ended == 0 ? .unavailable(.noMatchingActivity) : .ended
+    }
+
+    /// Foreground/relaunch fallback for terminal history that was pruned or
+    /// whose extension task did not complete. Past ends become stale
+    /// presentation, never an enforcement-release claim.
+    @MainActor
+    public func endPastFixedEndAppOwnedActivities(now: Date = .now) async -> Int {
+        await AmbientLiveActivityTerminator.endPastFixedEndAppOwnedActivities(now: now)
     }
 
     /// Disabling the ambient preference ends only this app's activities. It is

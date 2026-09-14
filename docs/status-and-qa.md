@@ -1,6 +1,12 @@
 # Status and QA evidence
 
-Updated: 2026-09-11. **Latest implementation: build 3 R2/R3 runtime and recovery integration.** Automated validation and the initial focused physical-device QA pass are complete. This page preserves build-1/build-2 evidence as historical baseline and does not use those passes to claim R2/R3 behavior. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+Updated: 2026-09-14. **Latest implementation: build 11 ambient natural-end fix candidate.** Automated validation and the focused build-11 physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not use owner observations to certify the source-only Live Activity fix. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+
+## Build-11 focused owner QA — natural-end presentation finding
+
+Owner confirmed: Start bedtime now ended at the exact confirmed time; Get some rest worked; enforcement survived force-close; and tomorrow's recurrence remained. **Finding:** the Live Activity remained visible after the session naturally ended. This is device evidence for installed build 11, not proof of automatic Live Activity cleanup or of this source candidate.
+
+The candidate fix commits the exact effective-to-expired session transition and replays the current Managed Settings policy before launching best-effort ActivityKit termination. Foreground/relaunch reconciliation sweeps only past immutable focus/bedtime activities and ends them with stale presentation, never as proof of enforcement release. ActivityKit failure/process termination cannot roll back or block policy; extension ownership and exact device timing remain open validation gates.
 
 ## Build-3 implementation gate — 2026-09-10
 

@@ -824,6 +824,11 @@ final class ScreenTimeCoordinator: ObservableObject {
         }
 
         let now = currentDate()
+        // Terminal history can be pruned, and a monitor extension task can be
+        // interrupted with its process. Sweep only past immutable ends for
+        // real focus/bedtime activities; the helper marks them stale rather
+        // than claiming that Managed Settings released.
+        _ = await liveActivity.endPastFixedEndAppOwnedActivities(now: now)
         let active = enforcementSessions(at: now)
         for session in active {
             let status: AmbientLiveActivityStatus = session.state == .recoveryPending ? .recoveryPending : .plannedSession
@@ -846,7 +851,11 @@ final class ScreenTimeCoordinator: ObservableObject {
             if session.state == .released {
                 result = await liveActivity.endAfterObservedRelease(sessionID: session.id.uuidString)
             } else {
-                result = await liveActivity.endAfterObservedExpiry(sessionID: session.id.uuidString)
+                result = await liveActivity.endAfterObservedExpiry(
+                    sessionID: session.id.uuidString,
+                    fixedEnd: session.end,
+                    kind: (session.purpose == .bedtime || session.origin == .scheduled) ? .bedtime : .focus
+                )
             }
             recordLiveActivityResult(result)
         }

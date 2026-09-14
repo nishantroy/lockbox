@@ -2,6 +2,7 @@ import DeviceActivity
 import FamilyControls
 import ManagedSettings
 import Foundation
+import AmbientKit
 
 final class MonitorExtension: DeviceActivityMonitor {
     private static let appGroupIdentifier = "group.com.phone-lockbox"
@@ -26,8 +27,10 @@ final class MonitorExtension: DeviceActivityMonitor {
         guard let store = try? SharedRuntimeStore(appGroupIdentifier: Self.appGroupIdentifier) else { return }
         let now = Date()
         var shouldStopStaleRegistration = false
+        var naturallyExpiredActivities: [ExpiredActivitySession] = []
         do {
             try store.withTransaction { context in
+                let statesBeforeExpiry = Dictionary(uniqueKeysWithValues: context.document.sessions.map { ($0.id, $0.state) })
                 guard let configuration = context.document.configuration,
                       context.document.recurringEnabledIntent,
                       let registered = activityCenter.schedule(for: activityName),
@@ -54,6 +57,11 @@ final class MonitorExtension: DeviceActivityMonitor {
                     return
                 }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
+                naturallyExpiredActivities = naturallyExpiredActivitySessions(
+                    from: statesBeforeExpiry,
+                    in: context.document,
+                    origin: .scheduled
+                )
                 RuntimeLifecycle.pruneTerminalSessions(&context.document, at: now)
                 let savedSelection = try JSONDecoder().decode(FamilyActivitySelection.self, from: configuration.selectionData)
                 guard selectionSummary(savedSelection) == configuration.selectionSummary else {
@@ -117,6 +125,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                 try replayCurrentPolicy(in: context, at: now, detail: "Frozen scheduled policy reconciled.")
             }
             if shouldStopStaleRegistration { activityCenter.stopMonitoring([activityName]) }
+            endPresentationActivities(for: naturallyExpiredActivities)
         } catch { try? record(store: store, operation: .policyApplyFailed, detail: error.localizedDescription, succeeded: false) }
     }
 
@@ -202,7 +211,9 @@ final class MonitorExtension: DeviceActivityMonitor {
         do {
             var shouldStop = false
             var scheduleToRegister: RuntimeConfiguration?
+            var naturallyExpiredActivities: [ExpiredActivitySession] = []
             try store.withTransaction { context in
+                let statesBeforeExpiry = Dictionary(uniqueKeysWithValues: context.document.sessions.map { ($0.id, $0.state) })
                 let configuration = context.document.configuration
                 if let configuration,
                    let registered = activityCenter.schedule(for: activityName),
@@ -215,6 +226,11 @@ final class MonitorExtension: DeviceActivityMonitor {
                     $0.origin == .scheduled && ($0.state == .active || $0.state == .recoveryPending) && now >= $0.end
                 }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: now)
+                naturallyExpiredActivities = naturallyExpiredActivitySessions(
+                    from: statesBeforeExpiry,
+                    in: context.document,
+                    origin: .scheduled
+                )
                 let activated = RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: now)
                 if activated && context.document.recurringEnabledIntent {
                     // The old repeating registration has old boundaries. Stop
@@ -233,6 +249,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                 try replayCurrentPolicy(in: context, at: now, detail: "Scheduled-end reconciliation used the current aggregate.")
             }
             if shouldStop { activityCenter.stopMonitoring([activityName]) }
+            endPresentationActivities(for: naturallyExpiredActivities)
             if let configuration = scheduleToRegister {
                 do {
                     let schedule = DeviceActivitySchedule(intervalStart: DateComponents(hour: configuration.start.hour, minute: configuration.start.minute), intervalEnd: DateComponents(hour: configuration.end.hour, minute: configuration.end.minute), repeats: true)
@@ -266,8 +283,10 @@ final class MonitorExtension: DeviceActivityMonitor {
         var shouldStopDaily = false
         var scheduleToRegister: RuntimeConfiguration?
         var endedManualRoute: RuntimeManualRouteBinding?
+        var naturallyExpiredActivities: [ExpiredActivitySession] = []
         do {
             try store.withTransaction { context in
+                let statesBeforeExpiry = Dictionary(uniqueKeysWithValues: context.document.sessions.map { ($0.id, $0.state) })
                 // Safely upgrade a legacy route only when its OS start/end
                 // exactly match the persisted session before taking ownership.
                 if context.document.manualRoute == nil,
@@ -293,6 +312,11 @@ final class MonitorExtension: DeviceActivityMonitor {
                 }
                 endedManualRoute = context.document.manualRoute
                 shouldStopManual = RuntimeCallbackDecision.prepareManualEnd(&context.document, at: now)
+                naturallyExpiredActivities = naturallyExpiredActivitySessions(
+                    from: statesBeforeExpiry,
+                    in: context.document,
+                    origin: .manual
+                )
                 // Manual natural expiry is also a configuration activation
                 // boundary. Keep the pending edit and the clear/apply intent
                 // in the same durable transaction before stopping routes.
@@ -308,6 +332,11 @@ final class MonitorExtension: DeviceActivityMonitor {
                 context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: shouldStopManual ? (activated ? "manual intervalDidEnd activated pending configuration." : "manual intervalDidEnd reconciled terminal sessions.") : "stale manual intervalDidEnd preserved the live manual route."), succeeded: true)
                 try replayCurrentPolicy(in: context, at: now, detail: "Manual-end reconciliation used the current aggregate.")
             }
+            // ActivityKit is presentation-only. Launch it only after the
+            // terminal transition, durable commit, and Managed Settings replay
+            // attempt above have completed; its process-lifetime failure cannot
+            // change enforcement state.
+            endPresentationActivities(for: naturallyExpiredActivities)
             // Serialize route teardown with a possible new manual start only
             // after the durable terminal state and clear intent are committed.
             if shouldStopManual, let endedManualRoute {
@@ -466,6 +495,44 @@ final class MonitorExtension: DeviceActivityMonitor {
             settingsStore.shield.applicationCategories = .all(except: applications)
             settingsStore.shield.webDomains = nil
             settingsStore.shield.webDomainCategories = .all(except: webDomains)
+        }
+    }
+
+    private struct ExpiredActivitySession: Sendable {
+        let sessionID: String
+        let fixedEnd: Date
+    }
+
+    /// Returns only sessions that crossed effective -> expired in this exact
+    /// transaction. It intentionally does not infer identity from a route or
+    /// from a shared end time, because those can belong to a newer generation.
+    private func naturallyExpiredActivitySessions(
+        from statesBefore: [UUID: RuntimeSessionState],
+        in document: RuntimeStoreDocument,
+        origin: RuntimeSessionOrigin
+    ) -> [ExpiredActivitySession] {
+        document.sessions.compactMap { session in
+            guard session.origin == origin,
+                  statesBefore[session.id].map({ $0 == .active || $0 == .recoveryPending }) == true,
+                  session.state == .expired else { return nil }
+            return ExpiredActivitySession(sessionID: session.id.uuidString, fixedEnd: session.end)
+        }
+    }
+
+    /// DeviceActivity callbacks are synchronous while ActivityKit termination
+    /// is async. This task is deliberately detached from the authoritative
+    /// transaction; if the extension process ends before it completes,
+    /// foreground/relaunch stale cleanup remains the fallback.
+    private func endPresentationActivities(for sessions: [ExpiredActivitySession]) {
+        guard !sessions.isEmpty else { return }
+        Task { @MainActor in
+            for session in sessions {
+                _ = await AmbientLiveActivityTerminator.endExactSession(
+                    sessionID: session.sessionID,
+                    fixedEnd: session.fixedEnd,
+                    status: .expired
+                )
+            }
         }
     }
 
