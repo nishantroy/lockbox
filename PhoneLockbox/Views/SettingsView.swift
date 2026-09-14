@@ -4,6 +4,7 @@ struct SettingsView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @State private var showingDeveloperUnlock = false
     @State private var showingEmergencyReset = false
+    @State private var showingDesignGallery = false
 
     var body: some View {
         Form {
@@ -77,10 +78,14 @@ struct SettingsView: View {
             DeveloperToolsSection(
                 coordinator: coordinator,
                 showingDeveloperUnlock: $showingDeveloperUnlock,
-                showingEmergencyReset: $showingEmergencyReset
+                showingEmergencyReset: $showingEmergencyReset,
+                showingDesignGallery: $showingDesignGallery
             )
         }
         .navigationTitle("Settings")
+        .fullScreenCover(isPresented: $showingDesignGallery) {
+            DesignGalleryView()
+        }
         .confirmationDialog(
             "Unlock current Phone Lockbox sessions?",
             isPresented: $showingDeveloperUnlock,
@@ -112,9 +117,21 @@ private struct DeveloperToolsSection: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @Binding var showingDeveloperUnlock: Bool
     @Binding var showingEmergencyReset: Bool
+    @Binding var showingDesignGallery: Bool
 
     var body: some View {
         Section("Developer") {
+            Button {
+                showingDesignGallery = true
+            } label: {
+                Label("Open design gallery", systemImage: "paintpalette")
+            }
+            .accessibilityHint("Opens static theme and Lockbox fixture previews. It does not change restrictions.")
+            Text("Static design gallery — does not change restrictions.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+
             NavigationLink {
                 AmbientPrototypeView()
             } label: {
