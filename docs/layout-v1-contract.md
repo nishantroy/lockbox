@@ -17,6 +17,8 @@ Unlocked hierarchy:
 
 Lock now presents finite choices with **30 minutes preselected**, **1 hour**, and a custom end. Minimum supported duration remains 15 minutes; the exact confirmed absolute end and saved policy are frozen. Conflicts are rejected before policy application. It never silently uses the bedtime end.
 
+The Tonight card also offers **Start bedtime now** whenever a bedtime schedule exists and no lock is active. Confirmation shows the exact next configured morning end. This creates a new bedtime-origin session using the saved bedtime policy, displays **Get some rest**, and does not move or disable future recurrence. It supports an early start, a delayed start, or restarting bedtime after an exact prior session was released; old recovery or trusted-person approvals remain bound to the old session and cannot release the restarted session. The action must never silently create an indefinite lock or shorten an existing one.
+
 Active state replaces the unlocked content. Scheduled origin uses **Get some rest**; manual origin uses **Focus time**. Show fixed end, origin, recovery entry and pending-change notice. No ticking countdown, routine clear control or prominent configuration editor.
 
 ## People tab
