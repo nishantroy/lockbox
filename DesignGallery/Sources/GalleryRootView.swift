@@ -8,6 +8,17 @@ struct GalleryRootView: View {
         .make(theme: model.theme, scheme: colorScheme)
     }
 
+    private var preferredScheme: ColorScheme? {
+        switch model.theme {
+        case .midnight, .midnightOriginal, .midnightContrast:
+            .dark
+        case .adaptivePreview:
+            model.appearance == .dark ? .dark : .light
+        case .circadian, .lantern:
+            nil
+        }
+    }
+
     var body: some View {
         TabView {
             NavigationStack {
@@ -27,7 +38,7 @@ struct GalleryRootView: View {
         }
         .tint(palette.accent)
         .background(palette.background)
-        .preferredColorScheme(model.theme == .midnight ? .dark : nil)
+        .preferredColorScheme(preferredScheme)
     }
 }
 
@@ -38,11 +49,18 @@ private struct GalleryControls: View {
     var body: some View {
         Section {
             Picker("Theme", selection: $model.theme) {
-                ForEach(GalleryModel.Theme.allCases) { theme in
-                    Text(theme.title).tag(theme)
+                Section("Round 1 references") {
+                    ForEach(GalleryModel.Theme.round1) { theme in
+                        Text(theme.title).tag(theme)
+                    }
+                }
+                Section("Round 2 choices") {
+                    ForEach(GalleryModel.Theme.round2) { theme in
+                        Text(theme.title).tag(theme)
+                    }
                 }
             }
-            .accessibilityHint("Changes the visual theme across the gallery")
+            .accessibilityHint("Choose a round 1 reference or round 2 gallery-only direction")
 
             Picker("Fixture", selection: $model.fixture) {
                 ForEach(GalleryModel.Fixture.allCases) { fixture in
@@ -50,11 +68,23 @@ private struct GalleryControls: View {
                 }
             }
             .accessibilityHint("Changes the static Lockbox state shown in the gallery")
+
+            if model.theme.isAdaptivePreview {
+                Picker("Appearance", selection: $model.appearance) {
+                    ForEach(GalleryModel.Appearance.allCases) { appearance in
+                        Text(appearance.title).tag(appearance)
+                    }
+                }
+                .accessibilityHint("Inspects the future Adaptive Preview in dark or light appearance")
+                Text("Adaptive Preview is a future gallery direction; production remains always dark.")
+                    .font(.footnote)
+                    .foregroundStyle(palette.secondary)
+            }
         } header: {
             Label("Gallery controls", systemImage: "slider.horizontal.3")
                 .foregroundStyle(palette.primary)
         } footer: {
-            Text("Static exploration only. Nothing here changes device restrictions or schedules.")
+            Text("Static exploration only. Nothing here changes device restrictions or schedules. Production preference: always dark.")
         }
     }
 }

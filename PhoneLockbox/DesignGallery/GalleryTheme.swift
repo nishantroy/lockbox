@@ -16,7 +16,7 @@ struct GalleryPalette {
 
     static func make(theme: GalleryModel.Theme, scheme: ColorScheme) -> GalleryPalette {
         switch theme {
-        case .midnight:
+        case .midnight, .midnightOriginal:
             if scheme == .dark {
                 return GalleryPalette(
                     background: Color(red: 0.035, green: 0.047, blue: 0.11),
@@ -44,6 +44,70 @@ struct GalleryPalette {
                 rest: Color(red: 0.47, green: 0.36, blue: 0.80),
                 focus: Color(red: 0.10, green: 0.42, blue: 0.67),
                 border: Color(red: 0.76, green: 0.77, blue: 0.88),
+                onAccent: Color.white,
+                isDark: false
+            )
+
+        case .midnightContrast:
+            if scheme == .dark {
+                return GalleryPalette(
+                    background: Color(red: 0.035, green: 0.047, blue: 0.11),
+                    surface: Color(red: 0.085, green: 0.108, blue: 0.21),
+                    surfaceRaised: Color(red: 0.12, green: 0.145, blue: 0.27),
+                    surfaceMuted: Color(red: 0.065, green: 0.082, blue: 0.17),
+                    primary: Color(red: 0.95, green: 0.94, blue: 1.0),
+                    secondary: Color(red: 0.72, green: 0.74, blue: 0.86),
+                    accent: Color(red: 0.76, green: 0.69, blue: 0.98),
+                    rest: Color(red: 0.76, green: 0.69, blue: 0.98),
+                    focus: Color(red: 0.46, green: 0.76, blue: 0.98),
+                    border: Color(red: 0.34, green: 0.37, blue: 0.55),
+                    onAccent: Color(red: 0.08, green: 0.055, blue: 0.16),
+                    isDark: true
+                )
+            }
+            return GalleryPalette(
+                background: Color(red: 0.035, green: 0.047, blue: 0.11),
+                surface: Color(red: 0.085, green: 0.108, blue: 0.21),
+                surfaceRaised: Color(red: 0.12, green: 0.145, blue: 0.27),
+                surfaceMuted: Color(red: 0.065, green: 0.082, blue: 0.17),
+                primary: Color(red: 0.95, green: 0.94, blue: 1.0),
+                secondary: Color(red: 0.72, green: 0.74, blue: 0.86),
+                accent: Color(red: 0.76, green: 0.69, blue: 0.98),
+                rest: Color(red: 0.76, green: 0.69, blue: 0.98),
+                focus: Color(red: 0.46, green: 0.76, blue: 0.98),
+                border: Color(red: 0.34, green: 0.37, blue: 0.55),
+                onAccent: Color(red: 0.08, green: 0.055, blue: 0.16),
+                isDark: true
+            )
+
+        case .adaptivePreview:
+            if scheme == .dark {
+                return GalleryPalette(
+                    background: Color(red: 0.035, green: 0.047, blue: 0.11),
+                    surface: Color(red: 0.075, green: 0.095, blue: 0.19),
+                    surfaceRaised: Color(red: 0.105, green: 0.125, blue: 0.24),
+                    surfaceMuted: Color(red: 0.055, green: 0.068, blue: 0.145),
+                    primary: Color(red: 0.95, green: 0.94, blue: 1.0),
+                    secondary: Color(red: 0.68, green: 0.70, blue: 0.82),
+                    accent: Color(red: 0.76, green: 0.69, blue: 0.98),
+                    rest: Color(red: 0.76, green: 0.69, blue: 0.98),
+                    focus: Color(red: 0.46, green: 0.76, blue: 0.98),
+                    border: Color(red: 0.25, green: 0.28, blue: 0.45),
+                    onAccent: Color(red: 0.08, green: 0.055, blue: 0.16),
+                    isDark: true
+                )
+            }
+            return GalleryPalette(
+                background: Color(red: 0.68, green: 0.69, blue: 0.75),
+                surface: Color(red: 0.75, green: 0.76, blue: 0.81),
+                surfaceRaised: Color(red: 0.80, green: 0.81, blue: 0.86),
+                surfaceMuted: Color(red: 0.64, green: 0.65, blue: 0.72),
+                primary: Color(red: 0.08, green: 0.09, blue: 0.15),
+                secondary: Color(red: 0.24, green: 0.25, blue: 0.34),
+                accent: Color(red: 0.28, green: 0.19, blue: 0.58),
+                rest: Color(red: 0.35, green: 0.20, blue: 0.60),
+                focus: Color(red: 0.04, green: 0.30, blue: 0.52),
+                border: Color(red: 0.44, green: 0.45, blue: 0.55),
                 onAccent: Color.white,
                 isDark: false
             )

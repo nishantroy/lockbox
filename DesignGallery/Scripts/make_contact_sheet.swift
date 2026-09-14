@@ -1,9 +1,14 @@
 import AppKit
 
-let root = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? ".")
+let arguments = Array(CommandLine.arguments.dropFirst())
+let round2 = arguments.contains("--round2")
+let rootArgument = arguments.first(where: { !$0.hasPrefix("--") }) ?? "."
+let root = URL(fileURLWithPath: rootArgument)
 let reference = root.appendingPathComponent("Reference")
-let output = reference.appendingPathComponent("gallery_contact_sheet.png")
-let themes = [("midnight", "Midnight Sanctuary"), ("circadian", "Circadian Calm"), ("lantern", "Soft Lantern")]
+let output = reference.appendingPathComponent(round2 ? "gallery_round2_contact_sheet.png" : "gallery_contact_sheet.png")
+let themes = round2
+    ? [("midnightOriginal", "Midnight Original"), ("midnightContrast", "Midnight Contrast"), ("adaptivePreview_light", "Adaptive Preview · Light")]
+    : [("midnight", "Midnight Sanctuary"), ("circadian", "Circadian Calm"), ("lantern", "Soft Lantern")]
 let fixtures = [("home", "Home · unlocked"), ("rest", "Get some rest · active"), ("focus", "Focus time · active")]
 let tileWidth = 300
 let tileHeight = 652

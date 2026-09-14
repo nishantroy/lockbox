@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""Check the light Soft Lantern text/action colors against their used backgrounds."""
+"""Check gallery palette drift and WCAG AA contrast for every theme branch."""
 from pathlib import Path
 import re
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [ROOT / "Sources" / "Theme.swift", ROOT.parent / "PhoneLockbox" / "DesignGallery" / "GalleryTheme.swift"]
-COLOR = re.compile(r"(accent|rest): Color\(red: ([0-9.]+), green: ([0-9.]+), blue: ([0-9.]+)\)")
+SOURCES = [
+    ROOT / "Sources" / "Theme.swift",
+    ROOT.parent / "PhoneLockbox" / "DesignGallery" / "GalleryTheme.swift",
+]
+THEMES = ["midnight", "midnightOriginal", "midnightContrast", "adaptivePreview", "circadian", "lantern"]
+TOKENS = re.compile(
+    r"(?P<name>background|surface|primary|secondary|accent|rest|focus|onAccent): "
+    r"(?:Color\(red: (?P<red>[0-9.]+), green: (?P<green>[0-9.]+), blue: (?P<blue>[0-9.]+)\)|Color\.white)"
+)
 
 
 def luminance(rgb):
-    channels = []
+    linear = []
     for value in rgb:
         value = float(value)
-        channels.append(value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4)
-    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+        linear.append(value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
 
 
 def contrast(first, second):
@@ -22,31 +28,57 @@ def contrast(first, second):
     return (max(one, two) + 0.05) / (min(one, two) + 0.05)
 
 
-def light_lantern_colors(path):
-    text = path.read_text()
-    lantern = text.split("case .lantern:", 1)[1]
-    values = {}
-    for name, red, green, blue in COLOR.findall(lantern):
-        values.setdefault(name, []).append((float(red), float(green), float(blue)))
-    # Each color occurs once in the dark branch and once in the light branch.
-    return values["accent"][-1], values["rest"][-1]
+def parse_palette(text, theme):
+    case_label = "case .midnight, .midnightOriginal:" if theme in {"midnight", "midnightOriginal"} else f"case .{theme}:"
+    segment = text.split(case_label, 1)[1]
+    segment = re.split(r"\n        case \.", segment, maxsplit=1)[0]
+    blocks = segment.split("return GalleryPalette(")[1:]
+    palettes = []
+    for block in blocks[:2]:
+        tokens = {}
+        for match in TOKENS.finditer(block):
+            if match.group("red") is None:
+                tokens[match.group("name")] = (1.0, 1.0, 1.0)
+            else:
+                tokens[match.group("name")] = tuple(float(match.group(channel)) for channel in ("red", "green", "blue"))
+        palettes.append(tokens)
+    if len(palettes) != 2:
+        raise SystemExit(f"Expected dark and light branches for {theme}")
+    return palettes
 
 
-parsed = [light_lantern_colors(path) for path in SOURCES]
-if parsed[0] != parsed[1]:
-    raise SystemExit(f"Source drift: {parsed[0]} != {parsed[1]}")
+def check_branch(theme, branch, palette):
+    pairs = {
+        "primary/background": (palette["primary"], palette["background"]),
+        "primary/surface": (palette["primary"], palette["surface"]),
+        "secondary/background": (palette["secondary"], palette["background"]),
+        "secondary/surface": (palette["secondary"], palette["surface"]),
+        "accent/surface": (palette["accent"], palette["surface"]),
+        "rest/surface": (palette["rest"], palette["surface"]),
+        "focus/surface": (palette["focus"], palette["surface"]),
+        "onAccent/accent": (palette["onAccent"], palette["accent"]),
+    }
+    ratios = {label: contrast(*colors) for label, colors in pairs.items()}
+    label, ratio = min(ratios.items(), key=lambda item: item[1])
+    print(f"{theme} {branch}: minimum {ratio:.2f}:1 ({label})")
+    failures = [(label, ratio) for label, ratio in ratios.items() if ratio < 4.5]
+    if failures:
+        details = ", ".join(f"{label} {ratio:.2f}:1" for label, ratio in failures)
+        raise SystemExit(f"FAIL {theme} {branch}: {details}")
 
-accent, rest = parsed[0]
-white = (1.0, 1.0, 1.0)
-light_card = (1.0, 0.985, 0.94)
-checks = {
-    "white on Lock now accent": contrast(white, accent),
-    "accent text on light card": contrast(accent, light_card),
-    "white on active rest icon": contrast(white, rest),
-    "rest text on light card": contrast(rest, light_card),
-}
-for label, ratio in checks.items():
-    print(f"{label}: {ratio:.2f}:1")
-    if ratio < 4.5:
-        raise SystemExit(f"FAIL {label}: {ratio:.2f}:1 < 4.50:1")
-print("PASS: all Soft Lantern light-mode pairings meet WCAG AA with margin")
+
+texts = [path.read_text() for path in SOURCES]
+if texts[0] != texts[1]:
+    raise SystemExit("FAIL palette source drift: standalone Theme.swift differs from embedded GalleryTheme.swift")
+
+for theme in THEMES:
+    dark, light = parse_palette(texts[0], theme)
+    check_branch(theme, "dark", dark)
+    check_branch(theme, "light", light)
+
+lantern_light = parse_palette(texts[0], "lantern")[1]
+print(f"Lantern white on accent: {contrast((1, 1, 1), lantern_light['accent']):.2f}:1")
+print(f"Lantern accent on light card: {contrast(lantern_light['accent'], (1, 0.985, 0.94)):.2f}:1")
+print(f"Lantern white on rest: {contrast((1, 1, 1), lantern_light['rest']):.2f}:1")
+print(f"Lantern rest on light card: {contrast(lantern_light['rest'], (1, 0.985, 0.94)):.2f}:1")
+print("PASS: all gallery palette branches meet WCAG AA normal-text contrast")
