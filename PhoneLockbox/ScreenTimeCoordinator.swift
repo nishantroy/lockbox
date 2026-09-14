@@ -832,7 +832,10 @@ final class ScreenTimeCoordinator: ObservableObject {
         let active = enforcementSessions(at: now)
         for session in active {
             let status: AmbientLiveActivityStatus = session.state == .recoveryPending ? .recoveryPending : .plannedSession
-            let kind: AmbientLiveActivityKind = (session.purpose == .bedtime || session.origin == .scheduled) ? .bedtime : .focus
+            let kind = AmbientLiveActivityTermination.kind(
+                isBedtimePurpose: session.purpose == .bedtime,
+                isScheduledOrigin: session.origin == .scheduled
+            )
             let result = await liveActivity.reconcile(
                 sessionID: session.id.uuidString,
                 fixedEnd: session.end,
@@ -854,7 +857,10 @@ final class ScreenTimeCoordinator: ObservableObject {
                 result = await liveActivity.endAfterObservedExpiry(
                     sessionID: session.id.uuidString,
                     fixedEnd: session.end,
-                    kind: (session.purpose == .bedtime || session.origin == .scheduled) ? .bedtime : .focus
+                    kind: AmbientLiveActivityTermination.kind(
+                        isBedtimePurpose: session.purpose == .bedtime,
+                        isScheduledOrigin: session.origin == .scheduled
+                    )
                 )
             }
             recordLiveActivityResult(result)

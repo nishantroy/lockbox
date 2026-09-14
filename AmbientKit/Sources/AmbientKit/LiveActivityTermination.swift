@@ -4,6 +4,12 @@ import Foundation
 /// value-only so callback identity and the past-end fallback can be tested
 /// without pretending to exercise ActivityKit.
 public enum AmbientLiveActivityTermination {
+    /// Canonical mapping shared by the host and DeviceActivity adapter. A
+    /// bedtime-purpose manual route retains bedtime presentation semantics.
+    public static func kind(isBedtimePurpose: Bool, isScheduledOrigin: Bool) -> AmbientLiveActivityKind {
+        isBedtimePurpose || isScheduledOrigin ? .bedtime : .focus
+    }
+
     /// Callback-driven termination is bound to both immutable identity values.
     /// A reused route or a newer activity with a coincidentally equal end must
     /// never be selected by a stale callback.

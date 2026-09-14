@@ -363,6 +363,37 @@ final class LiveActivityModelTests: XCTestCase {
         ))
     }
 
+    func testCallbackTerminationRejectsWrongKindWithSameIDAndEnd() {
+        let end = Date(timeIntervalSince1970: 100)
+        let activity = AmbientLiveActivityAttributes(sessionID: "session", fixedEnd: end, kind: .bedtime)
+        let callbackKind = AmbientLiveActivityTermination.kind(
+            isBedtimePurpose: false,
+            isScheduledOrigin: false
+        )
+        XCTAssertEqual(callbackKind, .focus)
+        XCTAssertFalse(AmbientLiveActivityTermination.matchesExactSession(
+            activity: activity,
+            sessionID: "session",
+            fixedEnd: end,
+            kind: callbackKind
+        ))
+    }
+
+    func testCanonicalPresentationKindMapsBedtimeAndFocusRoutes() {
+        XCTAssertEqual(
+            AmbientLiveActivityTermination.kind(isBedtimePurpose: true, isScheduledOrigin: false),
+            .bedtime
+        )
+        XCTAssertEqual(
+            AmbientLiveActivityTermination.kind(isBedtimePurpose: false, isScheduledOrigin: true),
+            .bedtime
+        )
+        XCTAssertEqual(
+            AmbientLiveActivityTermination.kind(isBedtimePurpose: false, isScheduledOrigin: false),
+            .focus
+        )
+    }
+
     func testPastFixedEndSweepIncludesBoundaryButNeverCurrentOrFutureOrDemo() {
         let now = Date(timeIntervalSince1970: 100)
         XCTAssertTrue(AmbientLiveActivityTermination.shouldSweepPastFixedEnd(

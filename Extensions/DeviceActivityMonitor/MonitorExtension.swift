@@ -501,6 +501,7 @@ final class MonitorExtension: DeviceActivityMonitor {
     private struct ExpiredActivitySession: Sendable {
         let sessionID: String
         let fixedEnd: Date
+        let kind: AmbientLiveActivityKind
     }
 
     /// Returns only sessions that crossed effective -> expired in this exact
@@ -515,7 +516,14 @@ final class MonitorExtension: DeviceActivityMonitor {
             guard session.origin == origin,
                   statesBefore[session.id].map({ $0 == .active || $0 == .recoveryPending }) == true,
                   session.state == .expired else { return nil }
-            return ExpiredActivitySession(sessionID: session.id.uuidString, fixedEnd: session.end)
+            return ExpiredActivitySession(
+                sessionID: session.id.uuidString,
+                fixedEnd: session.end,
+                kind: AmbientLiveActivityTermination.kind(
+                    isBedtimePurpose: session.purpose == .bedtime,
+                    isScheduledOrigin: session.origin == .scheduled
+                )
+            )
         }
     }
 
@@ -530,6 +538,7 @@ final class MonitorExtension: DeviceActivityMonitor {
                 _ = await AmbientLiveActivityTerminator.endExactSession(
                     sessionID: session.sessionID,
                     fixedEnd: session.fixedEnd,
+                    kind: session.kind,
                     status: .expired
                 )
             }
