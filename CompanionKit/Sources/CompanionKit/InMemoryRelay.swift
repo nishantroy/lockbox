@@ -12,6 +12,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     private var pendingAcceptances: [String: PairingAcceptance] = [:]
     private var pairings: [String: Pairing] = [:]
     private var sessions: [String: ActiveSession] = [:]
+    private var sessionHistory: [String: ActiveSession] = [:]
     private var requests: [String: TrustedRequest] = [:]
     private var approvals: [String: Approval] = [:]
     private var usedApprovalIDs = Set<String>()
@@ -23,6 +24,13 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     public var currentRevision: UInt64 {
         lock.lock(); defer { lock.unlock() }
         return revision
+    }
+
+    // Internal seam for the bounded exhaustion regression; not part of the
+    // public transport API.
+    func setRevisionForTesting(_ value: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        revision = value
     }
 
     public init(owner: DeviceIdentity, now: Date = Date()) throws {
@@ -46,7 +54,11 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.usedInviteIDs = snapshot.usedInviteIDs
         self.pendingAcceptances = Dictionary(uniqueKeysWithValues: snapshot.pendingAcceptances.map { ($0.acceptanceID, $0) })
         self.pairings = Dictionary(uniqueKeysWithValues: snapshot.pairings.map { ($0.pairingID, $0) })
-        self.sessions = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.owner.identityID, $0) })
+        self.sessionHistory = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.sessionID, $0) })
+        if let currentSessionID = snapshot.currentSessionID,
+           let currentSession = sessionHistory[currentSessionID] {
+            self.sessions = [currentSession.owner.identityID: currentSession]
+        }
         self.requests = Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.requestID, $0) })
         self.approvals = Dictionary(uniqueKeysWithValues: snapshot.approvals.map { ($0.approvalID, $0) })
         self.usedApprovalIDs = snapshot.usedApprovalIDs
@@ -136,20 +148,33 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         var sessions: [String: ActiveSession] = [:]
         for session in snapshot.sessions {
             try session.validate()
-            guard session.owner == snapshot.owner, sessions[session.owner.identityID] == nil else {
+            guard session.owner == snapshot.owner, sessions[session.sessionID] == nil else {
                 throw CompanionError.malformed("invalid session ownership")
             }
-            sessions[session.owner.identityID] = session
+            sessions[session.sessionID] = session
+        }
+        if let currentSessionID = snapshot.currentSessionID {
+            try requireIdentifier(currentSessionID, name: "current session ID")
+            guard sessions[currentSessionID] != nil else {
+                throw CompanionError.malformed("unknown current session")
+            }
+        } else if !sessions.isEmpty {
+            throw CompanionError.malformed("missing current session")
         }
 
         var requests: [String: TrustedRequest] = [:]
         for request in snapshot.requests {
             try request.validatePersisted()
             guard request.owner == snapshot.owner,
-                  let session = sessions[snapshot.owner.identityID],
-                  session.sessionID == request.sessionID, session.activeSetID == request.activeSetID,
+                  let session = sessions[request.sessionID],
+                  session.activeSetID == request.activeSetID,
                   requests[request.requestID] == nil else {
                 throw CompanionError.malformed("invalid request graph")
+            }
+            if request.sessionID != snapshot.currentSessionID {
+                guard request.status == .expired || request.status == .cancelled || request.status == .declined else {
+                    throw CompanionError.malformed("historical request is not terminal")
+                }
             }
             guard request.targetBindings.allSatisfy({ binding in
                 guard let pairing = pairings[binding.pairingID] else { return false }
@@ -203,11 +228,12 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     public func snapshot() throws -> Data {
         lock.lock(); defer { lock.unlock() }
         let value = RelaySnapshot(owner: owner, currentTime: currentTime, revision: revision,
+                                  currentSessionID: sessions[owner.identityID]?.sessionID,
                                   invitations: invitations.values.sorted { $0.payload.inviteID < $1.payload.inviteID },
                                   usedInviteIDs: usedInviteIDs,
                                   pendingAcceptances: pendingAcceptances.values.sorted { $0.acceptanceID < $1.acceptanceID },
                                   pairings: pairings.values.sorted { $0.pairingID < $1.pairingID },
-                                  sessions: sessions.values.sorted { $0.sessionID < $1.sessionID },
+                                  sessions: sessionHistory.values.sorted { $0.sessionID < $1.sessionID },
                                   requests: requests.values.sorted { $0.requestID < $1.requestID },
                                   approvals: approvals.values.sorted { $0.approvalID < $1.approvalID },
                                   usedApprovalIDs: usedApprovalIDs,
@@ -261,9 +287,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         if let expectedRevision = operation.expectedRevision, expectedRevision != revision {
             throw CompanionError.staleRevision(expected: expectedRevision, actual: revision)
         }
+        guard revision < UInt64.max else { throw CompanionError.malformed("revision exhausted") }
         try charge(operation.signer.identityID)
         let result = try apply(operation)
-        guard revision < UInt64.max else { throw CompanionError.malformed("revision exhausted") }
         revision += 1
         let record = try RelayOperationRecord(operationID: operation.operationID,
                                               signerIdentityID: operation.signer.identityID,
@@ -331,6 +357,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             // Replacing the active set makes every old request stale, even when
             // the new session happens to use the same human-readable policy.
             sessions[owner.identityID] = session
+            sessionHistory[session.sessionID] = session
             expireRequests(supersededBy: session)
             return .session(session)
 

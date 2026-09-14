@@ -458,6 +458,54 @@ final class CompanionKitTests: XCTestCase {
             from: JSONSerialization.data(withJSONObject: legacyJSON))
         XCTAssertEqual(decodedLegacy.operationID, legacyOperation.operationID)
         XCTAssertNoThrow(try decodedLegacy.validateSignature())
+        legacyJSON["operationID"] = "substituted-legacy-id"
+        let substitutedLegacy = try JSONDecoder().decode(
+            SignedOperation.self,
+            from: JSONSerialization.data(withJSONObject: legacyJSON))
+        XCTAssertThrowsError(try substitutedLegacy.validateSignature()) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
+    }
+
+    func testRevisionExhaustionDoesNotApplyCommand() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let owner = CompanionClient(signer: signer, transport: relay,
+                                    now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        relay.setRevisionForTesting(UInt64.max)
+        XCTAssertThrowsError(try owner.createInvite(inviteID: "exhausted", validFor: 600,
+                                                    now: t, nonce: Data(repeating: 6, count: 24))) {
+            XCTAssertEqual($0 as? CompanionError,
+                           .malformed("revision exhausted"))
+        }
+        XCTAssertEqual(relay.currentRevision, UInt64.max)
+        relay.setRevisionForTesting(0)
+        XCTAssertNoThrow(try owner.createInvite(inviteID: "exhausted", validFor: 600,
+                                                 now: t, nonce: Data(repeating: 6, count: 24)))
+    }
+
+    func testSessionRotationRetainsHistoricalRequestsAcrossRestart() throws {
+        let (relay, owner, approver, pairing, sessionA) = try harness()
+        let requestA = try owner.requestUnlock(requestID: "historical-request",
+                                                pairing: pairing, session: sessionA,
+                                                target: approver.signer.identity.identityID,
+                                                message: nil, validFor: 600)
+        let approvalA = try approver.submitApproval(request: requestA, pairing: pairing,
+                                                    decision: .approved)
+        let sessionB = try ActiveSession(owner: owner.signer.identity,
+                                         sessionID: "session-B", activeSetID: "set-B",
+                                         startsAt: t.addingTimeInterval(-1),
+                                         endsAt: t.addingTimeInterval(3_600))
+        _ = try owner.publishSession(sessionB)
+        let data = try relay.snapshot()
+        let restarted = try InMemoryCompanionRelay(snapshot: data,
+                                                    revisionAnchor: relay.currentRevision)
+        XCTAssertEqual(try restarted.request(id: requestA.requestID).status, .expired)
+        let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted,
+                                             now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        XCTAssertThrowsError(try restartedOwner.useApproval(approvalA, request: requestA,
+                                                            useID: "historical-use"))
     }
 
     func testAnchoredSnapshotRejectsRollback() throws {

@@ -430,8 +430,12 @@ public struct SignedOperation: Codable, Hashable, Sendable {
                                                      fields: [kind, signer.identityID,
                                                               base64URL(signer.publicKey),
                                                               base64URL(CompanionCanonical.digest(body))])
+        let hasDerivedLegacyID = operationID == Self.legacyOperationID(kind: kind,
+                                                                        signer: signer,
+                                                                        body: body)
         guard key.isValidSignature(signature, for: currentFields)
-                || (expectedRevision == nil && key.isValidSignature(signature, for: legacyFields)) else {
+                || (expectedRevision == nil && hasDerivedLegacyID
+                    && key.isValidSignature(signature, for: legacyFields)) else {
             throw CompanionError.invalidSignature
         }
     }
@@ -441,6 +445,7 @@ public struct RelaySnapshot: Codable, Sendable {
     let owner: DeviceIdentity
     let currentTime: Date
     let revision: UInt64
+    let currentSessionID: String?
     let invitations: [Invitation]
     let usedInviteIDs: Set<String>
     let pendingAcceptances: [PairingAcceptance]
@@ -451,11 +456,13 @@ public struct RelaySnapshot: Codable, Sendable {
     let usedApprovalIDs: Set<String>
     let operationRecords: [RelayOperationRecord]
 
-    init(owner: DeviceIdentity, currentTime: Date, revision: UInt64, invitations: [Invitation], usedInviteIDs: Set<String>,
+    init(owner: DeviceIdentity, currentTime: Date, revision: UInt64, currentSessionID: String?,
+         invitations: [Invitation], usedInviteIDs: Set<String>,
          pendingAcceptances: [PairingAcceptance], pairings: [Pairing], sessions: [ActiveSession],
          requests: [TrustedRequest], approvals: [Approval], usedApprovalIDs: Set<String>,
          operationRecords: [RelayOperationRecord]) {
         self.owner = owner; self.currentTime = currentTime; self.revision = revision
+        self.currentSessionID = currentSessionID
         self.invitations = invitations; self.usedInviteIDs = usedInviteIDs
         self.pendingAcceptances = pendingAcceptances; self.pairings = pairings; self.sessions = sessions
         self.requests = requests; self.approvals = approvals; self.usedApprovalIDs = usedApprovalIDs
