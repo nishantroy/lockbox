@@ -109,6 +109,53 @@ final class ScreenTimeCoordinator: ObservableObject {
         scheduledOccurrence(at: currentDate())?.end
     }
 
+    /// Whether the owner-approved bedtime-now action can safely create a new
+    /// finite session at the current transaction boundary. This is advisory;
+    /// `startBedtimeNow(expectedEnd:)` repeats every check while holding the
+    /// shared runtime transaction lock.
+    var canStartBedtimeNow: Bool {
+        let now = currentDate()
+        guard isAuthorized,
+              storageError == nil,
+              document.recoveryCommitment == nil,
+              !document.testLockActive,
+              document.activeOwner != .prototypeTest,
+              !document.legacyRegistrationNeedsReview,
+              document.effectiveSessions(at: now).isEmpty,
+              let configuration = document.configuration,
+              let expectedEnd = bedtimeNowProposedEnd(at: now),
+              RuntimeBedtimeNowDecision.accepts(
+                  expectedEnd: expectedEnd,
+                  configuration: configuration,
+                  recurringEnabled: document.recurringEnabledIntent,
+                  at: now,
+                  calendar: Calendar.current
+              ),
+              hasMatchingRecurringRegistration(configuration),
+              !activityCenter.activities.contains(Self.manualActivityName),
+              activityCenter.schedule(for: Self.manualActivityName) == nil else {
+            return false
+        }
+        guard let savedSelection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: configuration.selectionData),
+              selectionSummary(savedSelection) == configuration.selectionSummary,
+              (try? RuntimePolicySnapshot(mode: configuration.mode, selectionSummary: configuration.selectionSummary, selectionData: configuration.selectionData).validated()) != nil else {
+            return false
+        }
+        return true
+    }
+
+    /// Resolves the exact absolute end shown by confirmation UI from the next
+    /// saved occurrence. It returns nil when no enabled, valid saved bedtime
+    /// schedule can provide a finite end.
+    func bedtimeNowProposedEnd(at date: Date = Date()) -> Date? {
+        RuntimeBedtimeNowDecision.proposedEnd(
+            configuration: document.configuration,
+            recurringEnabled: document.recurringEnabledIntent,
+            at: date,
+            calendar: Calendar.current
+        )
+    }
+
     /// A compact summary for the parent UI. It is derived from the saved
     /// configuration on every read, rather than cached across clock or edits.
     var compactSavedSummary: String {
@@ -264,7 +311,7 @@ final class ScreenTimeCoordinator: ObservableObject {
 
     func startManualLock(expectedEnd: Date? = nil) {
         guard isAuthorized else { lastError = "Screen Time access is not authorized."; return }
-        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
+        guard store != nil else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
         guard !hasRecoveryRequest else { lastError = "Cancel the pending recovery request before starting another lock."; return }
         guard !testScheduleActive, !document.legacyRegistrationNeedsReview else { lastError = "Finish or resolve the developer restriction before starting a committed lock."; return }
 
@@ -277,11 +324,37 @@ final class ScreenTimeCoordinator: ObservableObject {
             lastError = RuntimeValidationError.manualLockUnavailable.localizedDescription
             return
         }
+        startFiniteManualSession(expectedEnd: end, purpose: .focus, bedtimeNow: false, transactionStart: startedAt)
+    }
 
+    /// Starts the saved bedtime policy immediately while retaining the
+    /// repeating bedtime registration. The nonrepeating manual route is an
+    /// implementation detail only; `purpose` keeps the committed session's
+    /// user-facing semantics as bedtime.
+    func startBedtimeNow(expectedEnd: Date) {
+        guard isAuthorized else { lastError = "Screen Time access is not authorized."; return }
+        guard store != nil else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
+        startFiniteManualSession(expectedEnd: expectedEnd, purpose: .bedtime, bedtimeNow: true, transactionStart: nil)
+    }
+
+    /// Shared finite manual registration path for Lock now and Start bedtime
+    /// now. Bedtime confirmation is revalidated inside this transaction so a
+    /// stale UI preview cannot shorten, extend, or retarget the occurrence.
+    private func startFiniteManualSession(
+        expectedEnd: Date,
+        purpose: RuntimeSessionPurpose,
+        bedtimeNow: Bool,
+        transactionStart: Date?
+    ) {
+        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
         var sessionID: UUID?
         var manualRegistered = false
         do {
             try store.withTransaction { context in
+                let startedAt = transactionStart ?? currentDate()
+                guard RuntimeManualLockDecision.accepts(expectedEnd: expectedEnd, startedAt: startedAt) else {
+                    throw RuntimeValidationError.manualLockUnavailable
+                }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: startedAt)
                 guard context.document.recoveryCommitment == nil,
                       !context.document.testLockActive,
@@ -289,8 +362,32 @@ final class ScreenTimeCoordinator: ObservableObject {
                       !context.document.legacyRegistrationNeedsReview else {
                     throw RuntimeValidationError.invalidConfiguration("Finish the current recovery or developer restriction before starting another lock.")
                 }
-                guard !context.document.sessions.contains(where: { $0.origin == .manual && $0.isEffective(at: startedAt) }) else {
-                    throw RuntimeValidationError.invalidConfiguration("A finite manual lock is already active; it cannot be shortened or replaced.")
+                if bedtimeNow {
+                    guard context.document.effectiveSessions(at: startedAt).isEmpty else {
+                        throw RuntimeValidationError.invalidConfiguration("A lock is already active; bedtime cannot be started over it.")
+                    }
+                    guard RuntimeBedtimeNowDecision.accepts(
+                        expectedEnd: expectedEnd,
+                        configuration: context.document.configuration,
+                        recurringEnabled: context.document.recurringEnabledIntent,
+                        at: startedAt,
+                        calendar: Calendar.current
+                    ) else {
+                        throw RuntimeValidationError.invalidConfiguration("The bedtime confirmation is stale or does not match the next saved morning end.")
+                    }
+                    guard hasMatchingRecurringRegistration(context.document.configuration) else {
+                        throw RuntimeValidationError.invalidConfiguration("The saved bedtime schedule is not registered exactly.")
+                    }
+                    // A stale manual route is an ownership conflict, not a
+                    // reason to overwrite an unknown finite end.
+                    guard !activityCenter.activities.contains(Self.manualActivityName),
+                          activityCenter.schedule(for: Self.manualActivityName) == nil else {
+                        throw RuntimeValidationError.invalidConfiguration("A finite manual end route is already registered.")
+                    }
+                } else {
+                    guard !context.document.sessions.contains(where: { $0.origin == .manual && $0.isEffective(at: startedAt) }) else {
+                        throw RuntimeValidationError.invalidConfiguration("A finite manual lock is already active; it cannot be shortened or replaced.")
+                    }
                 }
                 guard let configuration = context.document.configuration else { throw RuntimeValidationError.manualLockUnavailable }
                 let savedSelection = try JSONDecoder().decode(FamilyActivitySelection.self, from: configuration.selectionData)
@@ -309,7 +406,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                     let overlaps = RuntimeManualLockDecision.overlappingScheduledOccurrences(
                         configuration: configuration,
                         intervalStart: startedAt,
-                        intervalEnd: end,
+                        intervalEnd: expectedEnd,
                         calendar: Calendar.current
                     )
                     for occurrence in overlaps {
@@ -328,22 +425,29 @@ final class ScreenTimeCoordinator: ObservableObject {
                 }
 
                 RuntimeLifecycle.pruneTerminalSessions(&context.document, at: startedAt)
-                let session = RuntimeSession(origin: .manual, start: startedAt, end: end, sourceRevision: configuration.revision, policy: policy)
+                let session = RuntimeSession(
+                    origin: .manual,
+                    start: startedAt,
+                    end: expectedEnd,
+                    sourceRevision: configuration.revision,
+                    policy: policy,
+                    purpose: purpose
+                )
                 sessionID = session.id
                 context.document.sessions.append(session)
                 context.document.manualRegistrationIntent = true
                 context.document.manualRegistrationActive = false
                 context.document.policyIntent = .apply
-                context.document.record(RuntimeDiagnostic(operation: .policyApplyAttempted, observedAt: startedAt, detail: "Finite manual session persisted before OS registration."))
+                context.document.record(RuntimeDiagnostic(operation: .policyApplyAttempted, observedAt: startedAt, detail: bedtimeNow ? "Bedtime-now session persisted before finite OS registration." : "Finite manual session persisted before OS registration."))
                 try context.commit()
 
-                let schedule = manualSchedule(start: startedAt, end: end)
+                let schedule = manualSchedule(start: startedAt, end: expectedEnd)
                 try activityCenter.startMonitoring(Self.manualActivityName, during: schedule)
                 guard let registered = activityCenter.schedule(for: Self.manualActivityName),
                       activityCenter.activities.contains(Self.manualActivityName),
                       RuntimeScheduleDecision.manualRegistrationMatchesExact(
                           start: startedAt,
-                          end: end,
+                          end: expectedEnd,
                           intervalStart: registered.intervalStart,
                           intervalEnd: registered.intervalEnd,
                           repeats: registered.repeats,
@@ -358,7 +462,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 try context.commit()
                 try applyEffectivePolicy(context.document, at: startedAt)
                 context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: .policyApplied, observedAt: currentDate(), detail: "Finite manual policy application attempted; OS-managed end is registered."), succeeded: true)
+                context.document.record(RuntimeDiagnostic(operation: .policyApplied, observedAt: currentDate(), detail: bedtimeNow ? "Bedtime-now policy application attempted; OS-managed morning end is registered." : "Finite manual policy application attempted; OS-managed end is registered."), succeeded: true)
                 try context.commit()
             }
             refreshDocument(); clearLastErrorAfterSuccessfulOperation()
@@ -683,7 +787,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         let active = enforcementSessions(at: now)
         for session in active {
             let status: AmbientLiveActivityStatus = session.state == .recoveryPending ? .recoveryPending : .plannedSession
-            let kind: AmbientLiveActivityKind = session.origin == .scheduled ? .bedtime : .focus
+            let kind: AmbientLiveActivityKind = (session.purpose == .bedtime || session.origin == .scheduled) ? .bedtime : .focus
             let result = await liveActivity.reconcile(
                 sessionID: session.id.uuidString,
                 fixedEnd: session.end,
@@ -1068,7 +1172,10 @@ final class ScreenTimeCoordinator: ObservableObject {
                 if let registered,
                    let session = context.sessions.first(where: { $0.origin == .manual && $0.isEffective(at: now) && now < $0.end }) {
                     routeMatches = RuntimeScheduleDecision.manualRegistrationMatchesExact(
-                        start: session.start,
+                        // A relaunch can replay a durable session from the
+                        // current instant while retaining its frozen end. The
+                        // end is the ownership boundary; route start is not.
+                        start: nil,
                         end: session.end,
                         intervalStart: registered.intervalStart,
                         intervalEnd: registered.intervalEnd,
@@ -1216,6 +1323,12 @@ final class ScreenTimeCoordinator: ObservableObject {
               RuntimeScheduleDecision.registrationMatches(configuration: configuration, start: registered.intervalStart, end: registered.intervalEnd, repeats: registered.repeats),
               let occurrence = RuntimeOccurrenceResolver.candidates(start: configuration.start, end: configuration.end, around: date).first(where: { date >= $0.start && date < $0.end }) else { return false }
         if RuntimeLifecycle.shouldSuppressScheduledOccurrence(state, start: occurrence.start, end: occurrence.end) { return false }
+        if RuntimeSessionDecision.suppressesScheduledStart(
+            sessions: state.sessions,
+            occurrenceStart: occurrence.start,
+            occurrenceEnd: occurrence.end,
+            at: date
+        ) { return false }
         if RuntimeSessionDecision.isReleased(sessions: state.sessions, releasedOccurrences: state.releasedOccurrences, origin: .scheduled, start: occurrence.start, end: occurrence.end) { return false }
         if state.sessions.contains(where: { $0.origin == .scheduled && $0.isEffective(at: date) }) { return false }
         if state.sessions.contains(where: { $0.origin == .scheduled && $0.start == occurrence.start && $0.end == occurrence.end }) { return false }
@@ -1260,6 +1373,18 @@ final class ScreenTimeCoordinator: ObservableObject {
     }
 
     private func currentDate() -> Date { clock() }
+
+    private func hasMatchingRecurringRegistration(_ configuration: RuntimeConfiguration?) -> Bool {
+        guard let configuration,
+              activityCenter.activities.contains(Self.activityName),
+              let registered = activityCenter.schedule(for: Self.activityName) else { return false }
+        return RuntimeScheduleDecision.registrationMatches(
+            configuration: configuration,
+            start: registered.intervalStart,
+            end: registered.intervalEnd,
+            repeats: registered.repeats
+        )
+    }
 
     private func manualSchedule(start: Date, end: Date) -> DeviceActivitySchedule {
         let calendar = Calendar.current

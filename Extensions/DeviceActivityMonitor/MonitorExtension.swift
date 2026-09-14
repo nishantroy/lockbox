@@ -57,6 +57,16 @@ final class MonitorExtension: DeviceActivityMonitor {
                     try replayCurrentPolicy(in: context, at: now, detail: "Suppressed scheduled start replayed current aggregate.")
                     return
                 }
+                if RuntimeSessionDecision.suppressesScheduledStart(
+                    sessions: context.document.sessions,
+                    occurrenceStart: occurrence.start,
+                    occurrenceEnd: occurrence.end,
+                    at: now
+                ) {
+                    context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, detail: "intervalDidStart ignored: a manually started bedtime already owns this frozen occurrence."), succeeded: true)
+                    try replayCurrentPolicy(in: context, at: now, detail: "Manual bedtime ownership replayed current aggregate.")
+                    return
+                }
                 if RuntimeSessionDecision.isReleased(sessions: context.document.sessions, releasedOccurrences: context.document.releasedOccurrences, origin: .scheduled, start: occurrence.start, end: occurrence.end) {
                     context.document.record(RuntimeDiagnostic(operation: .callbackReceived, observedAt: now, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "intervalDidStart ignored: this stable occurrence was already released or expired."), succeeded: true)
                     try replayCurrentPolicy(in: context, at: now, detail: "Released scheduled start replayed current aggregate.")
@@ -107,10 +117,12 @@ final class MonitorExtension: DeviceActivityMonitor {
                     $0.origin == .manual && $0.isEffective(at: now) && now < $0.end
                 }
                 let routeMatches = routeExists && registered != nil && session.map {
-                    RuntimeScheduleDecision.manualRegistrationMatches(
+                    RuntimeScheduleDecision.manualRegistrationMatchesExact(
                         end: $0.end,
                         intervalEnd: registered!.intervalEnd,
-                        repeats: registered!.repeats
+                        repeats: registered!.repeats,
+                        calendar: Calendar.current,
+                        tolerance: RuntimeManualLockDecision.registrationClockTolerance
                     )
                 } ?? false
                 // A callback from a stale route must not turn a manual session

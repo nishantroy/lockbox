@@ -79,14 +79,62 @@ public enum RuntimeManualLockDecision {
     }
 }
 
+/// Resolution and transaction-clock validation for the owner-approved
+/// Start bedtime now action. The action borrows the saved civil schedule's
+/// next occurrence, but its committed end is an absolute Date frozen at the
+/// transaction boundary.
+public enum RuntimeBedtimeNowDecision {
+    public static func proposedEnd(
+        configuration: RuntimeConfiguration?,
+        recurringEnabled: Bool,
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> Date? {
+        guard recurringEnabled,
+              let configuration,
+              (try? configuration.validate()) != nil else { return nil }
+        return RuntimeOccurrenceResolver.currentOrNext(
+            start: configuration.start,
+            end: configuration.end,
+            enabled: true,
+            after: date,
+            calendar: calendar
+        )?.end
+    }
+
+    /// The confirmation is valid only when it names the exact end of the
+    /// next saved occurrence at the transaction clock. A preview may survive
+    /// harmless clock drift before the same occurrence, but it cannot be
+    /// shortened, extended, or carried into a different occurrence.
+    public static func accepts(
+        expectedEnd: Date,
+        configuration: RuntimeConfiguration?,
+        recurringEnabled: Bool,
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> Bool {
+        guard expectedEnd.timeIntervalSinceReferenceDate.isFinite,
+              let proposed = proposedEnd(configuration: configuration, recurringEnabled: recurringEnabled, at: date, calendar: calendar),
+              proposed == expectedEnd else { return false }
+        return RuntimeManualLockDecision.accepts(expectedEnd: expectedEnd, startedAt: date)
+    }
+}
+
 /// Truthful copy for the ordinary Lockbox active-session surface. The
 /// coordinator supplies the currently effective sessions; no cached title can
 /// survive a changing clock or a newly reconciled overlap.
 public enum RuntimeLockPresentation {
+    private static func isBedtime(_ session: RuntimeSession) -> Bool {
+        // Scheduled sessions written before `purpose` existed were decoded as
+        // bedtime. The origin fallback also keeps this boundary defensive for
+        // callers constructing a historical scheduled value.
+        session.purpose == .bedtime || session.origin == .scheduled
+    }
+
     public static func activeTitle(for sessions: [RuntimeSession]) -> String {
-        let hasScheduled = sessions.contains { $0.origin == .scheduled }
-        let hasManual = sessions.contains { $0.origin == .manual }
-        switch (hasScheduled, hasManual) {
+        let hasBedtime = sessions.contains(where: isBedtime)
+        let hasFocus = sessions.contains { !isBedtime($0) }
+        switch (hasBedtime, hasFocus) {
         case (true, true): return "Get some rest + Focus time"
         case (true, false): return "Get some rest"
         case (false, true): return "Focus time"
@@ -95,13 +143,18 @@ public enum RuntimeLockPresentation {
     }
 
     public static func originSummary(for sessions: [RuntimeSession]) -> String {
-        let hasScheduled = sessions.contains { $0.origin == .scheduled }
-        let hasManual = sessions.contains { $0.origin == .manual }
-        switch (hasScheduled, hasManual) {
-        case (true, true): return "Scheduled bedtime and manual focus overlap"
-        case (true, false): return "Scheduled bedtime"
-        case (false, true): return "Manual focus"
-        case (false, false): return ""
+        let scheduledBedtime = sessions.contains { $0.origin == .scheduled && isBedtime($0) }
+        let manualBedtime = sessions.contains { $0.origin == .manual && isBedtime($0) }
+        let manualFocus = sessions.contains { $0.origin == .manual && !isBedtime($0) }
+        switch (scheduledBedtime, manualBedtime, manualFocus) {
+        case (false, false, false): return ""
+        case (true, false, false): return "Scheduled bedtime"
+        case (false, true, false): return "Bedtime started manually"
+        case (false, false, true): return "Manual focus"
+        case (true, true, false): return "Scheduled bedtime and bedtime started manually overlap"
+        case (true, false, true): return "Scheduled bedtime and manual focus overlap"
+        case (false, true, true): return "Bedtime started manually and manual focus overlap"
+        case (true, true, true): return "Scheduled bedtime, bedtime started manually, and manual focus overlap"
         }
     }
 }
@@ -309,6 +362,14 @@ public enum RuntimeSessionOrigin: String, Codable, Sendable {
     case manual
 }
 
+/// The immutable user-facing purpose of a session. A bedtime started from the
+/// app deliberately keeps the nonrepeating `.manual` DeviceActivity route so
+/// its end is finite, while retaining bedtime presentation semantics.
+public enum RuntimeSessionPurpose: String, Codable, Sendable {
+    case bedtime
+    case focus
+}
+
 public enum RuntimeSessionState: String, Codable, Sendable {
     case active
     case recoveryPending
@@ -344,6 +405,11 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
     public let schemaVersion: Int
     public let id: UUID
     public let origin: RuntimeSessionOrigin
+    /// Frozen presentation semantics, independent from the DeviceActivity
+    /// route used to obtain a finite end. Missing values in older documents
+    /// decode from the historical origin (`scheduled` bedtime, `manual`
+    /// focus), preserving existing stored sessions unchanged.
+    public let purpose: RuntimeSessionPurpose
     public let start: Date
     public let end: Date
     public let sourceRevision: Int
@@ -357,11 +423,13 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
         end: Date,
         sourceRevision: Int,
         policy: RuntimePolicySnapshot,
+        purpose: RuntimeSessionPurpose? = nil,
         state: RuntimeSessionState = .active
     ) {
         self.schemaVersion = Self.currentSchema
         self.id = id
         self.origin = origin
+        self.purpose = purpose ?? (origin == .scheduled ? .bedtime : .focus)
         self.start = start
         self.end = end
         self.sourceRevision = sourceRevision
@@ -395,7 +463,7 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, origin, start, end, sourceRevision, policy, state
+        case schemaVersion, id, origin, purpose, start, end, sourceRevision, policy, state
     }
 
     public init(from decoder: Decoder) throws {
@@ -403,6 +471,8 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
         id = try container.decode(UUID.self, forKey: .id)
         origin = try container.decode(RuntimeSessionOrigin.self, forKey: .origin)
+        purpose = try container.decodeIfPresent(RuntimeSessionPurpose.self, forKey: .purpose)
+            ?? (origin == .scheduled ? .bedtime : .focus)
         start = try container.decode(Date.self, forKey: .start)
         end = try container.decode(Date.self, forKey: .end)
         sourceRevision = try container.decode(Int.self, forKey: .sourceRevision)

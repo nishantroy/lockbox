@@ -47,6 +47,25 @@ public enum RuntimeSessionDecision {
         sessions.first { $0.origin == .manual && $0.isEffective }
     }
 
+    /// A bedtime started manually may cover the same saved occurrence that the
+    /// repeating callback will later announce (for example an early start).
+    /// Keep the recurring route registered for future nights, but do not create
+    /// a second scheduled session or misreport the active origin as automatic.
+    public static func suppressesScheduledStart(
+        sessions: [RuntimeSession],
+        occurrenceStart: Date,
+        occurrenceEnd: Date,
+        at date: Date
+    ) -> Bool {
+        sessions.contains {
+            $0.origin == .manual
+                && $0.purpose == .bedtime
+                && $0.isEffective(at: date)
+                && $0.start <= occurrenceStart
+                && $0.end == occurrenceEnd
+        }
+    }
+
     public static func isReleased(
         sessions: [RuntimeSession],
         releasedOccurrences: [RuntimeReleasedOccurrence],
@@ -54,8 +73,17 @@ public enum RuntimeSessionDecision {
         start: Date,
         end: Date
     ) -> Bool {
-        sessions.contains { $0.origin == origin && $0.start == start && $0.end == end && $0.state == .released }
-            || releasedOccurrences.contains { $0.origin == origin && $0.start == start && $0.end == end }
+        let terminalSessionMatches = origin == .scheduled && sessions.contains {
+            $0.origin == origin && $0.start == start && $0.end == end && $0.state == .released
+        }
+        // Only the repeating route needs an occurrence-key release marker.
+        // Manual sessions have no callback that can recreate an old session;
+        // allowing a prior manual marker to suppress a new UUID would make a
+        // restarted bedtime inherit old recovery/release ownership.
+        let releasedMarkerMatches = origin == .scheduled && releasedOccurrences.contains {
+            $0.origin == origin && $0.start == start && $0.end == end
+        }
+        return terminalSessionMatches || releasedMarkerMatches
     }
 
     /// The MVP can safely compose restrictions from same-mode sessions. A
