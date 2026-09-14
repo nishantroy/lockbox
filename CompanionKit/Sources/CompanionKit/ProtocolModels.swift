@@ -382,12 +382,33 @@ public struct SignedOperation: Codable, Hashable, Sendable {
     /// operation ID. The derived ID is stable for an identical command body;
     /// its legacy signature field encoding remains accepted for migration.
     public init(kind: String, signer: DeviceIdentity, body: Data, signature: Data) throws {
+        try self.init(operationID: Self.legacyOperationID(kind: kind, signer: signer, body: body),
+                      expectedRevision: nil, kind: kind, signer: signer, body: body,
+                      signature: signature)
+    }
+
+    private static func legacyOperationID(kind: String, signer: DeviceIdentity, body: Data) -> String {
         let digest = SHA256.hash(data: CompanionCanonical.bytes(
             domain: "\(CompanionCanonical.version).legacy-operation-id",
             fields: [kind, signer.identityID, base64URL(CompanionCanonical.digest(body))]))
-        let derived = String(base64URL(Data(digest)).prefix(32))
-        try self.init(operationID: derived, expectedRevision: nil, kind: kind,
-                      signer: signer, body: body, signature: signature)
+        return String(base64URL(Data(digest)).prefix(32))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case operationID, expectedRevision, kind, signer, body, signature
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        let signer = try container.decode(DeviceIdentity.self, forKey: .signer)
+        let body = try container.decode(Data.self, forKey: .body)
+        let signature = try container.decode(Data.self, forKey: .signature)
+        let operationID = try container.decodeIfPresent(String.self, forKey: .operationID)
+            ?? Self.legacyOperationID(kind: kind, signer: signer, body: body)
+        try self.init(operationID: operationID,
+                      expectedRevision: try container.decodeIfPresent(UInt64.self, forKey: .expectedRevision),
+                      kind: kind, signer: signer, body: body, signature: signature)
     }
 
     public func signingFields() -> [String] {
@@ -604,6 +625,16 @@ public struct CompanionClient: Sendable {
     public func revoke(_ pairing: Pairing) throws {
         guard signer.identity == pairing.owner else { throw CompanionError.unauthorized }
         _ = try submit("revoke", PairingReference(pairingID: pairing.pairingID, epoch: pairing.epoch))
+    }
+
+    public func replacePairing(_ replacement: PairingReplacement) throws -> Pairing {
+        guard signer.identity == replacement.owner, signer.identity.role == .owner else {
+            throw CompanionError.unauthorized
+        }
+        guard case let .pairing(pairing) = try submit("replace_pairing", replacement) else {
+            throw CompanionError.malformed("relay response")
+        }
+        return pairing
     }
 }
 

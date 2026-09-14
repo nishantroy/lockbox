@@ -31,7 +31,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.owner = owner; self.currentTime = now
     }
 
-    public convenience init(snapshot data: Data) throws {
+    /// Restores the relay for package persistence tests without claiming
+    /// rollback protection. Production callers must use the anchored overload.
+    public convenience init(testSnapshot data: Data) throws {
         let snapshot: RelaySnapshot
         do { snapshot = try JSONDecoder().decode(RelaySnapshot.self, from: data) }
         catch { throw CompanionError.malformed("invalid relay snapshot") }
@@ -50,6 +52,20 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.usedApprovalIDs = snapshot.usedApprovalIDs
         self.operationRecords = Dictionary(uniqueKeysWithValues: snapshot.operationRecords.map { ($0.operationID, $0) })
         self.revision = snapshot.revision
+    }
+
+    /// Restores only a snapshot at or ahead of the caller's monotonic
+    /// persistence anchor. An older valid snapshot is rejected before state is
+    /// installed, so consumed operation receipts cannot be resurrected.
+    public convenience init(snapshot data: Data, revisionAnchor: UInt64) throws {
+        let snapshot: RelaySnapshot
+        do { snapshot = try JSONDecoder().decode(RelaySnapshot.self, from: data) }
+        catch { throw CompanionError.malformed("invalid relay snapshot") }
+        guard snapshot.revision >= revisionAnchor else {
+            throw CompanionError.staleRevision(expected: revisionAnchor, actual: snapshot.revision)
+        }
+        try Self.validateSnapshot(snapshot)
+        try self.init(testSnapshot: data)
     }
 
     private static func validateSnapshot(_ snapshot: RelaySnapshot) throws {
@@ -225,7 +241,6 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         lock.lock(); defer { lock.unlock() }
         guard var request = requests[id] else { throw CompanionError.notFound }
         updateExpiry(&request)
-        requests[id] = request
         return request
     }
 
@@ -338,7 +353,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard approvals[approval.approvalID] == nil,
                   !usedApprovalIDs.contains(approval.approvalID) else { throw CompanionError.replay }
             guard let request = requests[approval.requestID] else { throw CompanionError.notFound }
-            var currentRequest = request; updateExpiry(&currentRequest); requests[request.requestID] = currentRequest
+            var currentRequest = request; updateExpiry(&currentRequest)
             guard currentRequest.effectiveStatus(at: currentTime) == .pending,
                   currentRequest.sessionID == approval.sessionID, currentRequest.activeSetID == approval.activeSetID,
                   let target = currentRequest.binding(for: approval.approver.identityID),
@@ -364,7 +379,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             // accepted the approval or that its target actually approved.
             guard let acceptedApproval = approvals[use.approval.approvalID],
                   acceptedApproval == use.approval else { throw CompanionError.replay }
-            var currentRequest = request; updateExpiry(&currentRequest); requests[request.requestID] = currentRequest
+            var currentRequest = request; updateExpiry(&currentRequest)
             let currentSession = sessions[owner.identityID]
             guard currentRequest.effectiveStatus(at: currentTime) == .approved,
                   currentSession?.isActive(at: currentTime) == true,
@@ -406,6 +421,31 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             // a later use cannot race this state transition under the relay lock.
             request.status = .cancelled; requests[reference.requestID] = request
             return .acknowledgement
+
+        case "replace_pairing":
+            let proposal = try decode(PairingReplacement.self, operation.body)
+            guard operation.signer == owner, proposal.owner == owner,
+                  let previous = pairings[proposal.previousPairingID],
+                  previous.owner == owner, previous.state == .active,
+                  previous.epoch < UInt64.max else { throw CompanionError.revokedPairing }
+            let replacement = try PairingReplacement(
+                replacementID: proposal.replacementID, previousPairing: previous,
+                replacementPairingID: proposal.replacementPairingID,
+                replacement: proposal.replacement, replacementEpoch: proposal.replacementEpoch,
+                issuedAt: proposal.issuedAt, signature: proposal.signature)
+            try replacement.validateSignature()
+            guard pairings[replacement.replacementPairingID] == nil else { throw CompanionError.replay }
+            var revoked = previous
+            revoked.state = .revoked
+            let activated = Pairing(pairingID: replacement.replacementPairingID, owner: owner,
+                                    approver: replacement.replacement,
+                                    epoch: replacement.replacementEpoch,
+                                    createdAt: currentTime, state: .active)
+            // Both writes are protected by the relay lock and happen before
+            // the durable receipt is recorded and acknowledged.
+            pairings[previous.pairingID] = revoked
+            pairings[activated.pairingID] = activated
+            return .pairing(activated)
 
         case "revoke":
             let reference = try decode(PairingReference.self, operation.body)
