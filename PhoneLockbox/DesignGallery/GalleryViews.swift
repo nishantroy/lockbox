@@ -10,7 +10,9 @@ struct DesignGalleryView: View {
                 HStack(spacing: 12) {
                     Label("Design gallery · production stays dark", systemImage: "paintpalette")
                         .font(.footnote.weight(.semibold))
-                        .lineLimit(1)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .layoutPriority(1)
                     Spacer(minLength: 8)
                     Button("Done") {
                         dismiss()
@@ -28,7 +30,7 @@ struct DesignGalleryView: View {
                         .frame(height: 0.5)
                 }
             }
-            .overlay(alignment: .bottom) {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 Text("Static design gallery — does not change restrictions · production stays dark")
                     .font(.caption2.weight(.medium))
                     .multilineTextAlignment(.center)
@@ -36,9 +38,11 @@ struct DesignGalleryView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 7)
                     .background(.bar.opacity(0.94), in: Capsule())
-                    .padding(.bottom, 58)
                     .allowsHitTesting(false)
                     .accessibilityAddTraits(.isStaticText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
             }
     }
 }

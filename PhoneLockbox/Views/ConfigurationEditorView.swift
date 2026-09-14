@@ -66,7 +66,7 @@ struct ConfigurationEditorView: View {
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(LockboxTheme.secondary)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)

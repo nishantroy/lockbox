@@ -24,6 +24,8 @@ struct SettingsView: View {
                                     .font(.caption.weight(.bold))
                                     .foregroundStyle(LockboxTheme.secondary)
                             }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         Text("Edits made during a committed lock are queued and cannot weaken that lock.")
@@ -157,6 +159,8 @@ private struct DeveloperToolsSection: View {
                             .font(.caption.weight(.bold))
                             .foregroundStyle(LockboxTheme.secondary)
                     }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens static theme and Lockbox fixture previews. It does not change restrictions.")
@@ -176,6 +180,8 @@ private struct DeveloperToolsSection: View {
                             .font(.caption.weight(.bold))
                             .foregroundStyle(LockboxTheme.secondary)
                     }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 Text("Prototype wind-down and Live Activity controls are intentionally separate from the saved lock. They never apply or release restrictions.")

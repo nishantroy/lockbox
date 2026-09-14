@@ -27,7 +27,7 @@ private struct SetupView: View {
 
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: "Lockbox")
+            LockboxPageHeader(title: "A calmer phone, when you need it")
 
             LockboxCard {
                 VStack(alignment: .leading, spacing: 12) {
@@ -63,8 +63,8 @@ private struct SetupView: View {
                         } label: {
                             Label("Set up bedtime rules", systemImage: "slider.horizontal.3")
                                 .font(.body.weight(.semibold))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 4)
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityHint("Opens bedtime rules setup")
@@ -107,7 +107,7 @@ struct UnlockedLockboxView: View {
 
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: "Lockbox")
+            LockboxPageHeader(title: "A calmer phone, when you need it")
 
             VStack(alignment: .leading, spacing: 10) {
                 LockboxSectionLabel("Focus when you need it", systemImage: "sparkles")
@@ -130,15 +130,10 @@ struct UnlockedLockboxView: View {
 
             LockboxCard {
                 VStack(alignment: .leading, spacing: 15) {
-                    LockboxSectionLabel("Your rules", systemImage: "checkmark.shield")
+                    LockboxSectionLabel("Your rhythm", systemImage: "waveform.path.ecg")
                     LockboxValueRow(label: "Mode", value: coordinator.savedModeTitle)
                     LockboxValueRow(label: "Apps & categories", value: "\(coordinator.savedSelectedItemCount) selected")
-                }
-            }
-
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 13) {
-                    LockboxSectionLabel("Wind-down", systemImage: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")
+                    Divider().overlay(LockboxTheme.border).padding(.vertical, 2)
                     NavigationLink {
                         SettingsView(coordinator: coordinator)
                     } label: {
@@ -146,7 +141,7 @@ struct UnlockedLockboxView: View {
                             Image(systemName: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")
                                 .foregroundStyle(coordinator.ambientError == nil ? LockboxTheme.accent : .orange)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Wind-down settings")
+                                Text("Wind-down")
                                     .font(.subheadline.weight(.semibold))
                                 Text(windDownStatusMessage)
                                     .font(.footnote)
@@ -158,6 +153,8 @@ struct UnlockedLockboxView: View {
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(LockboxTheme.secondary)
                         }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -233,9 +230,13 @@ struct ActiveLockView: View {
         coordinator.activeLockTitle == "Get some rest" ? LockboxTheme.rest : LockboxTheme.focus
     }
 
+    private var activePageHeading: String {
+        coordinator.activeLockTitle == "Get some rest" ? "Protect your evening" : "Keep a clear lane"
+    }
+
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: "Lockbox")
+            LockboxPageHeader(title: activePageHeading)
 
             LockboxCard {
                 VStack(alignment: .leading, spacing: 17) {
@@ -312,10 +313,20 @@ struct ActiveLockView: View {
                     Text("Recovery waits 15 minutes, then asks you to confirm. Waiting alone never unlocks your phone.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
-                    NavigationLink("Start recovery") {
+                    NavigationLink {
                         RecoveryView(coordinator: coordinator)
+                    } label: {
+                        HStack {
+                            Text("Start recovery")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(LockboxTheme.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
-                    .font(.subheadline.weight(.semibold))
                     .buttonStyle(.plain)
                 }
             }
