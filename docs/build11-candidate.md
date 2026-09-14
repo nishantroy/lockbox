@@ -6,4 +6,6 @@ This candidate adds the reviewed **Start bedtime now** flow to build 10's Midnig
 
 Terra medium independently reviewed the exact combined source and reported no P0/P1/P2 findings with an **INSTALL-READY: YES** verdict for bounded signed-device QA. Independent evidence: 100 root tests, 15 AmbientKit tests, production and standalone-gallery simulator builds, contrast/drift audit, generated-project consistency, and clean-tree checks passed.
 
+Exact merged-tree validation passed: 100 root tests, 15 AmbientKit tests, and the signed generic-device build with bundle version 11. Build 11 was installed and launched successfully on the paired iPhone on 2026-09-14 at 01:58 local.
+
 Physical DeviceActivity timing, reboot/file-protection behavior, authorization transitions, notification delivery, Live Activity lifetime, accessibility, browser/category coverage, and extended reliability remain device QA gates rather than certified behavior.
