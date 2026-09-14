@@ -66,10 +66,29 @@ struct SettingsView: View {
                     Text("Wind-down derives its reminder time from the saved bedtime start. There is no second bedtime clock.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
-                    Button("Allow notifications") {
-                        Task { await coordinator.requestWindDownNotificationAuthorization() }
+                    switch NotificationAccessPresentation(state: coordinator.windDownAuthorizationStatus) {
+                    case .request:
+                        Button("Allow notifications") {
+                            Task { await coordinator.requestWindDownNotificationAuthorization() }
+                        }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                        .accessibilityHint("Requests notification permission for wind-down reminders")
+                    case .granted:
+                        Label("Notifications are enabled for wind-down reminders.", systemImage: "checkmark.circle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.focus)
+                            .accessibilityElement(children: .combine)
+                    case .denied:
+                        Text("Notifications are denied for Phone Lockbox. Enable them in the iOS Settings app to receive wind-down reminders.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityElement(children: .combine)
+                    case .unavailable:
+                        Text("Notification access is unavailable. Wind-down reminders cannot be scheduled.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityElement(children: .combine)
                     }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                     LockboxValueRow(label: "Notification access", value: coordinator.windDownAuthorizationStatus)
                     if coordinator.windDownEnabled {
                         Text(coordinator.pendingWindDownNotificationCount == 0
@@ -134,6 +153,22 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Stops Phone Lockbox monitoring and clears this app's named Managed Settings and shared state. Use only when ordinary cleanup is unavailable.")
+        }
+    }
+}
+
+private enum NotificationAccessPresentation {
+    case request
+    case granted
+    case denied
+    case unavailable
+
+    init(state: String) {
+        switch state {
+        case "Not requested": self = .request
+        case "Authorized", "Provisional", "Ephemeral": self = .granted
+        case "Denied": self = .denied
+        default: self = .unavailable
         }
     }
 }
