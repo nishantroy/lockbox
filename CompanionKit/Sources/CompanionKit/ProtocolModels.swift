@@ -361,25 +361,56 @@ public struct ApprovalVerification: Codable, Hashable, Sendable {
 // MARK: - Signed relay envelope
 
 public struct SignedOperation: Codable, Hashable, Sendable {
+    public let operationID: String
+    public let expectedRevision: UInt64?
     public let kind: String
     public let signer: DeviceIdentity
     public let body: Data
     public let signature: Data
 
-    public init(kind: String, signer: DeviceIdentity, body: Data, signature: Data) throws {
+    public init(operationID: String, expectedRevision: UInt64?, kind: String,
+                signer: DeviceIdentity, body: Data, signature: Data) throws {
+        try requireIdentifier(operationID, name: "operation ID")
         try requireIdentifier(kind, name: "operation kind")
         guard body.count <= 32_768, signature.count == 64 else { throw CompanionError.malformed("invalid operation") }
+        self.operationID = operationID
+        self.expectedRevision = expectedRevision
         self.kind = kind; self.signer = signer; self.body = body; self.signature = signature
     }
 
+    /// Compatibility initializer for callers that do not yet provide an
+    /// operation ID. The derived ID is stable for an identical command body;
+    /// its legacy signature field encoding remains accepted for migration.
+    public init(kind: String, signer: DeviceIdentity, body: Data, signature: Data) throws {
+        let digest = SHA256.hash(data: CompanionCanonical.bytes(
+            domain: "\(CompanionCanonical.version).legacy-operation-id",
+            fields: [kind, signer.identityID, base64URL(CompanionCanonical.digest(body))]))
+        let derived = String(base64URL(Data(digest)).prefix(32))
+        try self.init(operationID: derived, expectedRevision: nil, kind: kind,
+                      signer: signer, body: body, signature: signature)
+    }
+
+    public func signingFields() -> [String] {
+        [operationID, expectedRevision.map(String.init) ?? "none", kind,
+         signer.identityID, base64URL(signer.publicKey), base64URL(CompanionCanonical.digest(body))]
+    }
+
     public func validateSignature() throws {
+        try requireIdentifier(operationID, name: "operation ID")
         try requireIdentifier(kind, name: "operation kind")
         guard body.count <= 32_768, signature.count == 64 else { throw CompanionError.malformed("invalid operation") }
         try signer.validate()
-        guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: signer.publicKey),
-              key.isValidSignature(signature,
-                for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).operation",
-                                              fields: [kind, signer.identityID, base64URL(signer.publicKey), base64URL(CompanionCanonical.digest(body))])) else {
+        guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: signer.publicKey) else {
+            throw CompanionError.invalidSignature
+        }
+        let currentFields = CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).operation",
+                                                      fields: signingFields())
+        let legacyFields = CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).operation",
+                                                     fields: [kind, signer.identityID,
+                                                              base64URL(signer.publicKey),
+                                                              base64URL(CompanionCanonical.digest(body))])
+        guard key.isValidSignature(signature, for: currentFields)
+                || (expectedRevision == nil && key.isValidSignature(signature, for: legacyFields)) else {
             throw CompanionError.invalidSignature
         }
     }
@@ -388,6 +419,7 @@ public struct SignedOperation: Codable, Hashable, Sendable {
 public struct RelaySnapshot: Codable, Sendable {
     let owner: DeviceIdentity
     let currentTime: Date
+    let revision: UInt64
     let invitations: [Invitation]
     let usedInviteIDs: Set<String>
     let pendingAcceptances: [PairingAcceptance]
@@ -396,26 +428,33 @@ public struct RelaySnapshot: Codable, Sendable {
     let requests: [TrustedRequest]
     let approvals: [Approval]
     let usedApprovalIDs: Set<String>
+    let operationRecords: [RelayOperationRecord]
 
-    init(owner: DeviceIdentity, currentTime: Date, invitations: [Invitation], usedInviteIDs: Set<String>,
+    init(owner: DeviceIdentity, currentTime: Date, revision: UInt64, invitations: [Invitation], usedInviteIDs: Set<String>,
          pendingAcceptances: [PairingAcceptance], pairings: [Pairing], sessions: [ActiveSession],
-         requests: [TrustedRequest], approvals: [Approval], usedApprovalIDs: Set<String>) {
-        self.owner = owner; self.currentTime = currentTime; self.invitations = invitations; self.usedInviteIDs = usedInviteIDs
+         requests: [TrustedRequest], approvals: [Approval], usedApprovalIDs: Set<String>,
+         operationRecords: [RelayOperationRecord]) {
+        self.owner = owner; self.currentTime = currentTime; self.revision = revision
+        self.invitations = invitations; self.usedInviteIDs = usedInviteIDs
         self.pendingAcceptances = pendingAcceptances; self.pairings = pairings; self.sessions = sessions
         self.requests = requests; self.approvals = approvals; self.usedApprovalIDs = usedApprovalIDs
+        self.operationRecords = operationRecords
     }
 }
 
 // MARK: - Local transport and client
 
 public protocol CompanionTransport: Sendable {
-    func submit(_ operation: SignedOperation) throws -> RelayResult
+    /// A successful response includes the committed owner-scoped revision.
+    /// Implementations must persist the response receipt atomically with the
+    /// command before returning it.
+    func submit(_ operation: SignedOperation) throws -> RelayResponse
     /// Foreground fetch is also authenticated. Notification/APNs delivery is
     /// intentionally outside this package and never authorizes an action.
-    func fetchInbox(_ operation: SignedOperation) throws -> [TrustedRequest]
+    func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse
 }
 
-public enum RelayResult: Sendable {
+public enum RelayResult: Codable, Hashable, Sendable {
     case invitation(Invitation)
     case acceptance(PairingAcceptance)
     case pairing(Pairing)
@@ -446,9 +485,16 @@ public struct CompanionClient: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(body)
-        let fields = [kind, signer.identity.identityID, base64URL(signer.identity.publicKey), base64URL(CompanionCanonical.digest(data))]
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation", fields: fields)
-        return try transport.submit(SignedOperation(kind: kind, signer: signer.identity, body: data, signature: signature))
+        let operationID = operationIdentifier(kind: kind, signer: signer.identity, body: data)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: kind, signer: signer.identity, body: data,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        let operation = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                            kind: kind, signer: signer.identity, body: data,
+                                            signature: signature)
+        return try transport.submit(operation).validated(for: operation).result
     }
 
     public func createInvite(inviteID: String, validFor: TimeInterval, now: Date, nonce: Data? = nil) throws -> Invitation {
@@ -539,15 +585,33 @@ public struct CompanionClient: Sendable {
         let query = InboxQuery(identityID: signer.identity.identityID)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(query)
+        let operationID = operationIdentifier(kind: "inbox", signer: signer.identity, body: body)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: "inbox", signer: signer.identity, body: body,
+                                           signature: Data(repeating: 0, count: 64))
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
-                                        fields: ["inbox", signer.identity.identityID, base64URL(signer.identity.publicKey), base64URL(CompanionCanonical.digest(body))])
-        return try transport.fetchInbox(SignedOperation(kind: "inbox", signer: signer.identity, body: body, signature: signature))
+                                        fields: unsigned.signingFields())
+        let operation = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                            kind: "inbox", signer: signer.identity, body: body,
+                                            signature: signature)
+        let response = try transport.fetchInbox(operation)
+        guard response.ownerIdentityID == signer.identity.identityID else {
+            throw CompanionError.malformed("inbox response owner mismatch")
+        }
+        return response.requests
     }
 
     public func revoke(_ pairing: Pairing) throws {
         guard signer.identity == pairing.owner else { throw CompanionError.unauthorized }
         _ = try submit("revoke", PairingReference(pairingID: pairing.pairingID, epoch: pairing.epoch))
     }
+}
+
+private func operationIdentifier(kind: String, signer: DeviceIdentity, body: Data) -> String {
+    let digest = SHA256.hash(data: CompanionCanonical.bytes(
+        domain: "\(CompanionCanonical.version).operation-id",
+        fields: [kind, signer.identityID, base64URL(CompanionCanonical.digest(body))]))
+    return String(base64URL(Data(digest)).prefix(32))
 }
 
 public struct SignedAcceptance: Codable, Sendable {

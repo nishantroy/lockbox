@@ -121,7 +121,9 @@ final class CompanionKitTests: XCTestCase {
         try approval.validateSignature()
         let verification = try owner.useApproval(approval, request: request, useID: "use-1")
         XCTAssertEqual(verification.approval.requestID, request.requestID)
-        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "use-1"))
+        // Retrying the exact same command returns its durable receipt rather
+        // than applying the approval a second time.
+        XCTAssertEqual(try owner.useApproval(approval, request: request, useID: "use-1"), verification)
         XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "use-2"))
         _ = relay // keeps the test's ownership of the test backend explicit
     }
@@ -380,6 +382,65 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertNotEqual(firstCommitment.profileCommitment, secondCommitment.profileCommitment)
         XCTAssertThrowsError(try accepted.cancelling(at: t))
         XCTAssertEqual(pact.effectiveStatus(at: t.addingTimeInterval(601)), .expired)
+    }
+
+    func testRelayResponseRevisionAndExactRetryAreDurable() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let payload = try InvitePayload(inviteID: "revision-invite", owner: signer.identity,
+                                        issuedAt: t, expiresAt: t.addingTimeInterval(600),
+                                        nonce: Data(repeating: 4, count: 24))
+        let inviteSignature = try signer.sign(domain: "\(CompanionCanonical.version).invite",
+                                              fields: payload.signingFields())
+        let invitation = try Invitation(payload: payload, signature: inviteSignature)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let body = try encoder.encode(invitation)
+        let unsigned = try SignedOperation(operationID: "retry-operation", expectedRevision: 0,
+                                           kind: "invite", signer: signer.identity, body: body,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        let operation = try SignedOperation(operationID: unsigned.operationID,
+                                            expectedRevision: unsigned.expectedRevision,
+                                            kind: unsigned.kind, signer: unsigned.signer,
+                                            body: unsigned.body, signature: signature)
+
+        let first = try relay.submit(operation)
+        XCTAssertEqual(first.revision, 1)
+        XCTAssertEqual(try relay.submit(operation), first)
+        XCTAssertEqual(relay.currentRevision, 1)
+
+        let staleUnsigned = try SignedOperation(operationID: "stale-operation", expectedRevision: 0,
+                                                 kind: operation.kind, signer: operation.signer,
+                                                 body: operation.body, signature: Data(repeating: 0, count: 64))
+        let staleOperation = try SignedOperation(operationID: staleUnsigned.operationID,
+                                                 expectedRevision: staleUnsigned.expectedRevision,
+                                                 kind: staleUnsigned.kind, signer: staleUnsigned.signer,
+                                                 body: staleUnsigned.body,
+                                                 signature: try signer.sign(
+                                                    domain: "\(CompanionCanonical.version).operation",
+                                                    fields: staleUnsigned.signingFields()))
+        XCTAssertThrowsError(try relay.submit(staleOperation)) {
+            XCTAssertEqual($0 as? CompanionError, .staleRevision(expected: 0, actual: 1))
+        }
+
+        let changedExpectation = try SignedOperation(operationID: operation.operationID,
+                                                     expectedRevision: 1, kind: operation.kind,
+                                                     signer: operation.signer, body: operation.body,
+                                                     signature: try signer.sign(
+                                                        domain: "\(CompanionCanonical.version).operation",
+                                                        fields: [operation.operationID, "1", operation.kind,
+                                                                 signer.identity.identityID,
+                                                                 base64URL(signer.identity.publicKey),
+                                                                 base64URL(CompanionCanonical.digest(body))]))
+        XCTAssertThrowsError(try relay.submit(changedExpectation)) {
+            XCTAssertEqual($0 as? CompanionError, .operationConflict)
+        }
+
+        let inbox = try CompanionClient(signer: signer, transport: relay,
+                                        now: { Date(timeIntervalSince1970: 1_700_000_000) }).fetchInbox()
+        XCTAssertTrue(inbox.isEmpty)
     }
 
     func testQuietHoursArePrivateLocalNotificationPolicy() throws {

@@ -22,6 +22,46 @@ public enum CompanionError: Error, Equatable, Sendable {
     case alreadyPaired
     case notFound
     case invalidTransition
+    case staleRevision(expected: UInt64, actual: UInt64)
+    case operationConflict
+    case missingOperationRevision
+
+    /// A transport may retry a command only when it can resend the exact same
+    /// signed operation. These errors describe terminal command outcomes; the
+    /// caller must not manufacture a new operation ID to work around them.
+    public var isRetryable: Bool {
+        switch self {
+        case .staleRevision, .operationConflict, .missingOperationRevision,
+             .malformed, .invalidSignature, .unknownIdentity, .unauthorized,
+             .revokedPairing, .expired, .replay, .staleSession, .wrongTarget,
+             .wrongVerificationCode, .rateLimited, .keyUnavailable,
+             .alreadyPaired, .notFound, .invalidTransition:
+            return false
+        }
+    }
+
+    public var transportCode: String {
+        switch self {
+        case .staleRevision: return "stale_revision"
+        case .operationConflict: return "operation_conflict"
+        case .missingOperationRevision: return "missing_operation_revision"
+        case .malformed: return "malformed"
+        case .invalidSignature: return "invalid_signature"
+        case .unknownIdentity: return "unknown_identity"
+        case .unauthorized: return "unauthorized"
+        case .revokedPairing: return "revoked_pairing"
+        case .expired: return "expired"
+        case .replay: return "replay"
+        case .staleSession: return "stale_session"
+        case .wrongTarget: return "wrong_target"
+        case .wrongVerificationCode: return "wrong_verification_code"
+        case .rateLimited: return "rate_limited"
+        case .keyUnavailable: return "key_unavailable"
+        case .alreadyPaired: return "already_paired"
+        case .notFound: return "not_found"
+        case .invalidTransition: return "invalid_transition"
+        }
+    }
 }
 
 public enum CompanionLimits {

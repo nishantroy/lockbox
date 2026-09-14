@@ -15,8 +15,15 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     private var requests: [String: TrustedRequest] = [:]
     private var approvals: [String: Approval] = [:]
     private var usedApprovalIDs = Set<String>()
+    private var operationRecords: [String: RelayOperationRecord] = [:]
+    private var revision: UInt64 = 0
     private var operationTimes: [String: [Date]] = [:]
     public private(set) var currentTime: Date
+
+    public var currentRevision: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return revision
+    }
 
     public init(owner: DeviceIdentity, now: Date = Date()) throws {
         guard owner.role == .owner else { throw CompanionError.unauthorized }
@@ -41,21 +48,38 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.requests = Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.requestID, $0) })
         self.approvals = Dictionary(uniqueKeysWithValues: snapshot.approvals.map { ($0.approvalID, $0) })
         self.usedApprovalIDs = snapshot.usedApprovalIDs
+        self.operationRecords = Dictionary(uniqueKeysWithValues: snapshot.operationRecords.map { ($0.operationID, $0) })
+        self.revision = snapshot.revision
     }
 
     private static func validateSnapshot(_ snapshot: RelaySnapshot) throws {
-        guard snapshot.invitations.count <= CompanionLimits.maxSnapshotRecords,
+        guard snapshot.revision <= UInt64(CompanionLimits.maxSnapshotRecords),
+              snapshot.invitations.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.pairings.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.sessions.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.requests.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.approvals.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.usedInviteIDs.count <= CompanionLimits.maxSnapshotRecords,
-              snapshot.usedApprovalIDs.count <= CompanionLimits.maxSnapshotRecords else {
+              snapshot.usedApprovalIDs.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.operationRecords.count <= CompanionLimits.maxSnapshotRecords else {
             throw CompanionError.malformed("relay snapshot too large")
         }
         guard snapshot.owner.role == .owner else { throw CompanionError.unauthorized }
         try snapshot.owner.validate(); try requireTimestamp(snapshot.currentTime, name: "snapshot time")
+        var recordIDs = Set<String>()
+        var recordRevisions = Set<UInt64>()
+        for record in snapshot.operationRecords {
+            try record.validate()
+            guard record.revision <= snapshot.revision,
+                  recordIDs.insert(record.operationID).inserted,
+                  recordRevisions.insert(record.revision).inserted else {
+                throw CompanionError.malformed("invalid operation record")
+            }
+        }
+        guard UInt64(recordRevisions.count) == snapshot.revision else {
+            throw CompanionError.malformed("incomplete operation records")
+        }
 
         var invitations: [String: Invitation] = [:]
         for invitation in snapshot.invitations {
@@ -162,7 +186,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
 
     public func snapshot() throws -> Data {
         lock.lock(); defer { lock.unlock() }
-        let value = RelaySnapshot(owner: owner, currentTime: currentTime,
+        let value = RelaySnapshot(owner: owner, currentTime: currentTime, revision: revision,
                                   invitations: invitations.values.sorted { $0.payload.inviteID < $1.payload.inviteID },
                                   usedInviteIDs: usedInviteIDs,
                                   pendingAcceptances: pendingAcceptances.values.sorted { $0.acceptanceID < $1.acceptanceID },
@@ -170,12 +194,13 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                                   sessions: sessions.values.sorted { $0.sessionID < $1.sessionID },
                                   requests: requests.values.sorted { $0.requestID < $1.requestID },
                                   approvals: approvals.values.sorted { $0.approvalID < $1.approvalID },
-                                  usedApprovalIDs: usedApprovalIDs)
+                                  usedApprovalIDs: usedApprovalIDs,
+                                  operationRecords: operationRecords.values.sorted { $0.operationID < $1.operationID })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(value)
     }
 
-    public func fetchInbox(_ operation: SignedOperation) throws -> [TrustedRequest] {
+    public func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
         lock.lock(); defer { lock.unlock() }
         try operation.validateSignature()
         guard operation.kind == "inbox" else { throw CompanionError.malformed("invalid inbox operation") }
@@ -186,7 +211,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         values = values.map { request in
             var copy = request; updateExpiry(&copy); return copy
         }
-        return values.sorted { $0.createdAt < $1.createdAt }
+        return try InboxResponse(ownerIdentityID: query.identityID, revision: revision,
+                                 requests: values.sorted { $0.createdAt < $1.createdAt })
     }
 
     public func pairing(id: String) throws -> Pairing {
@@ -203,10 +229,37 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         return request
     }
 
-    public func submit(_ operation: SignedOperation) throws -> RelayResult {
+    public func submit(_ operation: SignedOperation) throws -> RelayResponse {
         lock.lock(); defer { lock.unlock() }
         try operation.validateSignature()
+        let digest = CompanionCanonical.digest(operation.body)
+        if let record = operationRecords[operation.operationID] {
+            guard record.signerIdentityID == operation.signer.identityID,
+                  record.kind == operation.kind,
+                  record.bodyDigest == digest,
+                  record.expectedRevision == operation.expectedRevision else {
+                throw CompanionError.operationConflict
+            }
+            return try RelayResponse(operationID: operation.operationID,
+                                     revision: record.revision, result: record.response)
+        }
+        if let expectedRevision = operation.expectedRevision, expectedRevision != revision {
+            throw CompanionError.staleRevision(expected: expectedRevision, actual: revision)
+        }
         try charge(operation.signer.identityID)
+        let result = try apply(operation)
+        guard revision < UInt64.max else { throw CompanionError.malformed("revision exhausted") }
+        revision += 1
+        let record = try RelayOperationRecord(operationID: operation.operationID,
+                                              signerIdentityID: operation.signer.identityID,
+                                              kind: operation.kind, bodyDigest: digest,
+                                              revision: revision, response: result,
+                                              expectedRevision: operation.expectedRevision)
+        operationRecords[operation.operationID] = record
+        return try RelayResponse(operationID: operation.operationID, revision: revision, result: result)
+    }
+
+    private func apply(_ operation: SignedOperation) throws -> RelayResult {
         switch operation.kind {
         case "invite":
             let invitation = try decode(Invitation.self, operation.body)
