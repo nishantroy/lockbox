@@ -211,9 +211,17 @@ public enum AmbientLiveActivityDiagnosticsStore {
         return Array(entries.suffix(maximumEntries))
     }
 
+    /// Test-only synchronization seam for deterministically exercising the
+    /// no-App-Group fallback without exposing the lock itself.
+    internal static func withProcessLockHeldForTesting(_ body: () -> Void) {
+        processLock.lock()
+        defer { processLock.unlock() }
+        body()
+    }
+
     private static func withDiagnosticsLock<T>(lockURL: URL?, _ body: () -> T) -> T? {
         guard let lockURL else {
-            processLock.lock()
+            guard processLock.try() else { return nil }
             defer { processLock.unlock() }
             return body()
         }

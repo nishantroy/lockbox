@@ -117,6 +117,42 @@ final class LiveActivityTerminationTests: XCTestCase {
         })
     }
 
+    func testDiagnosticsDropsAppendWhenNoAppGroupProcessLockIsHeld() throws {
+        let (defaults, _, suiteName) = try makeDiagnosticsStore()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let initial = [AmbientLiveActivityTerminationDiagnostic(
+            observedAt: Date(timeIntervalSince1970: 1),
+            result: .ended(count: 1)
+        )]
+        let initialData = try JSONEncoder().encode(initial)
+        defaults.set(initialData, forKey: AmbientLiveActivityDiagnosticsStore.key)
+        let sharedDefaults = SendableDefaults(defaults)
+        let finished = DispatchSemaphore(value: 0)
+
+        AmbientLiveActivityDiagnosticsStore.withProcessLockHeldForTesting {
+            DispatchQueue.global().async {
+                AmbientLiveActivityDiagnosticsStore.append(
+                    .ended(count: 99),
+                    observedAt: Date(timeIntervalSince1970: 99),
+                    defaults: sharedDefaults.value,
+                    lockURL: nil
+                )
+                finished.signal()
+            }
+
+            XCTAssertEqual(
+                finished.wait(timeout: .now() + 1),
+                .success,
+                "nil-lockURL diagnostics writes must drop rather than wait for the process lock"
+            )
+            XCTAssertEqual(defaults.data(forKey: AmbientLiveActivityDiagnosticsStore.key), initialData)
+        }
+
+        XCTAssertEqual(finished.wait(timeout: .now()), .timedOut)
+        XCTAssertEqual(defaults.data(forKey: AmbientLiveActivityDiagnosticsStore.key), initialData)
+    }
+
     #if canImport(Darwin) || canImport(Glibc)
     func testDiagnosticsDropsAppendWhenAppGroupLockIsHeld() throws {
         let (defaults, lockURL, suiteName) = try makeDiagnosticsStore()
