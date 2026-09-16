@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// The synchronous DeviceActivity callback can give presentation cleanup only
 /// a small, bounded opportunity. This is policy/presentation-only: it must
@@ -63,11 +68,87 @@ public enum AmbientLiveActivityTerminationResultMapper {
     }
 }
 
+/// One immutable ActivityKit selection fence. A batch may contain multiple
+/// sessions, but an exact fence is enumerated once and ends every matching
+/// duplicate ActivityKit activity for that fence.
+public struct AmbientLiveActivityTerminationFence: Hashable, Sendable {
+    public let sessionID: String
+    public let fixedEnd: Date
+    public let kind: AmbientLiveActivityKind
+
+    public init(sessionID: String, fixedEnd: Date, kind: AmbientLiveActivityKind) {
+        self.sessionID = sessionID
+        self.fixedEnd = fixedEnd
+        self.kind = kind
+    }
+}
+
 public enum AmbientLiveActivityTerminationPolicy {
-    /// The callback bridge is presentation-only and intentionally below one
-    /// second. It is not an OS-scheduled Activity dismissal.
+    /// The callback bridge uses one configured/nominal semaphore deadline for
+    /// the entire batch. This is not an OS-scheduled Activity dismissal and is
+    /// not a guaranteed wall-clock callback bound under preemption,
+    /// scheduling, or an extension watchdog.
     public static let callbackWaitMilliseconds = 750
     public static let callbackWaitNanoseconds = UInt64(callbackWaitMilliseconds) * 1_000_000
+}
+
+/// Cross-platform synchronization seam for the iOS ActivityKit adapter. The
+/// operation is launched once for the complete exact-session set and the
+/// caller performs one semaphore wait against one absolute deadline.
+public enum AmbientLiveActivityBatchWaitRunner {
+    public static func run(
+        fences: [AmbientLiveActivityTerminationFence],
+        waitNanoseconds: UInt64 = AmbientLiveActivityTerminationPolicy.callbackWaitNanoseconds,
+        operation: @escaping @Sendable ([AmbientLiveActivityTerminationFence]) async throws -> Int
+    ) -> AmbientLiveActivityTerminationResult {
+        var uniqueFences: [AmbientLiveActivityTerminationFence] = []
+        var seen = Set<AmbientLiveActivityTerminationFence>()
+        for fence in fences where seen.insert(fence).inserted {
+            uniqueFences.append(fence)
+        }
+        guard !uniqueFences.isEmpty else { return .noMatchingActivity }
+
+        let latch = AmbientLiveActivityTerminationLatch()
+        _ = Task.detached(priority: .utility) {
+            do {
+                let endedCount = try await operation(uniqueFences)
+                latch.finish(AmbientLiveActivityTerminationResultMapper.result(forEndedCount: endedCount))
+            } catch {
+                latch.finish(.failed)
+            }
+        }
+
+        let boundedNanoseconds = min(
+            waitNanoseconds,
+            AmbientLiveActivityTerminationPolicy.callbackWaitNanoseconds
+        )
+        // Capture one absolute deadline for this entire batch. The caller may
+        // resume later than this deadline if the process is preempted.
+        let deadline = DispatchTime.now() + .nanoseconds(Int(boundedNanoseconds))
+        guard latch.semaphore.wait(timeout: deadline) == .success else {
+            return .timedOut
+        }
+        return latch.value ?? .timedOut
+    }
+}
+
+private final class AmbientLiveActivityTerminationLatch: @unchecked Sendable {
+    let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var storedResult: AmbientLiveActivityTerminationResult?
+
+    var value: AmbientLiveActivityTerminationResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedResult
+    }
+
+    func finish(_ result: AmbientLiveActivityTerminationResult) {
+        lock.lock()
+        storedResult = result
+        lock.unlock()
+        semaphore.signal()
+    }
 }
 
 public struct AmbientLiveActivityTerminationDiagnostic: Codable, Equatable, Sendable {
@@ -84,30 +165,74 @@ public enum AmbientLiveActivityDiagnosticsStore {
     public static let appGroupSuiteName = "group.com.phone-lockbox"
     public static let key = "phone-lockbox.ambient.live-activity-termination-diagnostics"
     public static let maximumEntries = 16
+    private static let lockTimeout: TimeInterval = 0.5
+    private static let processLock = NSLock()
+
+    /// The diagnostics lock is deliberately separate from SharedRuntimeStore's
+    /// enforcement lock. A presentation write can be dropped if its bounded
+    /// lock cannot be acquired; it can never delay or alter enforcement.
+    public static func defaultLockURL() -> URL? {
+        FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupSuiteName
+        )?.appendingPathComponent("phone-lockbox-ambient-diagnostics.lock")
+    }
 
     public static func append(
         _ result: AmbientLiveActivityTerminationResult,
         observedAt: Date = Date(),
-        defaults: UserDefaults? = UserDefaults(suiteName: appGroupSuiteName)
+        defaults: UserDefaults? = UserDefaults(suiteName: appGroupSuiteName),
+        lockURL: URL? = defaultLockURL()
     ) {
         guard let defaults else { return }
-        var entries = read(defaults: defaults)
-        entries.append(AmbientLiveActivityTerminationDiagnostic(observedAt: observedAt, result: result))
-        if entries.count > maximumEntries {
-            entries.removeFirst(entries.count - maximumEntries)
+        _ = withDiagnosticsLock(lockURL: lockURL) {
+            var entries = normalizedEntries(defaults.data(forKey: key))
+            entries.append(AmbientLiveActivityTerminationDiagnostic(observedAt: observedAt, result: result))
+            let finalEntries = Array(entries.suffix(maximumEntries))
+            guard let data = try? JSONEncoder().encode(finalEntries) else { return }
+            defaults.set(data, forKey: key)
         }
-        guard let data = try? JSONEncoder().encode(entries) else { return }
-        defaults.set(data, forKey: key)
     }
 
     public static func read(
-        defaults: UserDefaults? = UserDefaults(suiteName: appGroupSuiteName)
+        defaults: UserDefaults? = UserDefaults(suiteName: appGroupSuiteName),
+        lockURL: URL? = defaultLockURL()
     ) -> [AmbientLiveActivityTerminationDiagnostic] {
-        guard let data = defaults?.data(forKey: key),
+        guard let defaults else { return [] }
+        return withDiagnosticsLock(lockURL: lockURL) {
+            normalizedEntries(defaults.data(forKey: key))
+        } ?? []
+    }
+
+    private static func normalizedEntries(_ data: Data?) -> [AmbientLiveActivityTerminationDiagnostic] {
+        guard let data,
               let entries = try? JSONDecoder().decode([AmbientLiveActivityTerminationDiagnostic].self, from: data) else {
             return []
         }
-        return entries
+        return Array(entries.suffix(maximumEntries))
+    }
+
+    private static func withDiagnosticsLock<T>(lockURL: URL?, _ body: () -> T) -> T? {
+        guard let lockURL else {
+            processLock.lock()
+            defer { processLock.unlock() }
+            return body()
+        }
+        #if canImport(Darwin) || canImport(Glibc)
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        let deadline = ProcessInfo.processInfo.systemUptime + lockTimeout
+        while true {
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { break }
+            guard (errno == EWOULDBLOCK || errno == EAGAIN),
+                  ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            usleep(10_000)
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        return body()
+        #else
+        return body()
+        #endif
     }
 }
 
@@ -152,52 +277,21 @@ import ActivityKit
 
 @available(iOS 17.0, *)
 public enum AmbientLiveActivityBoundedTermination {
-    /// Runs the async ActivityKit operation on a detached task and waits only
-    /// on a semaphore from the synchronous callback. `Task.detached` does not
-    /// inherit the callback actor; the callback thread never executes or waits
-    /// on a MainActor job. The timeout is a presentation-only hard bound.
+    /// Runs one async ActivityKit batch operation on a detached task and waits
+    /// once on a semaphore from the synchronous callback. The configured/
+    /// nominal deadline applies to the complete exact-session set; it is not a
+    /// guaranteed wall-clock callback bound under preemption, scheduling, or
+    /// an extension watchdog.
     public static func run(
+        fences: [AmbientLiveActivityTerminationFence],
         waitNanoseconds: UInt64 = AmbientLiveActivityTerminationPolicy.callbackWaitNanoseconds,
-        operation: @escaping @Sendable () async throws -> Int
+        operation: @escaping @Sendable ([AmbientLiveActivityTerminationFence]) async throws -> Int
     ) -> AmbientLiveActivityTerminationResult {
-        let latch = AmbientLiveActivityTerminationLatch()
-        DispatchQueue.global(qos: .utility).async {
-            _ = Task.detached(priority: .utility) {
-                do {
-                    latch.finish(AmbientLiveActivityTerminationResultMapper.result(forEndedCount: try await operation()))
-                } catch {
-                    latch.finish(.failed)
-                }
-            }
-        }
-        let boundedNanoseconds = min(
-            waitNanoseconds,
-            AmbientLiveActivityTerminationPolicy.callbackWaitNanoseconds
+        AmbientLiveActivityBatchWaitRunner.run(
+            fences: fences,
+            waitNanoseconds: waitNanoseconds,
+            operation: operation
         )
-        let timeout = DispatchTime.now() + .nanoseconds(Int(boundedNanoseconds))
-        guard latch.semaphore.wait(timeout: timeout) == .success else {
-            return .timedOut
-        }
-        return latch.value ?? .timedOut
-    }
-}
-
-private final class AmbientLiveActivityTerminationLatch: @unchecked Sendable {
-    let semaphore = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
-    private var storedResult: AmbientLiveActivityTerminationResult?
-
-    var value: AmbientLiveActivityTerminationResult? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedResult
-    }
-
-    func finish(_ result: AmbientLiveActivityTerminationResult) {
-        lock.lock()
-        storedResult = result
-        lock.unlock()
-        semaphore.signal()
     }
 }
 
@@ -229,6 +323,40 @@ public enum AmbientLiveActivityTerminator {
             )
         }
         return matches.count
+    }
+
+    /// Ends every duplicate matching each exact fence in one ActivityKit
+    /// operation. The caller supplies the complete batch before launching the
+    /// operation; exact duplicate activities are intentionally all ended.
+    public static func endExactSessions(
+        _ fences: [AmbientLiveActivityTerminationFence],
+        status: AmbientLiveActivityStatus
+    ) async -> Int {
+        var uniqueFences: [AmbientLiveActivityTerminationFence] = []
+        var seen = Set<AmbientLiveActivityTerminationFence>()
+        for fence in fences where seen.insert(fence).inserted {
+            uniqueFences.append(fence)
+        }
+        var endedCount = 0
+        for fence in uniqueFences {
+            let matches = Activity<AmbientLiveActivityAttributes>.activities.filter {
+                AmbientLiveActivityTermination.matchesExactSession(
+                    activity: $0.attributes,
+                    sessionID: fence.sessionID,
+                    fixedEnd: fence.fixedEnd,
+                    kind: fence.kind
+                )
+            }
+            let state = AmbientActivityContentState(fixedEnd: fence.fixedEnd, status: status)
+            for activity in matches {
+                await activity.end(
+                    .init(state: state, staleDate: fence.fixedEnd),
+                    dismissalPolicy: .immediate
+                )
+            }
+            endedCount += matches.count
+        }
+        return endedCount
     }
 
     /// Best-effort foreground/relaunch fallback. It uses stale presentation,

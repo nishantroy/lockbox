@@ -528,28 +528,29 @@ final class MonitorExtension: DeviceActivityMonitor {
     }
 
     /// DeviceActivity callbacks are synchronous while ActivityKit termination
-    /// is async. Each exact termination gets a short, detached completion
-    /// bridge after the durable runtime transaction and policy replay return.
-    /// A timeout is presentation-only; it cannot affect enforcement or throw
-    /// into this callback. If the extension is killed, foreground stale sweep
-    /// remains the fallback.
+    /// is async. One detached batch operation receives the complete exact
+    /// session set and the callback performs one configured/nominal semaphore
+    /// wait for the batch. A timeout is presentation-only; it cannot affect
+    /// enforcement or throw into this callback. Preemption, scheduling and an
+    /// extension watchdog can still exceed the nominal deadline; foreground
+    /// stale sweep remains the fallback if the extension is killed.
     private func endPresentationActivities(for sessions: [ExpiredActivitySession]) {
         guard !sessions.isEmpty else { return }
-        for session in sessions {
-            let result = AmbientLiveActivityBoundedTermination.run {
-                try await AmbientLiveActivityTerminator.endExactSession(
-                    sessionID: session.sessionID,
-                    fixedEnd: session.fixedEnd,
-                    kind: session.kind,
-                    status: .expired
-                )
-            }
-            // Deliberately avoid SharedRuntimeStore here. This write follows
-            // enforcement reconciliation and uses an isolated App Group
-            // defaults key, so presentation diagnostics cannot contend with
-            // callback transactions or alter operationStatus/lastError.
-            AmbientLiveActivityDiagnosticsStore.append(result)
+        let fences = sessions.map {
+            AmbientLiveActivityTerminationFence(
+                sessionID: $0.sessionID,
+                fixedEnd: $0.fixedEnd,
+                kind: $0.kind
+            )
         }
+        let result = AmbientLiveActivityBoundedTermination.run(fences: fences) { fences in
+            try await AmbientLiveActivityTerminator.endExactSessions(fences, status: .expired)
+        }
+        // Deliberately avoid SharedRuntimeStore here. This write follows
+        // enforcement reconciliation and uses an isolated App Group
+        // defaults key, so presentation diagnostics cannot contend with
+        // callback transactions or alter operationStatus/lastError.
+        AmbientLiveActivityDiagnosticsStore.append(result)
     }
 
     private func selectionSummary(_ selection: FamilyActivitySelection) -> RuntimeSelectionSummary {
