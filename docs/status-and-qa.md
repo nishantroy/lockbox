@@ -1,12 +1,12 @@
 # Status and QA evidence
 
-Updated: 2026-09-14. **Latest implementation: build 11 ambient natural-end fix candidate.** Automated validation and the focused build-11 physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not use owner observations to certify the source-only Live Activity fix. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+Updated: 2026-09-14. **Latest implementation: build 12 bounded Live Activity callback fix candidate.** Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat the build-12 Live Activity result as an automatic-dismissal pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
 
-## Build-11 focused owner QA — natural-end presentation finding
+## Build-12 focused owner QA — natural-end presentation failure
 
-Owner confirmed: Start bedtime now ended at the exact confirmed time; Get some rest worked; enforcement survived force-close; and tomorrow's recurrence remained. **Finding:** the Live Activity remained visible after the session naturally ended. This is device evidence for installed build 11, not proof of automatic Live Activity cleanup or of this source candidate.
+Owner confirmed on installed build 12: Start bedtime now ended at the exact confirmed time, Get some rest worked, enforcement survived force-close, and tomorrow's recurrence remained. **Finding:** with the host app closed, the Live Activity did not disappear at natural end; it became stale and showed “Status may be out of date.” This is a failed automatic-dismissal observation. Foreground fallback status was not confirmed.
 
-The candidate fix commits the exact effective-to-expired session transition and replays the current Managed Settings policy before launching best-effort ActivityKit termination. Foreground/relaunch reconciliation sweeps only past immutable focus/bedtime activities and ends them with stale presentation, never as proof of enforcement release. ActivityKit failure/process termination cannot roll back or block policy; extension ownership and exact device timing remain open validation gates.
+The current source candidate keeps enforcement/end/recurrence behavior unchanged and replaces the monitor's fire-and-forget presentation task with an exact-identity ActivityKit completion bridge bounded to 750 ms, only after durable expiry and Managed Settings replay return. The bridge is best-effort and non-authoritative; timeout, no-match, or error cannot change enforcement. Privacy-minimal result diagnostics use an isolated App Group UserDefaults namespace and are visible under Developer diagnostics. A new device run is required; no source-only compile result certifies dismissal.
 
 ## Build-3 implementation gate — 2026-09-10
 

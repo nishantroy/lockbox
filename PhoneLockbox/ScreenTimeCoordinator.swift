@@ -38,6 +38,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isConfigured: Bool
     @Published private(set) var recentDiagnostics: [RuntimeDiagnostic] = []
+    @Published private(set) var recentLiveActivityDiagnostics: [AmbientLiveActivityTerminationDiagnostic] = []
     /// Ambient state is deliberately separate from enforcement errors. A
     /// notification or Live Activity failure must never make a committed lock
     /// appear released or roll back a lifecycle transaction.
@@ -639,6 +640,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         authorizationStatus = AuthorizationCenter.shared.authorizationStatus
         lastError = loadError ?? (loadedDocument.operationStatus.succeeded == false ? loadedDocument.operationStatus.detail : nil)
         recentDiagnostics = loadedDocument.diagnostics
+        recentLiveActivityDiagnostics = AmbientLiveActivityDiagnosticsStore.read()
         reconcileRegistration()
         reconcileManualRegistrationFromOS()
         retryInterruptedDailyRegistration()
@@ -1627,6 +1629,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 if let storedMode { mode = RestrictionMode(rawValue: storedMode.rawValue) ?? mode }
             }
             recentDiagnostics = document.diagnostics
+            recentLiveActivityDiagnostics = AmbientLiveActivityDiagnosticsStore.read()
             isConfigured = document.configuration != nil
             testScheduleActive = document.testLockActive
             storageError = nil

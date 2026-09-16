@@ -1,6 +1,6 @@
 # Ambient prototypes
 
-Status: linked into the source-only [build-4 candidate](build4-candidate.md) behind a developer prototype screen. The original isolated lane did not alter the host; parent integration now links `AmbientKit`/the widget and adds an explicit demo entry. No phone deployment or notification/Live Activity device behavior is claimed here.
+Status: linked into the source-only [build-12 candidate](build12-candidate.md) behind a developer prototype screen. The Live Activity remains best-effort presentation and is not enforcement. Build-12 device QA found that a naturally ended activity stayed visible/stale with the host closed; no automatic-dismissal success is claimed.
 
 ## Wind-down notifications
 
@@ -41,7 +41,7 @@ The host should plan and call `replace` on explicit enable/configuration save, a
 - only the specifically named `endAfterObservedRelease(sessionID:)` API can use release-observed copy, and it takes the fixed end from the activity rather than from the caller;
 - it reports unavailable, stale/lifetime, and request errors to the host.
 
-Apple's Live Activity active lifetime is approximately eight hours, with a potentially shorter Lock Screen presentation after that. The adapter returns a lifetime classification so a host can present the degraded expectation. The system cannot be assumed to start an activity from a Device Activity extension or update it after force-quit. The parent app therefore needs a foreground/manual update hook for truthful state reconciliation.
+There is no supported local OS-scheduled dismissal that preserves an active Dynamic Island until a future fixed end: `ActivityUIDismissalPolicy.after(_:)` is supplied to `Activity.end`, so calling `end` terminalizes the Activity immediately rather than scheduling that call. The monitor therefore uses a 750 ms detached completion bridge only after enforcement reconciliation returns. It records no-match, ended-count, timeout, or error in an isolated App Group UserDefaults diagnostic namespace. This is a bounded best effort, not a guarantee; extension termination, ActivityKit enumeration/ownership, and device timing can still leave stale presentation. Foreground/relaunch stale cleanup remains the fallback, and requires device validation.
 
 `Extensions/LockboxLiveActivity/LockboxLiveActivity.swift` is a deliberately small WidgetKit presentation. It shows a fixed end and status, has no ticking countdown, and includes accessibility labels and Dynamic Type-friendly system text. `Info.plist` uses `NSExtensionPointIdentifier = com.apple.widgetkit-extension`. The planned extension bundle identifier is `com.phone-lockbox.app.live-activity`.
 
