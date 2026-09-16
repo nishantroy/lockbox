@@ -544,7 +544,7 @@ final class MonitorExtension: DeviceActivityMonitor {
             )
         }
         let result = AmbientLiveActivityBoundedTermination.run(fences: fences) { fences in
-            try await AmbientLiveActivityTerminator.endExactSessions(fences, status: .expired)
+            await AmbientLiveActivityTerminator.endExactSessions(fences, status: .expired)
         }
         // Deliberately avoid SharedRuntimeStore here. This write follows
         // enforcement reconciliation and uses an isolated App Group

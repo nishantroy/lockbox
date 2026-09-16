@@ -1,4 +1,9 @@
 import XCTest
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 @testable import AmbientKit
 
 final class LiveActivityTerminationTests: XCTestCase {
@@ -87,7 +92,7 @@ final class LiveActivityTerminationTests: XCTestCase {
         XCTAssertEqual(normalized.last?.observedAt, Date(timeIntervalSince1970: 19))
     }
 
-    func testDiagnosticsConcurrentAppendRetainsBoundedEntries() throws {
+    func testDiagnosticsInProcessConcurrentAppendRemainsBounded() throws {
         let (defaults, lockURL, suiteName) = try makeDiagnosticsStore()
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
@@ -102,8 +107,50 @@ final class LiveActivityTerminationTests: XCTestCase {
         }
 
         let entries = AmbientLiveActivityDiagnosticsStore.read(defaults: defaults, lockURL: lockURL)
-        XCTAssertEqual(entries.count, AmbientLiveActivityDiagnosticsStore.maximumEntries)
+        XCTAssertGreaterThan(entries.count, 0)
+        XCTAssertLessThanOrEqual(entries.count, AmbientLiveActivityDiagnosticsStore.maximumEntries)
+        XCTAssertTrue(entries.allSatisfy { diagnostic in
+            if case .ended(let count) = diagnostic.result {
+                return (0..<64).contains(count)
+            }
+            return false
+        })
     }
+
+    #if canImport(Darwin) || canImport(Glibc)
+    func testDiagnosticsDropsAppendWhenAppGroupLockIsHeld() throws {
+        let (defaults, lockURL, suiteName) = try makeDiagnosticsStore()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let initial = [AmbientLiveActivityTerminationDiagnostic(
+            observedAt: Date(timeIntervalSince1970: 1),
+            result: .ended(count: 1)
+        )]
+        let initialData = try JSONEncoder().encode(initial)
+        defaults.set(initialData, forKey: AmbientLiveActivityDiagnosticsStore.key)
+
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            XCTFail("could not open diagnostics lock")
+            return
+        }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            XCTFail("could not hold diagnostics lock")
+            return
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+
+        AmbientLiveActivityDiagnosticsStore.append(
+            .ended(count: 99),
+            observedAt: Date(timeIntervalSince1970: 99),
+            defaults: defaults,
+            lockURL: lockURL
+        )
+
+        XCTAssertEqual(defaults.data(forKey: AmbientLiveActivityDiagnosticsStore.key), initialData)
+    }
+    #endif
 
     private func makeDiagnosticsStore() throws -> (UserDefaults, URL, String) {
         let suiteName = "phone-lockbox-tests-\(UUID().uuidString)"

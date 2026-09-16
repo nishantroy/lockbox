@@ -165,12 +165,12 @@ public enum AmbientLiveActivityDiagnosticsStore {
     public static let appGroupSuiteName = "group.com.phone-lockbox"
     public static let key = "phone-lockbox.ambient.live-activity-termination-diagnostics"
     public static let maximumEntries = 16
-    private static let lockTimeout: TimeInterval = 0.5
     private static let processLock = NSLock()
 
     /// The diagnostics lock is deliberately separate from SharedRuntimeStore's
-    /// enforcement lock. A presentation write can be dropped if its bounded
-    /// lock cannot be acquired; it can never delay or alter enforcement.
+    /// enforcement lock. A presentation write makes one nonblocking best-effort
+    /// lock attempt and is dropped on contention; it can never delay or alter
+    /// enforcement.
     public static func defaultLockURL() -> URL? {
         FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroupSuiteName
@@ -221,16 +221,14 @@ public enum AmbientLiveActivityDiagnosticsStore {
         let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
-        let deadline = ProcessInfo.processInfo.systemUptime + lockTimeout
-        while true {
-            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { break }
-            guard (errno == EWOULDBLOCK || errno == EAGAIN),
-                  ProcessInfo.processInfo.systemUptime < deadline else { return nil }
-            usleep(10_000)
-        }
+        // Never spin or sleep in a synchronous DeviceActivity callback. A
+        // competing app/monitor writer wins this diagnostic entry.
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { return nil }
         defer { _ = flock(descriptor, LOCK_UN) }
         return body()
         #else
+        guard processLock.try() else { return nil }
+        defer { processLock.unlock() }
         return body()
         #endif
     }
