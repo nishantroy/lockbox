@@ -6,4 +6,6 @@ Build 12 proved that a fire-and-forget ActivityKit task from the DeviceActivity 
 
 Privacy-minimal Developer diagnostics report only aggregate ended/no-match/timeout/failure results. Their App Group read/modify/write uses a separate nonblocking `flock`; contention drops diagnostics immediately. A nonblocking in-process fallback is used only when the App Group lock URL is unavailable. Diagnostics never enter the enforcement transaction or persist session identities, selections, tokens, or raw errors.
 
-Terra high and the focused Terra medium gates found no remaining P0/P1/P2 issues. Independent evidence passed 100 root tests, 30 AmbientKit tests, all-extension simulator builds, signed generic-device builds, XcodeGen consistency, and clean-tree checks. Device QA is still required before any automatic-dismissal claim.
+Terra high and the focused Terra medium gates found no remaining P0/P1/P2 issues. Independent evidence passed 100 root tests, 30 AmbientKit tests, all-extension simulator builds, signed generic-device builds, XcodeGen consistency, and clean-tree checks. Exact merged-tree validation repeated 100 root tests, 30 AmbientKit tests, and a signed build with bundle version 13. Build 13 was installed and launched successfully on the paired iPhone on 2026-09-16 at 16:06 local.
+
+Device QA is still required before any automatic-dismissal claim.
