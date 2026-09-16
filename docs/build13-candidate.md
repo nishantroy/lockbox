@@ -9,3 +9,11 @@ Privacy-minimal Developer diagnostics report only aggregate ended/no-match/timeo
 Terra high and the focused Terra medium gates found no remaining P0/P1/P2 issues. Independent evidence passed 100 root tests, 30 AmbientKit tests, all-extension simulator builds, signed generic-device builds, XcodeGen consistency, and clean-tree checks. Exact merged-tree validation repeated 100 root tests, 30 AmbientKit tests, and a signed build with bundle version 13. Build 13 was installed and launched successfully on the paired iPhone on 2026-09-16 at 16:06 local.
 
 Device QA is still required before any automatic-dismissal claim.
+
+## Build-13 custom-end owner QA finding — source-only candidate
+
+Owner QA also found that choosing a custom end near the 15-minute minimum could show **“A finite system-managed end is not available for Lock now.”** The minute DatePicker had frozen sheet-open bounds with seconds while the coordinator correctly revalidated against the later transaction clock. This was a UX validation failure, not a reason to weaken finite safety.
+
+The source candidate now computes minute-aligned bounds from the picker reference clock (ceil lower at or after 15 minutes, floor upper at or before seven days), rebases them when Custom is chosen, and initializes a roughly 30-minute value inside the range. The coordinator retains authoritative fresh-clock validation of the frozen absolute end and reports actionable too-soon/too-late errors without substitution or fallback. Pure runtime tests cover seconds/exact-minute bounds, DST/calendar behavior, delayed confirmation reasons, and unchanged finite acceptance.
+
+This is not a device pass. The candidate must be installed only in a separately planned owner retest; do not change schedules during a scheduled-release interval.

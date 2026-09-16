@@ -60,11 +60,59 @@ final class ManualLockRuntimeTests: XCTestCase {
         ))
     }
 
-    func testCustomRangeIsTheSafeFiniteEndRange() {
-        let start = date(10, 12)
-        let range = RuntimeManualLockDecision.customEndRange(at: start)
-        XCTAssertEqual(range.lowerBound, start.addingTimeInterval(15 * 60))
-        XCTAssertEqual(range.upperBound, start.addingTimeInterval(7 * 24 * 60 * 60))
+    func testCustomRangeCeilsLowerAndFloorsUpperForSecondsBearingNow() {
+        let start = date(10, 12, 0, 17)
+        let range = try! XCTUnwrap(RuntimeManualLockDecision.customEndRange(at: start, calendar: utc))
+        XCTAssertEqual(range.lowerBound, date(10, 12, 16))
+        XCTAssertEqual(range.upperBound, date(17, 12, 0))
+        XCTAssertTrue(range.contains(range.lowerBound))
+        XCTAssertTrue(range.contains(range.upperBound))
+        XCTAssertFalse(range.contains(date(10, 12, 15)))
+        XCTAssertFalse(range.contains(date(17, 12, 1)))
+    }
+
+    func testCustomRangeKeepsExactMinuteThresholdsIncluded() {
+        let start = date(10, 12, 0, 0)
+        let range = try! XCTUnwrap(RuntimeManualLockDecision.customEndRange(at: start, calendar: utc))
+        XCTAssertEqual(range.lowerBound, date(10, 12, 15))
+        XCTAssertEqual(range.upperBound, date(17, 12, 0))
+        XCTAssertEqual(RuntimeManualLockDecision.defaultCustomEnd(at: start, calendar: utc), date(10, 12, 30))
+    }
+
+    func testCustomRangeUsesCalendarMinuteBoundariesAcrossDST() throws {
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = TimeZone(identifier: "America/New_York")!
+        let now = newYork.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 1, minute: 50, second: 30))!
+        let range = try XCTUnwrap(RuntimeManualLockDecision.customEndRange(at: now, calendar: newYork))
+        let lowerComponents = newYork.dateComponents([.year, .month, .day, .hour, .minute, .second], from: range.lowerBound)
+        XCTAssertEqual(lowerComponents.year, 2026)
+        XCTAssertEqual(lowerComponents.month, 3)
+        XCTAssertEqual(lowerComponents.day, 8)
+        XCTAssertEqual(lowerComponents.hour, 3)
+        XCTAssertEqual(lowerComponents.minute, 6)
+        XCTAssertEqual(lowerComponents.second, 0)
+        XCTAssertLessThanOrEqual(range.upperBound, now.addingTimeInterval(RuntimeManualLockDecision.maximumDuration))
+    }
+
+    func testDelayedConfirmationReturnsPreciseReasonWithoutWeakeningRuntimeAcceptance() {
+        let preview = date(10, 12, 0, 0)
+        let frozenEnd = date(10, 12, 15)
+        XCTAssertEqual(
+            RuntimeManualLockDecision.validation(expectedEnd: frozenEnd, startedAt: preview.addingTimeInterval(1)),
+            .tooSoon
+        )
+        XCTAssertEqual(
+            RuntimeManualLockDecision.validation(expectedEnd: date(17, 12), startedAt: preview),
+            .valid
+        )
+        XCTAssertEqual(
+            RuntimeManualLockDecision.validation(expectedEnd: date(17, 12, 0, 1), startedAt: preview),
+            .tooLate
+        )
+        XCTAssertFalse(RuntimeManualLockDecision.accepts(expectedEnd: frozenEnd, startedAt: preview.addingTimeInterval(1)))
+        XCTAssertTrue(RuntimeManualLockDecision.accepts(expectedEnd: frozenEnd, startedAt: preview))
+        XCTAssertEqual(RuntimeValidationError.manualEndTooSoon.localizedDescription, "Choose an end at least 15 minutes from now.")
+        XCTAssertEqual(RuntimeValidationError.manualEndTooLate.localizedDescription, "Choose an end within seven days.")
     }
 
     func testFutureScheduledOverlapIsFoundAcrossMultipleDays() {

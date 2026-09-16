@@ -11,6 +11,13 @@ public enum RuntimeManualLockDecision {
     /// with the already committed absolute end; it is not a duration grace.
     public static let registrationClockTolerance: TimeInterval = 1
 
+    public enum EndValidation: Equatable, Sendable {
+        case valid
+        case tooSoon
+        case tooLate
+        case invalidDate
+    }
+
     public static func proposedEnd(after duration: TimeInterval, at date: Date) -> Date? {
         guard date.timeIntervalSinceReferenceDate.isFinite,
               duration.isFinite,
@@ -21,21 +28,69 @@ public enum RuntimeManualLockDecision {
         return end
     }
 
-    public static func customEndRange(at date: Date) -> ClosedRange<Date> {
-        date.addingTimeInterval(minimumDuration)...date.addingTimeInterval(maximumDuration)
+    /// Returns minute-aligned DatePicker bounds for a frozen absolute end.
+    /// The lower bound is the first local minute boundary at or after the
+    /// actual 15-minute threshold; the upper bound is the last local minute
+    /// boundary no later than the seven-day threshold. Calendar operations are
+    /// used instead of fixed component arithmetic so skipped/repeated DST
+    /// minutes remain valid finite Dates.
+    public static func customEndRange(
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> ClosedRange<Date>? {
+        guard date.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        let lowerThreshold = date.addingTimeInterval(minimumDuration)
+        let upperThreshold = date.addingTimeInterval(maximumDuration)
+        guard lowerThreshold.timeIntervalSinceReferenceDate.isFinite,
+              upperThreshold.timeIntervalSinceReferenceDate.isFinite,
+              let lower = firstMinuteBoundary(atOrAfter: lowerThreshold, calendar: calendar),
+              let upper = lastMinuteBoundary(atOrBefore: upperThreshold, calendar: calendar),
+              lower <= upper else { return nil }
+        return lower...upper
+    }
+
+    /// A stable initial Custom end, approximately 30 minutes from the picker
+    /// reference clock and always inside the safe minute-aligned range.
+    public static func defaultCustomEnd(
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> Date? {
+        guard let range = customEndRange(at: date, calendar: calendar) else { return nil }
+        let thirtyMinuteThreshold = date.addingTimeInterval(30 * 60)
+        guard thirtyMinuteThreshold.timeIntervalSinceReferenceDate.isFinite,
+              let candidate = lastMinuteBoundary(atOrBefore: thirtyMinuteThreshold, calendar: calendar) else {
+            return nil
+        }
+        return min(max(candidate, range.lowerBound), range.upperBound)
     }
 
     /// Validates the caller's frozen absolute end against the actual
     /// transaction start. It intentionally does not compare against a newly
     /// computed preview: a few seconds of UI/clock drift must not replace the
     /// confirmed absolute boundary.
-    public static func accepts(expectedEnd: Date, startedAt: Date) -> Bool {
+    public static func validation(expectedEnd: Date, startedAt: Date) -> EndValidation {
         guard startedAt.timeIntervalSinceReferenceDate.isFinite,
-              expectedEnd.timeIntervalSinceReferenceDate.isFinite else { return false }
+              expectedEnd.timeIntervalSinceReferenceDate.isFinite else { return .invalidDate }
         let duration = expectedEnd.timeIntervalSince(startedAt)
-        return duration.isFinite
-            && duration >= minimumDuration
-            && duration <= maximumDuration
+        guard duration.isFinite else { return .invalidDate }
+        if duration < minimumDuration { return .tooSoon }
+        if duration > maximumDuration { return .tooLate }
+        return .valid
+    }
+
+    public static func accepts(expectedEnd: Date, startedAt: Date) -> Bool {
+        validation(expectedEnd: expectedEnd, startedAt: startedAt) == .valid
+    }
+
+    private static func firstMinuteBoundary(atOrAfter date: Date, calendar: Calendar) -> Date? {
+        guard let interval = calendar.dateInterval(of: .minute, for: date) else { return nil }
+        let start = interval.start
+        guard start < date else { return start }
+        return calendar.date(byAdding: .minute, value: 1, to: start)
+    }
+
+    private static func lastMinuteBoundary(atOrBefore date: Date, calendar: Calendar) -> Date? {
+        calendar.dateInterval(of: .minute, for: date)?.start
     }
 
     /// Returns every saved daily occurrence that intersects a finite manual
@@ -225,6 +280,8 @@ public enum RuntimeValidationError: LocalizedError, Equatable, Sendable {
     case appGroupUnavailable
     case concurrentStoreAccess
     case overlapUnsupported
+    case manualEndTooSoon
+    case manualEndTooLate
     case manualLockUnavailable
 
     public var errorDescription: String? {
@@ -235,6 +292,8 @@ public enum RuntimeValidationError: LocalizedError, Equatable, Sendable {
         case .appGroupUnavailable: return "The Phone Lockbox App Group is unavailable."
         case .concurrentStoreAccess: return "Phone Lockbox shared state is busy. Try again."
         case .overlapUnsupported: return "This lock overlaps a rule with a different mode. The existing lock was not changed."
+        case .manualEndTooSoon: return "Choose an end at least 15 minutes from now."
+        case .manualEndTooLate: return "Choose an end within seven days."
         case .manualLockUnavailable: return "A finite system-managed end is not available for Lock now."
         }
     }

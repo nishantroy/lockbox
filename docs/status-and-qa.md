@@ -1,6 +1,12 @@
 # Status and QA evidence
 
-Updated: 2026-09-14. **Latest implementation: build 12 bounded Live Activity callback fix candidate.** Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat the build-12 Live Activity result as an automatic-dismissal pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+Updated: 2026-09-16. **Latest implementation: build-13 custom-end validation fix candidate.** Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat source changes as a device pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+
+## Build-13 custom-end owner QA finding — source-only candidate
+
+Owner saw **“A finite system-managed end is not available for Lock now.”** when selecting a custom end near the minimum. The custom minute picker used sheet-open bounds containing seconds; the runtime transaction correctly used its later clock, so a selected end could become less than 15 minutes away. The source candidate fixes the picker UX with pure calendar-aware minute bounds and a refreshed Custom reference, while retaining exact absolute end selection, the 15-minute minimum at the transaction clock, the seven-day maximum, the required finite OS route and saved-policy snapshot. Fresh confirmation rejection now reports **“Choose an end at least 15 minutes from now.”** or **“Choose an end within seven days.”** and never substitutes bedtime/default or an unbounded route.
+
+Pure tests cover seconds-bearing and exact-minute lower/upper inclusion, DST/calendar boundaries, delayed confirmation reasons and unchanged runtime finite acceptance. No device retest has been run for this candidate; install and owner retest are required before recording a pass.
 
 ## Build-12 focused owner QA — natural-end presentation failure
 

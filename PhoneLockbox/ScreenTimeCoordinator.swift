@@ -186,8 +186,8 @@ final class ScreenTimeCoordinator: ObservableObject {
         RuntimeManualLockDecision.proposedEnd(after: duration, at: date)
     }
 
-    func manualLockCustomRange(at date: Date = Date()) -> ClosedRange<Date> {
-        RuntimeManualLockDecision.customEndRange(at: date)
+    func manualLockCustomRange(at date: Date = Date()) -> ClosedRange<Date>? {
+        RuntimeManualLockDecision.customEndRange(at: date, calendar: Calendar.current)
     }
 
     func canConfirmRecovery(at date: Date) -> Bool {
@@ -323,13 +323,29 @@ final class ScreenTimeCoordinator: ObservableObject {
         // This is the transaction clock. An explicit expected end is a frozen
         // absolute boundary; it is never replaced by a freshly recomputed
         // bedtime end or by the current clock.
-        let startedAt = currentDate()
-        let end = expectedEnd ?? RuntimeManualLockDecision.proposedEnd(after: Self.defaultManualDuration, at: startedAt)
-        guard let end, RuntimeManualLockDecision.accepts(expectedEnd: end, startedAt: startedAt) else {
+        let previewClock = currentDate()
+        let end = expectedEnd ?? RuntimeManualLockDecision.proposedEnd(after: Self.defaultManualDuration, at: previewClock)
+        guard let end else {
             lastError = RuntimeValidationError.manualLockUnavailable.localizedDescription
             return
         }
-        startFiniteManualSession(expectedEnd: end, purpose: .focus, bedtimeNow: false, transactionStart: startedAt)
+        switch RuntimeManualLockDecision.validation(expectedEnd: end, startedAt: previewClock) {
+        case .valid:
+            break
+        case .tooSoon:
+            lastError = RuntimeValidationError.manualEndTooSoon.localizedDescription
+            return
+        case .tooLate:
+            lastError = RuntimeValidationError.manualEndTooLate.localizedDescription
+            return
+        case .invalidDate:
+            lastError = RuntimeValidationError.manualLockUnavailable.localizedDescription
+            return
+        }
+        // The transaction re-reads the coordinator clock. Do not carry the
+        // preview seconds into persistence, so a delayed confirmation is
+        // rejected rather than shortening the frozen absolute end.
+        startFiniteManualSession(expectedEnd: end, purpose: .focus, bedtimeNow: false, transactionStart: nil)
     }
 
     /// Starts the saved bedtime policy immediately while retaining the
@@ -363,7 +379,14 @@ final class ScreenTimeCoordinator: ObservableObject {
         do {
             try store.withTransaction { context in
                 let startedAt = transactionStart ?? currentDate()
-                guard RuntimeManualLockDecision.accepts(expectedEnd: expectedEnd, startedAt: startedAt) else {
+                switch RuntimeManualLockDecision.validation(expectedEnd: expectedEnd, startedAt: startedAt) {
+                case .valid:
+                    break
+                case .tooSoon:
+                    throw RuntimeValidationError.manualEndTooSoon
+                case .tooLate:
+                    throw RuntimeValidationError.manualEndTooLate
+                case .invalidDate:
                     throw RuntimeValidationError.manualLockUnavailable
                 }
                 _ = RuntimeLifecycle.expireNaturalSessions(&context.document, at: startedAt)

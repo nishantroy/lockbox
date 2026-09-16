@@ -11,8 +11,9 @@ struct ManualLockSheet: View {
     init(coordinator: ScreenTimeCoordinator) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
         let capturedDate = Date()
+        let calendar = Calendar.current
         _referenceDate = State(initialValue: capturedDate)
-        _customEnd = State(initialValue: capturedDate.addingTimeInterval(30 * 60))
+        _customEnd = State(initialValue: RuntimeManualLockDecision.defaultCustomEnd(at: capturedDate, calendar: calendar) ?? capturedDate.addingTimeInterval(30 * 60))
     }
 
     var body: some View {
@@ -29,12 +30,17 @@ struct ManualLockSheet: View {
                         .pickerStyle(.segmented)
 
                         if choice == .custom {
-                            DatePicker(
-                                "End",
-                                selection: $customEnd,
-                                in: coordinator.manualLockCustomRange(at: referenceDate),
-                                displayedComponents: [.date, .hourAndMinute]
-                            )
+                            if let customRange {
+                                DatePicker(
+                                    "End",
+                                    selection: $customEnd,
+                                    in: customRange,
+                                    displayedComponents: [.date, .hourAndMinute]
+                                )
+                            } else {
+                                Label("No finite end is available at the moment.", systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(LockboxTheme.destructive)
+                            }
                         }
                         Text("The end is finite and is checked again when you confirm. A manual lock never silently uses the bedtime end.")
                             .font(.footnote)
@@ -81,6 +87,17 @@ struct ManualLockSheet: View {
                     .disabled(proposedEnd == nil || !coordinator.isAuthorized)
                 }
             }
+            .onChange(of: choice) { _, newChoice in
+                guard newChoice == .custom else { return }
+                // Rebase the minute picker when Custom is chosen. Its bounds
+                // must not retain seconds from sheet creation or an earlier
+                // choice; confirmation still validates the frozen Date again.
+                referenceDate = Date()
+                customEnd = RuntimeManualLockDecision.defaultCustomEnd(
+                    at: referenceDate,
+                    calendar: Calendar.current
+                ) ?? referenceDate.addingTimeInterval(30 * 60)
+            }
             .onChange(of: coordinator.hasActiveLock) { _, isActive in
                 if attempted && isActive {
                     dismiss()
@@ -92,6 +109,10 @@ struct ManualLockSheet: View {
         .lockboxScreen()
     }
 
+    private var customRange: ClosedRange<Date>? {
+        coordinator.manualLockCustomRange(at: referenceDate)
+    }
+
     private var proposedEnd: Date? {
         switch choice {
         case .thirtyMinutes:
@@ -99,7 +120,7 @@ struct ManualLockSheet: View {
         case .oneHour:
             return coordinator.manualLockProposedEnd(after: 60 * 60, at: referenceDate)
         case .custom:
-            guard coordinator.manualLockCustomRange(at: referenceDate).contains(customEnd) else { return nil }
+            guard let customRange, customRange.contains(customEnd) else { return nil }
             return customEnd
         }
     }
