@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
+		127ADDDC4FEA5FDBC2DD4FE4 /* WeekendSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */; };
 		17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */; };
 		1E4089EC6B84BBFABE620B5C /* LockboxDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */; };
@@ -144,6 +145,7 @@
 		7B8EB8ACECE3933AFE77F458 /* GalleryComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryComponents.swift; sourceTree = "<group>"; };
 		8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmbientPrototypeView.swift; sourceTree = "<group>"; };
 		826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxActionButtonStyle.swift; sourceTree = "<group>"; };
+		8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeekendSchedule.swift; sourceTree = "<group>"; };
 		89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryView.swift; sourceTree = "<group>"; };
 		9188ECB9FC75CDE19E1D7C66 /* DiagnosticsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsSection.swift; sourceTree = "<group>"; };
 		96DADA707D1D0A3DA8934C5A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -286,6 +288,7 @@
 			isa = PBXGroup;
 			children = (
 				4937C609973AA395FE5785C2 /* LockboxPolicy.swift */,
+				8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */,
 			);
 			path = Policy;
 			sourceTree = "<group>";
@@ -579,6 +582,7 @@
 				41DB07862A1BCD257453E327 /* SafetyAssistantView.swift in Sources */,
 				AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */,
 				809D1DF12F48C38A7E2A739F /* SettingsView.swift in Sources */,
+				127ADDDC4FEA5FDBC2DD4FE4 /* WeekendSchedule.swift in Sources */,
 				5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
