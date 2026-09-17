@@ -14,6 +14,7 @@ A native iPhone app to keep essentials available while restricting nighttime app
 - [Historical status and QA evidence](docs/status-and-qa.md) — confirmed build-1 behavior versus assumptions.
 - [Independent Sol code review](docs/reviews/2026-09-10-sol.md) — prioritized findings.
 - [Developer runbook](docs/development.md) — source map, builds, wireless device deployment.
+- [Quick Actions candidate](docs/quick-actions.md) — bounded App Intents and deep-link safety contract.
 
 ## Specifications
 

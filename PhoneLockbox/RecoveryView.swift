@@ -3,6 +3,19 @@ import SwiftUI
 struct RecoveryView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @State private var showingConfirmation = false
+    @State private var presentedQuickAction: ScreenTimeCoordinator.PendingQuickAction?
+    private let onPresented: (ScreenTimeCoordinator.PendingQuickAction?) -> Void
+    private let onDismissed: (ScreenTimeCoordinator.PendingQuickAction?) -> Void
+
+    init(
+        coordinator: ScreenTimeCoordinator,
+        onPresented: @escaping (ScreenTimeCoordinator.PendingQuickAction?) -> Void = { _ in },
+        onDismissed: @escaping (ScreenTimeCoordinator.PendingQuickAction?) -> Void = { _ in }
+    ) {
+        _coordinator = ObservedObject(wrappedValue: coordinator)
+        self.onPresented = onPresented
+        self.onDismissed = onDismissed
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -69,6 +82,21 @@ struct RecoveryView: View {
             }
         }
         .lockboxScreen()
+        .onAppear {
+            // Capture the exact identity at presentation time. A later route
+            // must not be able to settle this destination's old callback.
+            let pending = coordinator.pendingQuickAction
+            if let pending, case .recovery = pending.action {
+                presentedQuickAction = pending
+                onPresented(pending)
+            }
+        }
+        .onDisappear {
+            if let presentedQuickAction {
+                onDismissed(presentedQuickAction)
+                self.presentedQuickAction = nil
+            }
+        }
         .alert("End this lock?", isPresented: $showingConfirmation) {
             Button("End this lock", role: .destructive) {
                 coordinator.confirmRecovery()

@@ -14,9 +14,11 @@
 		1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */; };
 		1E4089EC6B84BBFABE620B5C /* LockboxDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */; };
 		1F71388F46EA07CCFECAC97A /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1DE0FD471013572C51A6819A /* AmbientKit */; };
+		23494126956EF970A155A522 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8AA84BA279161D0EE0A8D766 /* AppIntents.framework */; };
 		23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		29FB4DAFD4FBC0B72B40C055 /* LockboxLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2B3F75B0611C6C2B3E834F4A /* RuntimeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */; };
+		3633D5BF5B4871E3827366BB /* QuickActionRouteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 007587A21F60E1CD46B8904F /* QuickActionRouteTests.swift */; };
 		3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */; };
 		3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */; };
 		3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */; };
@@ -28,6 +30,7 @@
 		5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */; };
 		5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E023311398A901C00301F601 /* ContentView.swift */; };
 		5BE2CD0427061CC6F52A4F20 /* ShieldConfiguration.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		5C890F679FE0DDF9ED27069A /* QuickActionDeliveryGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */; };
 		5E0E4133A5633F9B658EC1B4 /* RuntimeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */; };
 		5FE2806A4ED9CC173077DCBD /* RuntimeOccurrence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */; };
 		6080D7DA4E834C9154753BAD /* RuntimeContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */; };
@@ -42,19 +45,23 @@
 		833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */; };
 		83D07AF54EC2BF47C0373B90 /* AmbientPrototypeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */; };
 		92A6E33D92356CC70A15EED4 /* RuntimeContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */; };
+		98EFB0DC3FE2850EFCE64059 /* QuickActionRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */; };
 		9FF6D3EF0DB2A752649AEE0A /* ShieldConfigurationExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9A2F803B335F1F67F65C48 /* ShieldConfigurationExtension.swift */; };
 		A5041E1560903C6CE7A3BC4C /* GalleryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15617864C3787EEB6026FE8B /* GalleryModel.swift */; };
 		A6B54197F91197D40CA7C41A /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */; };
 		B3CC6F984D164E57CF206DA4 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21D938BBE7A7D516BD85A479 /* PeopleView.swift */; };
+		B4EEA8A51B9A187E1BCD7A80 /* QuickActionDeliveryBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 275E0C2CA974AD242E8BC60D /* QuickActionDeliveryBroker.swift */; };
 		B55944F134064144A9BB1053 /* ConfigurationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */; };
 		B8E5C2B192EDAF29362FF438 /* SafetyAssistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */; };
 		BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */; };
 		C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		CC7FACFAFEEBA8A8C4901727 /* GalleryTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84197D5D974050762C5DC97 /* GalleryTheme.swift */; };
 		DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4937C609973AA395FE5785C2 /* LockboxPolicy.swift */; };
+		E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */; };
 		E4EE663BF81E00D83BB7D66D /* DeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */; };
+		F0396C945F9466D0DFCC935B /* QuickActionPendingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */; };
 		F234C577D935B71999353749 /* MonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7F44B15683DBC4D4CC9AE5C /* MonitorExtension.swift */; };
 		F928AA64045DED8055DF1333 /* GalleryComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B8EB8ACECE3933AFE77F458 /* GalleryComponents.swift */; };
 /* End PBXBuildFile section */
@@ -115,6 +122,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		007587A21F60E1CD46B8904F /* QuickActionRouteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionRouteTests.swift; sourceTree = "<group>"; };
 		031A0194F4EAE8469F21A57E /* PhoneLockbox.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockbox.entitlements; sourceTree = "<group>"; };
 		097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLockboxApp.swift; sourceTree = "<group>"; };
 		09BBFF1E0F3CD2FA9C05F7B1 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -123,14 +131,18 @@
 		15617864C3787EEB6026FE8B /* GalleryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryModel.swift; sourceTree = "<group>"; };
 		17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxDesignSystem.swift; sourceTree = "<group>"; };
 		21D938BBE7A7D516BD85A479 /* PeopleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleView.swift; sourceTree = "<group>"; };
+		26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionIntents.swift; sourceTree = "<group>"; };
+		275E0C2CA974AD242E8BC60D /* QuickActionDeliveryBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryBroker.swift; sourceTree = "<group>"; };
 		2A5D95C14D31DEE7B354AE57 /* PhoneLockboxShieldConfiguration.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockboxShieldConfiguration.entitlements; sourceTree = "<group>"; };
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
 		30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistant.swift; sourceTree = "<group>"; };
+		35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryGate.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4937C609973AA395FE5785C2 /* LockboxPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicy.swift; sourceTree = "<group>"; };
 		4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeStore.swift; sourceTree = "<group>"; };
 		4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOccurrence.swift; sourceTree = "<group>"; };
 		4FC89584D6D8DB677376C818 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionPendingStore.swift; sourceTree = "<group>"; };
 		55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistantView.swift; sourceTree = "<group>"; };
 		58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldActionExtension.swift; sourceTree = "<group>"; };
 		5A49845AEC0FC73B3304327A /* GalleryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryViews.swift; sourceTree = "<group>"; };
@@ -148,11 +160,13 @@
 		826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxActionButtonStyle.swift; sourceTree = "<group>"; };
 		8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeekendSchedule.swift; sourceTree = "<group>"; };
 		89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryView.swift; sourceTree = "<group>"; };
+		8AA84BA279161D0EE0A8D766 /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		9188ECB9FC75CDE19E1D7C66 /* DiagnosticsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsSection.swift; sourceTree = "<group>"; };
 		96DADA707D1D0A3DA8934C5A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationEditorView.swift; sourceTree = "<group>"; };
 		A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxLiveActivity.swift; sourceTree = "<group>"; };
 		B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEngine.swift; sourceTree = "<group>"; };
+		C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionRoute.swift; sourceTree = "<group>"; };
 		C7F44B15683DBC4D4CC9AE5C /* MonitorExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorExtension.swift; sourceTree = "<group>"; };
 		C84197D5D974050762C5DC97 /* GalleryTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryTheme.swift; sourceTree = "<group>"; };
 		D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityAdapter.swift; sourceTree = "<group>"; };
@@ -166,6 +180,7 @@
 		EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskUnlock.swift; sourceTree = "<group>"; };
 		EEBD10CE146B8CFE69F289B7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = DeviceActivityMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		FD7EAD64CE254E9C86D2BB8E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -173,6 +188,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				23494126956EF970A155A522 /* AppIntents.framework in Frameworks */,
 				11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -212,6 +228,7 @@
 			isa = PBXGroup;
 			children = (
 				E023311398A901C00301F601 /* ContentView.swift */,
+				FD7EAD64CE254E9C86D2BB8E /* Info.plist */,
 				031A0194F4EAE8469F21A57E /* PhoneLockbox.entitlements */,
 				097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */,
 				89B4D1E1419C0D1C0D5BEDA3 /* RecoveryView.swift */,
@@ -220,6 +237,7 @@
 				99E729940E68111620073684 /* DesignGallery */,
 				2220B579BB10A3C7F0F9CA79 /* DesignSystem */,
 				6DE86A7A953F5C21A1AE155A /* Policy */,
+				D18708BF90155CF876F08867 /* QuickActions */,
 				713A10BF127B54AEC27D1857 /* Views */,
 			);
 			path = PhoneLockbox;
@@ -241,6 +259,7 @@
 				1E576EE0A7803C3DC49958D3 /* PhoneLockbox */,
 				5A805F511DE7EFE8BF45461A /* PhoneLockboxTests */,
 				668EAC9BEB1B6AC61D66A42B /* Shared */,
+				3F8A21DF220688BEA1CB532C /* Frameworks */,
 				EE86C591005E874BF15F02A8 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -251,6 +270,14 @@
 				68BD59D904BD226107FFF407 /* AmbientKit */,
 			);
 			name = Packages;
+			sourceTree = "<group>";
+		};
+		3F8A21DF220688BEA1CB532C /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				8AA84BA279161D0EE0A8D766 /* AppIntents.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		4412BECAF7F39E180FE9DFA6 /* DeviceActivityMonitor */ = {
@@ -267,6 +294,7 @@
 			isa = PBXGroup;
 			children = (
 				EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */,
+				007587A21F60E1CD46B8904F /* QuickActionRouteTests.swift */,
 			);
 			path = PhoneLockboxTests;
 			sourceTree = "<group>";
@@ -341,6 +369,18 @@
 				0A48085DC635EC5D1A7DB558 /* ShieldConfiguration */,
 			);
 			path = Extensions;
+			sourceTree = "<group>";
+		};
+		D18708BF90155CF876F08867 /* QuickActions */ = {
+			isa = PBXGroup;
+			children = (
+				275E0C2CA974AD242E8BC60D /* QuickActionDeliveryBroker.swift */,
+				35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */,
+				26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */,
+				544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */,
+				C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */,
+			);
+			path = QuickActions;
 			sourceTree = "<group>";
 		};
 		E0E1FAA43C7313986ED35DD7 /* LockboxLiveActivity */ = {
@@ -573,6 +613,11 @@
 				3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */,
 				B3CC6F984D164E57CF206DA4 /* PeopleView.swift in Sources */,
 				1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */,
+				B4EEA8A51B9A187E1BCD7A80 /* QuickActionDeliveryBroker.swift in Sources */,
+				5C890F679FE0DDF9ED27069A /* QuickActionDeliveryGate.swift in Sources */,
+				E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */,
+				F0396C945F9466D0DFCC935B /* QuickActionPendingStore.swift in Sources */,
+				98EFB0DC3FE2850EFCE64059 /* QuickActionRoute.swift in Sources */,
 				BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */,
 				73999F7904BC73C3342983E1 /* RecoveryView.swift in Sources */,
 				6080D7DA4E834C9154753BAD /* RuntimeContracts.swift in Sources */,
@@ -604,6 +649,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */,
+				3633D5BF5B4871E3827366BB /* QuickActionRouteTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -767,6 +813,7 @@
 				CODE_SIGN_ENTITLEMENTS = PhoneLockbox/PhoneLockbox.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PhoneLockbox/Info.plist;
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -778,6 +825,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.phone-lockbox.app";
 				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
@@ -884,6 +932,7 @@
 				CODE_SIGN_ENTITLEMENTS = PhoneLockbox/PhoneLockbox.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PhoneLockbox/Info.plist;
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -895,6 +944,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.phone-lockbox.app";
 				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;

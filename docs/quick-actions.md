@@ -1,0 +1,34 @@
+# Quick Actions candidate
+
+Phone Lockbox includes a source-only Shortcuts/App Intents candidate for four bounded navigation actions:
+
+- start a 30-minute focus session;
+- start a one-hour focus session;
+- show the current Lockbox status; and
+- open Recovery.
+
+The two focus actions open the existing **Lock now** sheet with the requested preset selected. The user must review and explicitly confirm the finite end; a shortcut never applies Managed Settings directly. Recovery opens the existing delayed recovery flow, and status opens the normal Lockbox surface. Authorization, registration and enforcement remain reported by the app and are never inferred from an accepted intent.
+
+Routes use the `phonelockbox://quick-action/v1/...` scheme configured in `project.yml`. Each generated route carries a unique nonce for queue deduplication, an integer issuance time, and an exact five-minute expiry. The parser accepts only the exact regenerated URL spelling: canonical absolute paths, query names/order, percent encoding, canonical integer/UUID values, the exact query allowlist, and routes within the bounded issuance-age and clock-skew window. Unknown, malformed, duplicate, future-dated, stale, or expired routes fail closed without changing a rule, active session or recovery state. These values are freshness and delivery metadata only, not authentication or provenance.
+
+## Delivery and crash behavior
+
+The App Group handoff is a bounded, versioned file queue under its own cross-process `flock` lock. The queue is capped at **32 entries and 32 KiB** before decoding/allocation; each identifier, claim token and URL also has a small byte limit. On Darwin/Glibc, reads open the path once with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK`, `fstat` that same descriptor for a regular file and the byte cap, then perform the bounded read from that descriptor. This rejects symlinks, FIFOs and other nonregular replacements without following or blocking; replacement after open cannot change the descriptor's inode. Unsupported schema/counts/strings and corrupt data fail closed without overwriting the original bytes.
+
+Queue entries are strict FIFO. An unexpired lease on the head intentionally blocks later entries rather than allowing overtaking. The claim API distinguishes an empty queue from a leased head and returns the exact next claim opportunity. The coordinator schedules one bounded retry at that deadline, cancelling/replacing stale timers; scene reactivation remains an additional trigger. A significant wall-clock rollback (more than five minutes relative to a queued timestamp or lease) deterministically drops the navigation-only queue and its leases, freeing capacity; it cannot wedge delivery. This is safe because the queue never contains enforcement authority.
+
+Writes use a same-directory temporary file, complete data write, file `fsync`, atomic rename, and containing-directory `fsync` where the platform supports it. The write outcome is explicit: before rename, a hard failure means no logical mutation was committed; after rename, the mutation is committed even if directory `fsync` fails, with durability represented separately as uncertain. Callers therefore do not report “no effect” or blindly retry a possibly-visible nonce. Unsupported directory sync is the explicit atomic-rename-only fallback. The queue retains bounded settled-nonce tombstones to deduplicate replay after acknowledgement. The queue, lock file, temporary replacement and App Group directory use `NSFileProtectionCompleteUntilFirstUserAuthentication` on iOS so delivery is available after first unlock without weakening pre-unlock protection. Device validation of Data Protection and power-loss durability remains required.
+
+Every external URL, including a foreground `onOpenURL` callback, first enters this same durable nonce queue; it is never assigned directly over an in-flight presentation. A strict in-memory delivery gate permits one current identity. A claimed entry is not acknowledged when the coordinator publishes in-memory state. The claim's ID, route identity and lease token are retained in `PendingQuickAction` and passed to the UI presentation callback. That callback validates the exact identity only; durable acknowledgement removes the claim at dismissal/settlement:
+
+- focus validates presentation from the Lock now sheet, then settles on sheet dismissal;
+- recovery validates presentation from the Recovery destination, then settles on destination dismissal; and
+- status validates and settles after the visible Lockbox destination consumes the request.
+
+If the host crashes, the scene tears down, or a sheet/navigation presentation fails before settlement, no acknowledgement is written; the lease deadline wake-up (or a later scene activation) lets the route retry after relaunch, including a relaunch before the original lease expires. Focus keeps its exact identity busy through sheet dismissal; only then is the next FIFO route claimed. Recovery binds both presentation and dismissal callbacks to the captured identity, while status settles only its exact visible destination. Durable acknowledgement matches both ID and token, so a stale callback cannot delete a re-leased entry or settle a newer action. Repeated status/recovery presentation is idempotent, and repeated focus routes still require the existing finite confirmation and cannot mutate an active lock.
+
+Expired or parse-invalid routes, and routes that are currently unpresentable (for example, a focus route while a lock is active or while authorization/configuration is unavailable), have an explicit terminal disposition: the broker drops the navigation-only entry through token-bound acknowledgement and immediately continues strict FIFO. A failed terminal acknowledgement is not treated as success; it schedules a retry at that claim's exact lease deadline, so a known terminal head cannot block later status/recovery routes indefinitely. No terminal disposition changes enforcement, recovery, configuration or policy state.
+
+The implementation uses stable App Group files and `flock`, and the test suite exercises concurrent operations from multiple threads with separate descriptors. The iOS unit-test target cannot safely spawn an independent signed App Group process; genuine independently spawned-process lock contention and provisioned-device reboot/power-loss/file-protection behavior remain explicit device/host gates for R9 rather than being claimed by the thread test.
+
+This is a source candidate only. Siri/Shortcuts availability, voice feedback, duplicate invocation and device behavior still require the R9 acceptance gate. No installation, Siri prompt, schedule change or enforcement result is implied by this implementation. Indefinite locks, background enforcement, instant recovery and active-rule edits are deliberately not exposed.

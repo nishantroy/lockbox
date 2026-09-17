@@ -3,7 +3,15 @@ import FamilyControls
 
 struct LockboxTabView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @Binding var navigationPath: [QuickActionRoute.Destination]
     @State private var showingManualLock = false
+    @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
+    @State private var presentedFocusAction: ScreenTimeCoordinator.PendingQuickAction?
+
+    init(coordinator: ScreenTimeCoordinator, navigationPath: Binding<[QuickActionRoute.Destination]> = .constant([])) {
+        self.coordinator = coordinator
+        _navigationPath = navigationPath
+    }
 
     var body: some View {
         Group {
@@ -16,8 +24,66 @@ struct LockboxTabView: View {
             }
         }
         .lockboxScreen()
-        .sheet(isPresented: $showingManualLock) {
-            ManualLockSheet(coordinator: coordinator)
+        .sheet(isPresented: $showingManualLock, onDismiss: {
+            // A focus identity remains busy until the sheet is actually gone.
+            // This prevents a rapid second URL from replacing its state while
+            // SwiftUI is still presenting or dismissing the first sheet.
+            if let presentedFocusAction {
+                coordinator.settlePresentedQuickAction(presentedFocusAction)
+            }
+            requestedManualPreset = nil
+            presentedFocusAction = nil
+            // If a regular Lock now sheet was already visible when an external
+            // route arrived, consume the queued route after that sheet closes.
+            consumeQuickAction()
+        }) {
+            ManualLockSheet(
+                coordinator: coordinator,
+                requestedPreset: requestedManualPreset,
+                onPresented: { pending in
+                    guard let presentedFocusAction,
+                          presentedFocusAction == pending else { return }
+                    // Validate only the exact identity at presentation. The
+                    // durable claim is retained until onDismiss settles the
+                    // sheet, so a crash before dismissal can retry it.
+                    _ = coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
+                }
+            )
+        }
+        .onAppear {
+            consumeQuickAction()
+        }
+        .onChange(of: coordinator.pendingQuickAction) { _, _ in
+            consumeQuickAction()
+        }
+    }
+
+    private func consumeQuickAction() {
+        guard let pending = coordinator.pendingQuickAction else { return }
+        switch pending.action {
+        case .focus(let preset):
+            // The sheet's onAppear is the presentation callback. Until then,
+            // the claim (including its ID/token) remains durable and retryable.
+            // Never replace an already-presented regular or quick-action sheet.
+            guard presentedFocusAction == nil, !showingManualLock else { return }
+            presentedFocusAction = pending
+            requestedManualPreset = preset
+            showingManualLock = true
+        case .status:
+            // Status has no second screen: this visible Lockbox tab is its
+            // destination, and this explicit consumption handler is the ack
+            // point after the tab has been selected by ContentView.
+            _ = coordinator.acknowledgePresentedQuickAction(pending)
+            _ = coordinator.settlePresentedQuickAction(pending)
+        case .recovery:
+            if !navigationPath.contains(.recovery) {
+                navigationPath.append(.recovery)
+            } else {
+                // Recovery is already the visible destination, so its
+                // presentation has already occurred and this is idempotent.
+                _ = coordinator.acknowledgePresentedQuickAction(pending)
+                _ = coordinator.settlePresentedQuickAction(pending)
+            }
         }
     }
 }

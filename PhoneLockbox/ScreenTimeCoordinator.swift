@@ -56,6 +56,9 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var windDownLeadMinutes = 30
     @Published private(set) var liveActivityEnabled = false
     @Published private(set) var ambientError: String?
+    /// A parsed quick action is only a request to present existing UI. It is
+    /// consumed by the Lockbox tab and never represents an applied policy.
+    @Published private(set) var pendingQuickAction: PendingQuickAction?
     @Published private(set) var pendingWindDownNotificationCount = 0
     @Published private(set) var windDownAuthorizationStatus = "Not requested"
     @Published private(set) var safetyAssistantAcknowledgements = SafetyAssistantAcknowledgements()
@@ -75,6 +78,22 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// A reconciliation failure remains visible until a later reconciliation
     /// succeeds; an unrelated successful UI action must not erase it.
     private var reconciliationError: String?
+    private var quickActionDelivery = QuickActionDeliveryGate()
+    private let quickActionBroker: QuickActionDeliveryBroker
+
+    /// The durable route identity and claim stay attached to a delivery from
+    /// queue claim through UI dismissal. Keeping both values here prevents a
+    /// stale callback from acknowledging a re-leased route or settling a
+    /// newer presentation after a crash or scene teardown.
+    struct PendingQuickAction: Equatable, Sendable {
+        let id: String
+        let action: QuickActionRoute.Action
+        let claim: QuickActionPendingRouteStore.Claim
+
+        var deliveryIdentity: QuickActionDeliveryGate.Identity {
+            QuickActionDeliveryGate.Identity(id: id, action: action)
+        }
+    }
 
     var selectedItemCount: Int { selection.applicationTokens.count + selection.categoryTokens.count + selection.webDomainTokens.count }
     var canApplySelection: Bool { (try? policyPlan(for: selection, mode: mode)) != nil }
@@ -680,9 +699,19 @@ final class ScreenTimeCoordinator: ObservableObject {
         return "Not registered"
     }
 
-    init(clock: @escaping () -> Date = { Date() }) {
+    init(
+        clock: @escaping () -> Date = { Date() },
+        quickActionQueue: (any QuickActionRouteQueue)? = nil,
+        quickActionScheduler: QuickActionRetryScheduler? = nil
+    ) {
         self.clock = clock
+        self.quickActionBroker = QuickActionDeliveryBroker(
+            queue: quickActionQueue ?? QuickActionPendingRouteStore.appGroupStore(),
+            clock: clock,
+            scheduler: quickActionScheduler ?? DispatchQuickActionRetryScheduler()
+        )
         let defaults = UserDefaults.standard
+        pendingQuickAction = nil
         windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
         let storedLead = defaults.object(forKey: Self.windDownLeadMinutesKey) as? Int ?? 30
         windDownLeadMinutes = min(max(storedLead, 1), 1_440)
@@ -748,6 +777,102 @@ final class ScreenTimeCoordinator: ObservableObject {
         reconcileRuntime()
         scheduleAmbientReconciliation()
         scheduleLiveActivityReconciliation()
+    }
+
+    /// Handles only the versioned, short-lived routes produced by this app's
+    /// App Intents. An invalid or expired route is rejected without any
+    /// Managed Settings or lifecycle mutation.
+    func handleQuickActionURL(_ url: URL, now: Date = Date()) {
+        guard QuickActionRoute.parse(url, now: now) != nil else {
+            lastError = "This Phone Lockbox shortcut link is invalid or expired. No lock was changed."
+            return
+        }
+        // Direct URL callbacks use the same durable nonce queue as App Intent
+        // handoffs. A current presentation therefore remains the sole busy
+        // identity; later focus/status/recovery routes wait in FIFO order.
+        guard QuickActionPendingRouteStore.enqueue(url, now: now) else {
+            lastError = "This Phone Lockbox shortcut could not be queued safely. No lock was changed."
+            return
+        }
+        processPendingQuickActionRoute(now: now)
+    }
+
+    /// A destination calls this only after it has consumed and presented the
+    /// requested UI. Presentation acknowledgement validates the exact
+    /// in-memory identity but deliberately does not remove the durable claim:
+    /// a crash before dismissal/settlement must leave the route retryable.
+    @discardableResult
+    func acknowledgePresentedQuickAction(_ pending: PendingQuickAction) -> Bool {
+        guard pendingQuickAction == pending,
+              quickActionDelivery.accepts(pending.deliveryIdentity) else { return false }
+        return true
+    }
+
+    /// Releases the exact presented identity after its destination is
+    /// dismissed or settled. Durable acknowledgement happens at this boundary
+    /// so a crash before settlement remains retryable. A stale callback cannot
+    /// remove a re-leased claim because the queue still requires its token.
+    @discardableResult
+    func settlePresentedQuickAction(_ pending: PendingQuickAction) -> Bool {
+        guard pendingQuickAction == pending,
+              quickActionDelivery.accepts(pending.deliveryIdentity) else { return false }
+        // A failed acknowledgement is not a reason to retain a stale UI
+        // identity. The broker schedules the exact claim lease deadline, while
+        // this identity still settles locally and cannot block later routes.
+        let acknowledged = quickActionBroker.acknowledge(pending.claim)
+        guard quickActionDelivery.settle(pending.deliveryIdentity) else { return false }
+        pendingQuickAction = nil
+        processPendingQuickActionRoute()
+        return acknowledged
+    }
+
+    /// Imports one App Intent handoff only at the app boundary. Claiming and
+    /// acknowledging are separate durable operations so a host crash retries
+    /// navigation; neither operation invokes an enforcement action.
+    func processPendingQuickActionRoute(now: Date? = nil) {
+        quickActionBroker.process(
+            now: now ?? currentDate(),
+            isBusy: { [weak self] in
+                guard let self else { return true }
+                return self.pendingQuickAction != nil || self.quickActionDelivery.activeIdentity != nil
+            },
+            disposition: { [weak self] route in
+                self?.quickActionDisposition(for: route.action) ?? .dropNavigationOnly
+            },
+            present: { [weak self] claim, route in
+                guard let self else { return false }
+                let pending = PendingQuickAction(id: route.id, action: route.action, claim: claim)
+                guard self.quickActionDelivery.begin(pending.deliveryIdentity) else { return false }
+                self.pendingQuickAction = pending
+                return true
+            },
+            terminal: { [weak self] _ in
+                self?.lastError = "This shortcut request is no longer available. No lock was changed."
+            }
+        )
+    }
+
+    private func quickActionDisposition(for action: QuickActionRoute.Action) -> QuickActionDeliveryDisposition {
+        switch action {
+        case .focus:
+            guard isAuthorized else {
+                lastError = "Screen Time access is unavailable for this focus shortcut. No lock was changed."
+                return .dropNavigationOnly
+            }
+            guard isConfigured, store != nil, storageError == nil else {
+                lastError = "Focus shortcuts are unavailable until Lockbox is configured. No lock was changed."
+                return .dropNavigationOnly
+            }
+            guard !hasActiveLock else {
+                lastError = "A lock is already active. The shortcut cannot change the active lock."
+                return .dropNavigationOnly
+            }
+            return .present
+        case .status, .recovery:
+            // These destinations remain useful for explaining unavailable
+            // authorization/configuration; they never mutate enforcement.
+            return .present
+        }
     }
 
     func refreshAuthorization() {
