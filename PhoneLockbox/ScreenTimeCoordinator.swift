@@ -35,6 +35,10 @@ final class ScreenTimeCoordinator: ObservableObject {
     private static let legacyLiveActivityPreferenceVersionKey = ambientDefaultsPrefix + "live-activity-preference-version"
     private static let legacyLiveActivityDiagnosticsKey = "phone-lockbox.ambient.live-activity-termination-diagnostics"
     private static let legacyLiveActivityDiagnosticsLockFile = "phone-lockbox-ambient-diagnostics.lock"
+    /// This value contains only SafetyAssistantAcknowledgements' checklist
+    /// identifiers and schema version. It deliberately never shares the
+    /// configuration blob or FamilyControls selection data.
+    private static let safetyAssistantAcknowledgementsKey = "phone-lockbox.safety-assistant-acknowledgements"
 
     @Published private(set) var authorizationStatus: AuthorizationStatus = .notDetermined
     @Published private(set) var selection: FamilyActivitySelection
@@ -54,6 +58,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var ambientError: String?
     @Published private(set) var pendingWindDownNotificationCount = 0
     @Published private(set) var windDownAuthorizationStatus = "Not requested"
+    @Published private(set) var safetyAssistantAcknowledgements = SafetyAssistantAcknowledgements()
 
     private let activityCenter = DeviceActivityCenter()
     private let clock: () -> Date
@@ -73,6 +78,49 @@ final class ScreenTimeCoordinator: ObservableObject {
 
     var selectedItemCount: Int { selection.applicationTokens.count + selection.categoryTokens.count + selection.webDomainTokens.count }
     var canApplySelection: Bool { (try? policyPlan(for: selection, mode: mode)) != nil }
+
+    /// A privacy-minimal input for the local Safety Assistant. Only the saved
+    /// mode and opaque selection counts leave this coordinator; token values
+    /// and app identifiers never enter the assistant model or its storage.
+    var safetyAssistantAudit: SafetyAssistantAudit {
+        let configuration = document.configuration
+        let registration: SafetyAssistantRegistrationState
+        if hasOSRegistration && !scheduleIsRegistered {
+            registration = .mismatch
+        } else if scheduleIsRegistered && document.recurringEnabledIntent {
+            registration = .matching
+        } else {
+            registration = .notRegistered
+        }
+        return SafetyAssistantAudit.evaluate(
+            input: SafetyAssistantAuditInput(
+                mode: configuration?.mode,
+                selection: configuration?.selectionSummary,
+                authorization: isAuthorized ? .authorized : .unavailable,
+                registration: registration
+            ),
+            acknowledgements: safetyAssistantAcknowledgements
+        )
+    }
+
+    func setSafetyAssistantChecklistAcknowledged(_ item: SafetyAssistantChecklistItem, acknowledged: Bool) {
+        var updated = safetyAssistantAcknowledgements
+        if acknowledged { updated.checklist.insert(item) } else { updated.checklist.remove(item) }
+        persistSafetyAssistantAcknowledgements(updated)
+    }
+
+    func setSafetyAssistantTestStepAcknowledged(_ step: SafetyAssistantTestStep, acknowledged: Bool) {
+        var updated = safetyAssistantAcknowledgements
+        if acknowledged { updated.testSteps.insert(step) } else { updated.testSteps.remove(step) }
+        persistSafetyAssistantAcknowledgements(updated)
+    }
+
+    private func persistSafetyAssistantAcknowledgements(_ value: SafetyAssistantAcknowledgements) {
+        guard (try? value.validated()) != nil,
+              let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: Self.safetyAssistantAcknowledgementsKey)
+        safetyAssistantAcknowledgements = value
+    }
     /// Drafts remain editable during a committed lock, but the save becomes a
     /// pending configuration and never mutates the active snapshot.
     var canEditDraft: Bool { isAuthorized && !testScheduleActive && storageError == nil }
@@ -638,6 +686,15 @@ final class ScreenTimeCoordinator: ObservableObject {
         windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
         let storedLead = defaults.object(forKey: Self.windDownLeadMinutesKey) as? Int ?? 30
         windDownLeadMinutes = min(max(storedLead, 1), 1_440)
+        if let data = defaults.data(forKey: Self.safetyAssistantAcknowledgementsKey),
+           let decoded = try? JSONDecoder().decode(SafetyAssistantAcknowledgements.self, from: data),
+           (try? decoded.validated()) != nil {
+            safetyAssistantAcknowledgements = decoded
+        } else {
+            // Unknown/corrupt acknowledgements are local review state only;
+            // reset the review without touching policy or recovery state.
+            safetyAssistantAcknowledgements = SafetyAssistantAcknowledgements()
+        }
         let liveActivityResolution = AmbientLiveActivityPreferenceMigration.resolve(
             encodedRecord: defaults.data(forKey: Self.liveActivityPreferenceKey),
             legacyVersion: defaults.object(forKey: Self.legacyLiveActivityPreferenceVersionKey) as? Int,

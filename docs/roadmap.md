@@ -110,7 +110,7 @@ Treat report extensions as privacy boundaries: do not assume raw usage export, a
 
 #### R7.2 Safety assistant
 
-Add a non-authoritative preflight and review assistant: essentials checklist, allow-only warnings, browser/system/critical-app test flow, authorization/enforcement status and a clear reminder that emergency access is not guaranteed by this app. It may guide or link to system settings but must not silently alter the policy or promise to test every path.
+Add a non-authoritative preflight and review assistant: essentials checklist, allow-only warnings, browser/system/critical-app test flow, authorization/enforcement status and a clear reminder that emergency access is not guaranteed by this app. The current local source candidate is documented in [safety-assistant](safety-assistant.md); it remains subject to the device and accessibility gate below. It may guide or link to system settings but must not silently alter the policy or promise to test every path.
 
 **Gate:** warnings are strict and actionable, critical-access checks are reproducible, failures do not claim safety, and accessible recovery/setup copy passes review. There is no false emergency guarantee.
 

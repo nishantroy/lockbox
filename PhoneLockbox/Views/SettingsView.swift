@@ -40,6 +40,36 @@ struct SettingsView: View {
 
             LockboxCard {
                 VStack(alignment: .leading, spacing: 12) {
+                    LockboxSectionLabel("Safety review", systemImage: "checkmark.shield")
+                    NavigationLink {
+                        SafetyAssistantView(coordinator: coordinator)
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "list.clipboard")
+                                .foregroundStyle(LockboxTheme.accent)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Review essentials and coverage")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("A local, non-authoritative checklist before stricter policies.")
+                                    .font(.footnote)
+                                    .foregroundStyle(LockboxTheme.secondary)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(LockboxTheme.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens a local checklist. It does not change restrictions or test emergency services.")
+                }
+            }
+
+            LockboxCard {
+                VStack(alignment: .leading, spacing: 12) {
                     LockboxSectionLabel("Recovery", systemImage: "arrow.uturn.backward.circle")
                     LockboxValueRow(label: "Wait", value: "15 minutes")
                     Text("Recovery always requires this fixed wait and an explicit confirmation. Waiting alone never unlocks the phone. It does not disable future bedtime sessions.")
