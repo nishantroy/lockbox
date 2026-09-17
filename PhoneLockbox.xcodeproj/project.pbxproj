@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0C189D58217CC2903569661C /* TaskUnlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */; };
 		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
 		17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */; };
@@ -155,6 +156,7 @@
 		E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeCoordinator.swift; sourceTree = "<group>"; };
 		E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldConfiguration.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicyTests.swift; sourceTree = "<group>"; };
+		EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskUnlock.swift; sourceTree = "<group>"; };
 		EEBD10CE146B8CFE69F289B7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = DeviceActivityMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -280,6 +282,7 @@
 			isa = PBXGroup;
 			children = (
 				4937C609973AA395FE5785C2 /* LockboxPolicy.swift */,
+				EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */,
 			);
 			path = Policy;
 			sourceTree = "<group>";
@@ -569,6 +572,7 @@
 				59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */,
 				AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */,
 				809D1DF12F48C38A7E2A739F /* SettingsView.swift in Sources */,
+				0C189D58217CC2903569661C /* TaskUnlock.swift in Sources */,
 				5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
