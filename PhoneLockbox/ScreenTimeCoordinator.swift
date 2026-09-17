@@ -723,11 +723,13 @@ final class ScreenTimeCoordinator: ObservableObject {
         return action
     }
 
-    /// Imports the App Intent handoff only at the app boundary. Parsing remains
-    /// fail-closed, and consuming this URL does not invoke any runtime action.
+    /// Imports one App Intent handoff only at the app boundary. Claiming and
+    /// acknowledging are separate durable operations so a host crash retries
+    /// navigation; neither operation invokes an enforcement action.
     func processPendingQuickActionRoute() {
-        guard let url = QuickActionPendingRouteStore.take() else { return }
-        handleQuickActionURL(url)
+        guard let claim = QuickActionPendingRouteStore.claim() else { return }
+        handleQuickActionURL(claim.url)
+        _ = QuickActionPendingRouteStore.acknowledge(claim)
     }
 
     func refreshAuthorization() {
