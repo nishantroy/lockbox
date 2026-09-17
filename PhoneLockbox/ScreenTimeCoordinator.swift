@@ -27,8 +27,12 @@ final class ScreenTimeCoordinator: ObservableObject {
     private static let ambientDefaultsPrefix = "phone-lockbox.ambient."
     private static let windDownEnabledKey = ambientDefaultsPrefix + "wind-down-enabled"
     private static let windDownLeadMinutesKey = ambientDefaultsPrefix + "wind-down-lead-minutes"
-    private static let liveActivityEnabledKey = ambientDefaultsPrefix + "live-activity-enabled"
-    private static let liveActivityPreferenceVersionKey = ambientDefaultsPrefix + "live-activity-preference-version"
+    /// One encoded value is the commit boundary for this preference. The
+    /// former enabled/version keys remain named so they can be removed only
+    /// after a complete record has been written.
+    private static let liveActivityPreferenceKey = ambientDefaultsPrefix + "live-activity-preference"
+    private static let legacyLiveActivityEnabledKey = ambientDefaultsPrefix + "live-activity-enabled"
+    private static let legacyLiveActivityPreferenceVersionKey = ambientDefaultsPrefix + "live-activity-preference-version"
     private static let legacyLiveActivityDiagnosticsKey = "phone-lockbox.ambient.live-activity-termination-diagnostics"
     private static let legacyLiveActivityDiagnosticsLockFile = "phone-lockbox-ambient-diagnostics.lock"
 
@@ -634,13 +638,22 @@ final class ScreenTimeCoordinator: ObservableObject {
         windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
         let storedLead = defaults.object(forKey: Self.windDownLeadMinutesKey) as? Int ?? 30
         windDownLeadMinutes = min(max(storedLead, 1), 1_440)
-        let liveActivityPreference = AmbientLiveActivityPreferenceMigration.migrate(
-            storedVersion: defaults.object(forKey: Self.liveActivityPreferenceVersionKey) as? Int,
-            storedEnabled: defaults.object(forKey: Self.liveActivityEnabledKey) as? Bool
+        let liveActivityResolution = AmbientLiveActivityPreferenceMigration.resolve(
+            encodedRecord: defaults.data(forKey: Self.liveActivityPreferenceKey),
+            legacyVersion: defaults.object(forKey: Self.legacyLiveActivityPreferenceVersionKey) as? Int,
+            legacyEnabled: defaults.object(forKey: Self.legacyLiveActivityEnabledKey) as? Bool
         )
-        liveActivityEnabled = liveActivityPreference.enabled
-        defaults.set(liveActivityPreference.version, forKey: Self.liveActivityPreferenceVersionKey)
-        defaults.set(liveActivityPreference.enabled, forKey: Self.liveActivityEnabledKey)
+        liveActivityEnabled = liveActivityResolution.preference.enabled
+        if liveActivityResolution.shouldPersist {
+            // UserDefaults has no transaction spanning multiple keys. Write
+            // the complete safe record first; only then is legacy cleanup safe.
+            if let data = try? liveActivityResolution.preference.encoded() {
+                defaults.set(data, forKey: Self.liveActivityPreferenceKey)
+                Self.removeLegacyLiveActivityPreferenceKeys(from: defaults)
+            }
+        } else {
+            Self.removeLegacyLiveActivityPreferenceKeys(from: defaults)
+        }
         Self.removeLegacyLiveActivityDiagnostics()
         var loadedStore: SharedRuntimeStore?
         var loadedDocument = RuntimeStoreDocument()
@@ -729,9 +742,16 @@ final class ScreenTimeCoordinator: ObservableObject {
     }
 
     func setLiveActivityEnabled(_ enabled: Bool) {
+        let preference = AmbientLiveActivityPreference(enabled: enabled)
+        guard let data = try? preference.encoded() else {
+            ambientError = "Live Activity preference could not be saved."
+            return
+        }
+        // This single UserDefaults value is the durable commit point for the
+        // explicit choice. Legacy keys are removed only after it is complete.
+        UserDefaults.standard.set(data, forKey: Self.liveActivityPreferenceKey)
+        Self.removeLegacyLiveActivityPreferenceKeys(from: .standard)
         liveActivityEnabled = enabled
-        UserDefaults.standard.set(AmbientLiveActivityPreference.currentVersion, forKey: Self.liveActivityPreferenceVersionKey)
-        UserDefaults.standard.set(enabled, forKey: Self.liveActivityEnabledKey)
         scheduleLiveActivityReconciliation()
     }
 
@@ -1698,6 +1718,11 @@ final class ScreenTimeCoordinator: ObservableObject {
         if !migrationSafe { document.legacyRegistrationNeedsReview = true }
         document.record(RuntimeDiagnostic(operation: .legacyMigration, detail: migrationSafe ? (document.legacyRegistrationNeedsReview ? "Legacy settings migrated; registration owner requires explicit cleanup." : "Legacy draft settings migrated.") : "Legacy settings retained for explicit cleanup; invalid values were not used for enforcement."), succeeded: migrationSafe)
         return document
+    }
+
+    private static func removeLegacyLiveActivityPreferenceKeys(from defaults: UserDefaults) {
+        defaults.removeObject(forKey: legacyLiveActivityEnabledKey)
+        defaults.removeObject(forKey: legacyLiveActivityPreferenceVersionKey)
     }
 
     private static func removeLegacyLiveActivityDiagnostics() {
