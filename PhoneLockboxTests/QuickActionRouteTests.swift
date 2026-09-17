@@ -308,6 +308,19 @@ final class QuickActionPendingRouteStoreTests: XCTestCase {
         XCTAssertEqual(try store.claim(now: now.addingTimeInterval(60))?.url, secondURL)
     }
 
+    func testClaimResultDistinguishesEmptyAndLeasedHeadDeadline() throws {
+        let store = try makeStore()
+        XCTAssertEqual(try store.claimResult(now: now), .empty)
+        let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        XCTAssertTrue(store.enqueue(url, now: now))
+        guard case .claimed(let claimed) = try store.claimResult(now: now) else {
+            return XCTFail("Expected a newly claimed route")
+        }
+        let expectedDeadline = now.addingTimeInterval(60)
+        XCTAssertEqual(claimed.leaseUntil, expectedDeadline)
+        XCTAssertEqual(try store.claimResult(now: now.addingTimeInterval(30)), .leased(until: expectedDeadline))
+    }
+
 #if canImport(Darwin) || canImport(Glibc)
     func testDirectSymlinkIsRejectedWithoutFollowingItsTarget() throws {
         let directory = try temporaryDirectory()
@@ -461,5 +474,231 @@ final class QuickActionPendingRouteStoreTests: XCTestCase {
             .appendingPathComponent("phone-lockbox-quick-actions-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+}
+
+@MainActor
+final class QuickActionDeliveryBrokerTests: XCTestCase {
+    private let now = Date(timeIntervalSinceReferenceDate: 2_000_000)
+
+    func testLeasedHeadSchedulesExactPreExpiryRetry() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let route = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let claim = try makeClaim(for: route, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [
+            .leased(until: claim.leaseUntil),
+            .claimed(claim)
+        ])
+        var current = now.addingTimeInterval(30)
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { current }, scheduler: scheduler)
+        var presented: [QuickActionPendingRouteStore.Claim] = []
+
+        broker.process(
+            now: current,
+            isBusy: { false },
+            disposition: { _ in .present },
+            present: { claim, _ in presented.append(claim); return true }
+        )
+
+        XCTAssertEqual(scheduler.scheduledDelays, [30])
+        current = claim.leaseUntil
+        scheduler.fireNext()
+        XCTAssertEqual(presented, [claim])
+    }
+
+    func testExpiredHeadDropsAndImmediatelyProgressesToRecovery() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let expiredURL = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now.addingTimeInterval(-301)))
+        let recoveryURL = try XCTUnwrap(QuickActionRoute.url(for: .recovery, now: now))
+        let expiredClaim = try makeClaim(for: expiredURL, leaseUntil: now.addingTimeInterval(60), routeNow: now.addingTimeInterval(-301))
+        let recoveryClaim = try makeClaim(for: recoveryURL, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [.claimed(expiredClaim), .claimed(recoveryClaim)])
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { self.now }, scheduler: scheduler)
+        var presented: [URL] = []
+
+        broker.process(
+            now: now,
+            isBusy: { false },
+            disposition: { _ in .present },
+            present: { claim, _ in presented.append(claim.url); return true }
+        )
+
+        XCTAssertEqual(queue.acknowledged, [expiredClaim])
+        XCTAssertEqual(presented, [recoveryURL])
+    }
+
+    func testTerminalFocusDropImmediatelyProgressesToStatus() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let focusURL = try XCTUnwrap(QuickActionRoute.url(for: .focus(.thirtyMinutes), now: now))
+        let statusURL = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let focusClaim = try makeClaim(for: focusURL, leaseUntil: now.addingTimeInterval(60))
+        let statusClaim = try makeClaim(for: statusURL, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [.claimed(focusClaim), .claimed(statusClaim)])
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { self.now }, scheduler: scheduler)
+        var presented: [URL] = []
+
+        broker.process(
+            now: now,
+            isBusy: { false },
+            disposition: { route in route.action == .status ? .present : .dropNavigationOnly },
+            present: { claim, _ in presented.append(claim.url); return true }
+        )
+
+        XCTAssertEqual(queue.acknowledged, [focusClaim])
+        XCTAssertEqual(presented, [statusURL])
+        XCTAssertTrue(scheduler.scheduledDelays.isEmpty == false)
+    }
+
+    func testTerminalAcknowledgementFailureRetriesAtLeaseDeadline() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let route = try XCTUnwrap(QuickActionRoute.url(for: .focus(.oneHour), now: now))
+        let claim = try makeClaim(for: route, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [.claimed(claim), .claimed(claim)], acknowledgementResults: [false, true])
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { self.now }, scheduler: scheduler)
+
+        broker.process(
+            now: now,
+            isBusy: { false },
+            disposition: { _ in .dropNavigationOnly },
+            present: { _, _ in XCTFail("terminal route must not present"); return false }
+        )
+
+        XCTAssertEqual(scheduler.scheduledDelays, [60])
+        scheduler.fireNext()
+        XCTAssertEqual(queue.acknowledged, [claim, claim])
+        XCTAssertTrue(scheduler.scheduledDelays.last! >= 60)
+    }
+
+    func testStaleRetryCallbackCannotReenterAfterDeadlineReplacement() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let route = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let firstDeadline = now.addingTimeInterval(60)
+        let secondDeadline = now.addingTimeInterval(90)
+        let queue = TestQuickActionRouteQueue(results: [
+            .leased(until: firstDeadline),
+            .leased(until: secondDeadline),
+            .empty
+        ])
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { self.now }, scheduler: scheduler)
+
+        broker.process(now: now, isBusy: { false }, disposition: { _ in .present }, present: { _, _ in
+            XCTFail("stale callback must not present")
+            return false
+        })
+        broker.process(now: now, isBusy: { false }, disposition: { _ in .present }, present: { _, _ in
+            XCTFail("stale callback must not present")
+            return false
+        })
+
+        scheduler.fire(index: 0)
+        XCTAssertEqual(scheduler.firedOperations, 0)
+        scheduler.fire(index: 1)
+        XCTAssertEqual(scheduler.firedOperations, 1)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 2)
+    }
+
+    func testEmptyQueueDoesNotScheduleOrSpin() {
+        let scheduler = TestQuickActionRetryScheduler()
+        let queue = TestQuickActionRouteQueue(results: [.empty])
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { self.now }, scheduler: scheduler)
+
+        broker.process(now: now, isBusy: { false }, disposition: { _ in .present }, present: { _, _ in
+            XCTFail("empty queue must not present")
+            return false
+        })
+
+        XCTAssertTrue(scheduler.scheduledDelays.isEmpty)
+        XCTAssertEqual(queue.claimCount, 1)
+    }
+
+    func testViableAcknowledgementFailureKeepsRetryWakeup() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let route = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let claim = try makeClaim(for: route, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [.claimed(claim)], acknowledgementResults: [false])
+        let broker = QuickActionDeliveryBroker(queue: queue, clock: { self.now }, scheduler: scheduler)
+        broker.process(now: now, isBusy: { false }, disposition: { _ in .present }, present: { _, _ in true })
+
+        XCTAssertFalse(broker.acknowledge(claim))
+        XCTAssertEqual(scheduler.scheduledDelays, [60])
+    }
+
+    private func makeClaim(
+        for url: URL,
+        leaseUntil: Date,
+        routeNow: Date? = nil
+    ) throws -> QuickActionPendingRouteStore.Claim {
+        let route = try XCTUnwrap(QuickActionRoute.parse(url, now: routeNow ?? now))
+        return QuickActionPendingRouteStore.Claim(
+            id: route.id,
+            token: "123e4567-e89b-12d3-a456-426614174000",
+            url: url,
+            leaseUntil: leaseUntil
+        )
+    }
+}
+
+private final class TestQuickActionRouteQueue: QuickActionRouteQueue {
+    private var results: [QuickActionPendingRouteStore.ClaimResult]
+    private var acknowledgementResults: [Bool]
+    private(set) var acknowledged: [QuickActionPendingRouteStore.Claim] = []
+    private(set) var claimCount = 0
+
+    init(
+        results: [QuickActionPendingRouteStore.ClaimResult],
+        acknowledgementResults: [Bool] = []
+    ) {
+        self.results = results
+        self.acknowledgementResults = acknowledgementResults
+    }
+
+    func claimResult(now: Date) throws -> QuickActionPendingRouteStore.ClaimResult {
+        claimCount += 1
+        guard !results.isEmpty else { return .empty }
+        return results.removeFirst()
+    }
+
+    func acknowledge(_ claim: QuickActionPendingRouteStore.Claim) throws -> Bool {
+        acknowledged.append(claim)
+        guard !acknowledgementResults.isEmpty else { return true }
+        return acknowledgementResults.removeFirst()
+    }
+}
+
+@MainActor
+private final class TestQuickActionRetryScheduler: QuickActionRetryScheduler {
+    private struct Operation {
+        let id: UUID
+        let action: () -> Void
+        var cancelled = false
+    }
+
+    private var operations: [Operation] = []
+    private(set) var scheduledDelays: [TimeInterval] = []
+    private(set) var firedOperations = 0
+
+    @discardableResult
+    func schedule(after delay: TimeInterval, operation: @escaping () -> Void) -> UUID {
+        let id = UUID()
+        operations.append(Operation(id: id, action: operation))
+        scheduledDelays.append(delay)
+        return id
+    }
+
+    func cancel(_ identifier: UUID) {
+        guard let index = operations.firstIndex(where: { $0.id == identifier }) else { return }
+        operations[index].cancelled = true
+    }
+
+    func fireNext() {
+        guard let index = operations.firstIndex(where: { !$0.cancelled }) else { return }
+        fire(index: index)
+    }
+
+    func fire(index: Int) {
+        let operation = operations[index]
+        guard !operation.cancelled else { return }
+        firedOperations += 1
+        operation.action()
     }
 }

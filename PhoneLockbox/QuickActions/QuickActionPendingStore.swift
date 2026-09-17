@@ -21,6 +21,26 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         let id: String
         let token: String
         let url: URL
+        /// The exact wall-clock instant at which this claim can be reclaimed.
+        /// Keeping this on the claim lets terminal acknowledgement failures
+        /// schedule a retry without guessing or spinning.
+        let leaseUntil: Date
+    }
+
+    enum ClaimResult: Equatable, Sendable {
+        case empty
+        case leased(until: Date)
+        case claimed(Claim)
+
+        /// The next instant at which the head may be claimed. `nil` means the
+        /// queue is empty; a caller must not treat that as a leased head.
+        var nextClaimOpportunity: Date? {
+            switch self {
+            case .empty: return nil
+            case .leased(let until): return until
+            case .claimed(let claim): return claim.leaseUntil
+            }
+        }
     }
 
     private struct Entry: Codable, Equatable {
@@ -198,27 +218,35 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         }
     }
 
+    static func appGroupStore() -> Self? {
+        guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
+            return nil
+        }
+        return try? Self(directoryURL: directory)
+    }
+
     static func enqueue(_ action: QuickActionRoute.Action, now: Date = Date()) -> Bool {
-        guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier),
-              let store = try? Self(directoryURL: directory) else { return false }
+        guard let store = appGroupStore() else { return false }
         return store.enqueue(action, now: now)
     }
 
     static func enqueue(_ url: URL, now: Date = Date()) -> Bool {
-        guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier),
-              let store = try? Self(directoryURL: directory) else { return false }
+        guard let store = appGroupStore() else { return false }
         return store.enqueue(url, now: now)
     }
 
     static func claim(now: Date = Date()) -> Claim? {
-        guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier),
-              let store = try? Self(directoryURL: directory) else { return nil }
+        guard let store = appGroupStore() else { return nil }
         return try? store.claim(now: now)
     }
 
+    static func claimResult(now: Date = Date()) -> ClaimResult? {
+        guard let store = appGroupStore() else { return nil }
+        return try? store.claimResult(now: now)
+    }
+
     static func acknowledge(_ claim: Claim) -> Bool {
-        guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier),
-              let store = try? Self(directoryURL: directory) else { return false }
+        guard let store = appGroupStore() else { return false }
         return (try? store.acknowledge(claim)) == true
     }
 
@@ -257,21 +285,41 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
     /// Queue order is strict FIFO: an unexpired lease on the head blocks later
     /// entries rather than allowing a later route to overtake it.
     func claim(now: Date = Date()) throws -> Claim? {
+        switch try claimResult(now: now) {
+        case .empty, .leased:
+            return nil
+        case .claimed(let claim):
+            return claim
+        }
+    }
+
+    /// Returns the queue's exact claim state. An empty queue is distinct from
+    /// a leased FIFO head so a coordinator can sleep until the lease deadline
+    /// instead of polling or spinning.
+    func claimResult(now: Date = Date()) throws -> ClaimResult {
         guard let seconds = Self.integerSeconds(now) else { throw QueueError.invalidClock }
         return try withExclusiveLock {
             var document = try read()
             let before = document.entries
             prune(&document, now: seconds)
             if document.entries != before { try write(document) }
-            guard let head = document.entries.first else { return nil }
-            if let until = head.claimUntil, until > seconds { return nil }
+            guard let head = document.entries.first else { return .empty }
+            if let until = head.claimUntil, until > seconds {
+                return .leased(until: Date(timeIntervalSinceReferenceDate: Double(until)))
+            }
             let token = UUID().uuidString.lowercased()
             guard !seconds.addingReportingOverflow(Self.claimLease).overflow else { throw QueueError.invalidClock }
+            let leaseUntil = seconds.addingReportingOverflow(Self.claimLease).partialValue
             document.entries[0].claimToken = token
-            document.entries[0].claimUntil = seconds.addingReportingOverflow(Self.claimLease).partialValue
+            document.entries[0].claimUntil = leaseUntil
             try write(document)
             guard let url = URL(string: document.entries[0].url) else { throw QueueError.corrupt }
-            return Claim(id: document.entries[0].id, token: token, url: url)
+            return .claimed(Claim(
+                id: document.entries[0].id,
+                token: token,
+                url: url,
+                leaseUntil: Date(timeIntervalSinceReferenceDate: Double(leaseUntil))
+            ))
         }
     }
 

@@ -74,6 +74,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// succeeds; an unrelated successful UI action must not erase it.
     private var reconciliationError: String?
     private var quickActionDelivery = QuickActionDeliveryGate()
+    private let quickActionBroker: QuickActionDeliveryBroker
 
     /// The durable route identity and claim stay attached to a delivery from
     /// queue claim through UI dismissal. Keeping both values here prevents a
@@ -650,8 +651,17 @@ final class ScreenTimeCoordinator: ObservableObject {
         return "Not registered"
     }
 
-    init(clock: @escaping () -> Date = { Date() }) {
+    init(
+        clock: @escaping () -> Date = { Date() },
+        quickActionQueue: (any QuickActionRouteQueue)? = nil,
+        quickActionScheduler: QuickActionRetryScheduler? = nil
+    ) {
         self.clock = clock
+        self.quickActionBroker = QuickActionDeliveryBroker(
+            queue: quickActionQueue ?? QuickActionPendingRouteStore.appGroupStore(),
+            clock: clock,
+            scheduler: quickActionScheduler ?? DispatchQuickActionRetryScheduler()
+        )
         let defaults = UserDefaults.standard
         pendingQuickAction = nil
         windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
@@ -749,7 +759,10 @@ final class ScreenTimeCoordinator: ObservableObject {
     func settlePresentedQuickAction(_ pending: PendingQuickAction) -> Bool {
         guard pendingQuickAction == pending,
               quickActionDelivery.accepts(pending.deliveryIdentity) else { return false }
-        let acknowledged = QuickActionPendingRouteStore.acknowledge(pending.claim)
+        // A failed acknowledgement is not a reason to retain a stale UI
+        // identity. The broker schedules the exact claim lease deadline, while
+        // this identity still settles locally and cannot block later routes.
+        let acknowledged = quickActionBroker.acknowledge(pending.claim)
         guard quickActionDelivery.settle(pending.deliveryIdentity) else { return false }
         pendingQuickAction = nil
         processPendingQuickActionRoute()
@@ -759,33 +772,50 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// Imports one App Intent handoff only at the app boundary. Claiming and
     /// acknowledging are separate durable operations so a host crash retries
     /// navigation; neither operation invokes an enforcement action.
-    func processPendingQuickActionRoute(now: Date = Date()) {
-        guard pendingQuickAction == nil,
-              quickActionDelivery.activeIdentity == nil,
-              let claim = QuickActionPendingRouteStore.claim(now: now) else { return }
-        guard let route = QuickActionRoute.parse(claim.url, now: now) else {
-            // Leave the claim unacknowledged. It will be retried until the
-            // bounded route/queue age removes it; no invalid input can mutate
-            // enforcement or recovery state.
-            return
-        }
-        guard canPresentQuickAction(route.action) else { return }
-        let pending = PendingQuickAction(id: route.id, action: route.action, claim: claim)
-        guard quickActionDelivery.begin(pending.deliveryIdentity) else { return }
-        pendingQuickAction = pending
+    func processPendingQuickActionRoute(now: Date? = nil) {
+        quickActionBroker.process(
+            now: now ?? currentDate(),
+            isBusy: { [weak self] in
+                guard let self else { return true }
+                return self.pendingQuickAction != nil || self.quickActionDelivery.activeIdentity != nil
+            },
+            disposition: { [weak self] route in
+                self?.quickActionDisposition(for: route.action) ?? .dropNavigationOnly
+            },
+            present: { [weak self] claim, route in
+                guard let self else { return false }
+                let pending = PendingQuickAction(id: route.id, action: route.action, claim: claim)
+                guard self.quickActionDelivery.begin(pending.deliveryIdentity) else { return false }
+                self.pendingQuickAction = pending
+                return true
+            },
+            terminal: { [weak self] _ in
+                self?.lastError = "This shortcut request is no longer available. No lock was changed."
+            }
+        )
     }
 
-    private func canPresentQuickAction(_ action: QuickActionRoute.Action) -> Bool {
+    private func quickActionDisposition(for action: QuickActionRoute.Action) -> QuickActionDeliveryDisposition {
         switch action {
         case .focus:
+            guard isAuthorized else {
+                lastError = "Screen Time access is unavailable for this focus shortcut. No lock was changed."
+                return .dropNavigationOnly
+            }
+            guard isConfigured, store != nil, storageError == nil else {
+                lastError = "Focus shortcuts are unavailable until Lockbox is configured. No lock was changed."
+                return .dropNavigationOnly
+            }
             guard !hasActiveLock else {
                 lastError = "A lock is already active. The shortcut cannot change the active lock."
-                return false
+                return .dropNavigationOnly
             }
+            return .present
         case .status, .recovery:
-            break
+            // These destinations remain useful for explaining unavailable
+            // authorization/configuration; they never mutate enforcement.
+            return .present
         }
-        return true
     }
 
     func refreshAuthorization() {
