@@ -1,6 +1,6 @@
 # Phone Lockbox — execution roadmap
 
-Updated: 2026-09-16. **Current milestone: build-14 focused QA and the R4 reliability gate.** R1–R3 source integration is complete and has automated coverage; physical-device acceptance is still required for the remaining lifecycle, accessibility and seven-night evidence. Build 14 is an installed candidate, not a new device pass: it installed successfully after a retry, but automatic launch was denied because the iPhone was locked, and no post-install migration or custom-end focused QA has run. Its Live Activity correction makes presentation opt-in and default-off. Build-13 device evidence still records natural enforcement end and recurrence, while a host-created Live Activity stayed stale until foreground cleanup; dependable host-closed ending requires unprovisioned ActivityKit push infrastructure. See [status and QA evidence](status-and-qa.md), [R2/R3 checklist](r2-r3-qa.md), and [R1 progress](r1-progress.md).
+Updated: 2026-09-17. **Current milestone: build-14 focused QA and the R4 reliability gate.** R1–R3 source integration is complete and has automated coverage; physical-device acceptance is still required for the remaining lifecycle, accessibility and seven-night evidence. Independently reviewed source foundations for Safety Assistant, weekday/weekend scheduling, confirmation-only Quick Actions and task commitments are now integrated after build 14, but this is not a new installed candidate or device pass. The weekend and task cores remain disconnected from production enforcement. Build 14 is an installed candidate, not a new device pass: it installed successfully after a retry, but automatic launch was denied because the iPhone was locked, and no post-install migration or custom-end focused QA has run. Its Live Activity correction makes presentation opt-in and default-off. Build-13 device evidence still records natural enforcement end and recurrence, while a host-created Live Activity stayed stale until foreground cleanup; dependable host-closed ending requires unprovisioned ActivityKit push infrastructure. See [status and QA evidence](status-and-qa.md), [R2/R3 checklist](r2-r3-qa.md), and [R1 progress](r1-progress.md).
 
 This document is the authoritative execution sequence. Product specifications describe intended behavior; they do not certify implementation or device reliability.
 
@@ -14,7 +14,7 @@ This document is the authoritative execution sequence. Product specifications de
 
 ## Current product boundaries
 
-- Native SwiftUI iPhone app using individual Screen Time authorization, local configuration and one daily window until the approved weekend slice is implemented.
+- Native SwiftUI iPhone app using individual Screen Time authorization, local configuration and one production daily window. A reviewed weekday/weekend pure core is compiled in source but is not connected to App Group storage, DeviceActivity registration or enforcement.
 - Both **Block selected** and **Allow only selected** remain supported through Apple's selection model. Category expansion is not a promise of universal coverage; critical apps, browsers and system paths require device testing.
 - Active sessions have finite, frozen ends and policy snapshots. Relaxing edits, disabling recurrence and recovery affect future work or the current committed occurrence according to the tested lifecycle rules; they never become an instant bypass.
 - Recovery is delayed and explicit. Natural end wins, network delivery is never required for safety or recovery, and developer cleanup remains visibly separate until the reliability gate is closed.
@@ -110,7 +110,7 @@ Treat report extensions as privacy boundaries: do not assume raw usage export, a
 
 #### R7.2 Safety assistant
 
-Add a non-authoritative preflight and review assistant: essentials checklist, allow-only warnings, browser/system/critical-app test flow, authorization/enforcement status and a clear reminder that emergency access is not guaranteed by this app. The current local source candidate is documented in [safety-assistant](safety-assistant.md); it remains subject to the device and accessibility gate below. It may guide or link to system settings but must not silently alter the policy or promise to test every path.
+Add a non-authoritative preflight and review assistant: essentials checklist, allow-only warnings, browser/system/critical-app test flow, authorization/enforcement status and a clear reminder that emergency access is not guaranteed by this app. The reviewed local source is integrated and documented in [safety-assistant](safety-assistant.md); it remains subject to the device and accessibility gate below. It may guide or link to system settings but must not silently alter the policy or promise to test every path.
 
 **Gate:** warnings are strict and actionable, critical-access checks are reproducible, failures do not claim safety, and accessible recovery/setup copy passes review. There is no false emergency guarantee.
 
@@ -122,7 +122,7 @@ Provide a supportive local review distinct from the R6 shared summary. It may sh
 
 ### R8 — Bounded schedule expansion: weekend first
 
-Implement the first multi-schedule slice as exactly two named slots: a weekday rule and a weekend rule. Each rule has its own days, local start/end and policy selection. Freeze the active occurrence's resolved end and policy snapshot. Reject overlapping rules up front rather than inventing precedence; reject equal/invalid boundaries with clear feedback.
+The reviewed pure core now models the first multi-schedule slice as exactly two named slots: a weekday rule and a weekend rule. It remains deliberately disconnected from persistence, registration and enforcement until the integration gates below are implemented. Each rule has its own days, local start/end and policy selection. Freeze the active occurrence's resolved end and policy snapshot. Reject overlapping rules up front rather than inventing precedence; reject equal/invalid boundaries with clear feedback.
 
 This is not a general exception system. Do not add vacation, skip, snooze, ad-hoc exceptions or arbitrary overrides. After device evidence for the weekend slice, a later phase may add different named rules for different times of day. Same-mode composition or priority is a separate design and test decision, not an implicit result of adding another rule.
 
@@ -130,7 +130,7 @@ This is not a general exception system. Do not add vacation, skip, snooze, ad-ho
 
 ### R9 — Shortcuts, App Intents and quick actions
 
-Expose only finite, confirmed actions: start a 30-minute session, start a one-hour session, start a named rule, show status, and open recovery. Parameters must be validated against the same persisted session authority and auth/enforcement truth shown in the app. The action must never create an indefinite lock, provide an instant recovery bypass, silently change active rules or claim enforcement merely because an intent was accepted.
+Reviewed navigation-only source now exposes confirmation routes for 30-minute focus, one-hour focus, status and recovery; named-rule launch remains deferred. The durable App Group handoff, canonical URLs and lease retry logic have source coverage, but provisioned-device Siri/Shortcuts, Data Protection, reboot and independent-process gates remain open. These routes never mutate enforcement or release recovery without the existing UI flows. Parameters must be validated against the same persisted session authority and auth/enforcement truth shown in the app. The action must never create an indefinite lock, provide an instant recovery bypass, silently change active rules or claim enforcement merely because an intent was accepted.
 
 **Gate:** duplicate invocation is idempotent, confirmation and parameter safety are clear in Shortcuts and Siri surfaces, unavailable authorization is truthful, active-session rules remain frozen, and accessibility/voice feedback is understandable.
 
@@ -138,7 +138,7 @@ Expose only finite, confirmed actions: start a 30-minute session, start a one-ho
 
 First complete a task-provider feasibility, abuse, privacy and accessibility review. These are experiments, not medical tools and not anti-cheat claims. The entire task feature is opt-in and can be disabled outside an active commitment; disabling it affects future sessions only.
 
-The shared framework models a task as an **early-release condition** for a separate finite distraction-only or task-gated session. At session start, freeze the task, cutoff, policy and exact session ID. A successful task can make release eligible, but the release remains bounded by the session's delayed recovery/confirmation and any exact-session friend approval. Every session has an immutable absolute safety cutoff enforced by the OS-managed finite end. A task can never extend a session, change its policy, gate critical essentials, or create a second completion; completion is idempotent for that exact session. Friend permissions never expose task steps, photos or HealthKit data.
+The integrated, reviewed pure framework models a task as an **early-release condition** for a separate finite distraction-only or task-gated session. It has no runtime persistence, provider, UI, HealthKit, camera, friend-authority or Managed Settings connection. At session start, freeze the task, cutoff, policy and exact session ID. A successful task can make release eligible, but the release remains bounded by the session's delayed recovery/confirmation and any exact-session friend approval. Every session has an immutable absolute safety cutoff enforced by the OS-managed finite end. A task can never extend a session, change its policy, gate critical essentials, or create a second completion; completion is idempotent for that exact session. Friend permissions never expose task steps, photos or HealthKit data.
 
 Initial feasibility candidates:
 
@@ -170,7 +170,7 @@ ActivityKit remains optional and default-off until production infrastructure can
 
 ## Decision log and owner decisions still open
 
-The roadmap does not choose unresolved infrastructure or policy details. Owner decisions are required before the relevant gate: hosting/provider and deployment region for R5, retention/deletion periods, exact notification copy and quiet hours, future friend quorum beyond one-of-N, the default morning-step target and absolute cutoff after provider feasibility, supported report metrics after the DeviceActivity spike, and whether same-mode rule composition/priority is ever wanted. None of these decisions blocks R4 QA or changes the current local enforcement contract.
+The roadmap does not choose unresolved infrastructure or policy details. Owner decisions are required before the relevant gate: hosting/provider and deployment region for R5, an independently protected monotonic checkpoint/key authority for durable relay restoration, retention/deletion periods, exact notification copy and quiet hours, future friend quorum beyond one-of-N, the default morning-step target and absolute cutoff after provider feasibility, supported report metrics after the DeviceActivity spike, and whether same-mode rule composition/priority is ever wanted. None of these decisions blocks R4 QA or changes the current local enforcement contract.
 
 ## Review and delivery discipline
 

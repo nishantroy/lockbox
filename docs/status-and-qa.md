@@ -1,6 +1,19 @@
 # Status and QA evidence
 
-Updated: 2026-09-16. **Latest candidate: build 14 installed successfully after a retry; automatic launch was denied because the iPhone was locked. No post-install migration or custom-end focused QA has run.** Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat source changes as a device pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+Updated: 2026-09-17. **Latest installed candidate remains build 14: installation succeeded after a retry, automatic launch was denied because the iPhone was locked, and no post-install migration or custom-end focused QA has run.** Main now also contains later reviewed source integrations for Safety Assistant, weekday/weekend pure scheduling, confirmation-only Quick Actions and a pure task-commitment core. Those changes have not been assigned a new build number, installed or device-qualified. Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat source changes as a device pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+
+## Post-build-14 reviewed source integration — not installed
+
+Main integrates four independently reviewed slices without claiming a new device candidate:
+
+- **Safety Assistant:** privacy-minimal local checklist and acknowledgements in Settings; it does not mutate policy or guarantee emergency access.
+- **Weekend scheduling:** bounded Gregorian weekday/weekend pure core with frozen occurrences and strict persistence contracts; no App Group migration, DeviceActivity registration or production runtime adapter exists.
+- **Quick Actions:** four navigation/confirmation App Intents with a bounded, canonical, lease-based App Group handoff. Routes cannot start enforcement or release recovery directly. Siri, Data Protection, reboot/power-loss, independent-process and physical-device delivery gates remain open.
+- **Task unlocks:** pure exact-session commitment reducer with natural-cutoff precedence and local recovery authorization only; no provider, task UI, HealthKit/camera, friend capability or enforcement connection exists.
+
+Combined validation on main passed 150 SwiftPM tests, 30 AmbientKit tests, 51 iOS simulator tests with one expected Data Protection metadata skip, a signed generic-device build, strict codesign verification and the gallery contrast audit. This is source/build evidence only.
+
+Insights remains isolated despite source approval because `com.phone-lockbox.app.insights-report` lacks a Family Controls provisioning profile. Friend-permission work remains isolated: no trusted monotonic checkpoint backend, hosted relay, APNs path or enforcement consumer is approved.
 
 ## Build-13 decisive natural-end evidence and product correction
 
