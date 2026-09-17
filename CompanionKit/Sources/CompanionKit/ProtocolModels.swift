@@ -161,6 +161,17 @@ public struct Pairing: Codable, Hashable, Sendable {
     public let createdAt: Date
     public var state: PairingState
 
+    public init(pairingID: String, owner: DeviceIdentity, approver: DeviceIdentity,
+                epoch: UInt64, createdAt: Date, state: PairingState) throws {
+        try requireIdentifier(pairingID, name: "pairing ID")
+        try owner.validate(); try approver.validate(); try requireTimestamp(createdAt, name: "pairing creation time")
+        guard owner.role == .owner, approver.role == .trustedApprover, epoch > 0 else {
+            throw CompanionError.malformed("invalid pairing")
+        }
+        self.pairingID = pairingID; self.owner = owner; self.approver = approver
+        self.epoch = epoch; self.createdAt = createdAt; self.state = state
+    }
+
     public func validate() throws {
         try requireIdentifier(pairingID, name: "pairing ID")
         try owner.validate(); try approver.validate()
@@ -239,6 +250,7 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
     public let pairEpoch: UInt64
     public let sessionID: String
     public let activeSetID: String
+    public let purpose: TrustedRequestPurpose
     public let targetedApproverIDs: [String]
     public let targetBindings: [RequestTargetBinding]
     public let message: String?
@@ -250,34 +262,67 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
     /// Kept for source compatibility with the original one-target API. A
     /// multi-target request must use the binding-aware initializer below.
     public init(requestID: String, owner: DeviceIdentity, pairing: Pairing, session: ActiveSession,
-                targets: [String], message: String?, createdAt: Date, expiresAt: Date) throws {
+                targets: [String], message: String?, createdAt: Date, expiresAt: Date,
+                purpose: TrustedRequestPurpose = .approveEarlyEnd) throws {
         guard targets.count == 1, targets.first == pairing.approver.identityID else {
             throw CompanionError.malformed("exact target pairing bindings required")
         }
         try self.init(requestID: requestID, owner: owner,
                       targetBindings: [RequestTargetBinding(pairing: pairing)], session: session,
-                      message: message, createdAt: createdAt, expiresAt: expiresAt)
+                      message: message, createdAt: createdAt, expiresAt: expiresAt,
+                      purpose: purpose)
     }
 
     public init(requestID: String, owner: DeviceIdentity, targetBindings: [RequestTargetBinding],
-                session: ActiveSession, message: String?, createdAt: Date, expiresAt: Date) throws {
+                session: ActiveSession, message: String?, createdAt: Date, expiresAt: Date,
+                purpose: TrustedRequestPurpose = .approveEarlyEnd) throws {
         try requireIdentifier(requestID, name: "request ID")
         guard !targetBindings.isEmpty, targetBindings.count <= CompanionLimits.maxTargets,
               Set(targetBindings.map(\.approverIdentityID)).count == targetBindings.count,
-              session.owner == owner, expiresAt > createdAt, expiresAt <= session.endsAt,
+              session.owner == owner, purpose == .approveEarlyEnd,
+              expiresAt > createdAt, expiresAt <= session.endsAt,
               expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime else {
             throw CompanionError.malformed("invalid trusted request")
         }
         for binding in targetBindings { try binding.validateShape() }
-        if let message { guard !message.isEmpty, message.utf8.count <= CompanionLimits.maxMessageBytes else { throw CompanionError.malformed("message too long") } }
+        // Trusted-person requests carry only session and relationship
+        // identifiers. Free-form text could disclose selections, usage, or
+        // task material, so new requests never accept a message.
+        guard message == nil else { throw CompanionError.malformed("request material is not permitted") }
         try owner.validate(); try session.validate()
         let targets = targetBindings.map(\.approverIdentityID)
         self.requestID = requestID; self.owner = owner
         self.pairingID = targetBindings[0].pairingID; self.pairEpoch = targetBindings[0].pairEpoch
         self.sessionID = session.sessionID; self.activeSetID = session.activeSetID
+        self.purpose = purpose
         self.targetedApproverIDs = targets; self.targetBindings = targetBindings
         self.message = message; self.createdAt = createdAt; self.expiresAt = expiresAt; self.status = .pending
         self.decisions = Dictionary(uniqueKeysWithValues: targets.map { ($0, .pending) })
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID, owner, pairingID, pairEpoch, sessionID, activeSetID, purpose,
+             targetedApproverIDs, targetBindings, message, createdAt, expiresAt, status, decisions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.requestID = try container.decode(String.self, forKey: .requestID)
+        self.owner = try container.decode(DeviceIdentity.self, forKey: .owner)
+        self.pairingID = try container.decode(String.self, forKey: .pairingID)
+        self.pairEpoch = try container.decode(UInt64.self, forKey: .pairEpoch)
+        self.sessionID = try container.decode(String.self, forKey: .sessionID)
+        self.activeSetID = try container.decode(String.self, forKey: .activeSetID)
+        self.purpose = try container.decodeIfPresent(TrustedRequestPurpose.self, forKey: .purpose) ?? .approveEarlyEnd
+        self.targetedApproverIDs = try container.decode([String].self, forKey: .targetedApproverIDs)
+        self.targetBindings = try container.decode([RequestTargetBinding].self, forKey: .targetBindings)
+        // Drop the pre-scope free-form field during migration rather than
+        // exposing historical material through a trusted-person inbox.
+        self.message = nil
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
+        self.status = try container.decode(TrustedRequestStatus.self, forKey: .status)
+        self.decisions = try container.decode([String: ApproverDecision].self, forKey: .decisions)
     }
 
     public func binding(for approverIdentityID: String) -> RequestTargetBinding? {
@@ -286,7 +331,8 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
 
     public func validateShape() throws {
         try validateCommon()
-        guard status == .pending, decisions.values.allSatisfy({ $0 == .pending }) else {
+        guard purpose == .approveEarlyEnd,
+              status == .pending, decisions.values.allSatisfy({ $0 == .pending }) else {
             throw CompanionError.malformed("invalid trusted request")
         }
     }
@@ -302,6 +348,7 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
         try requireIdentifier(requestID, name: "request ID"); try owner.validate()
         try requireIdentifier(pairingID, name: "pairing ID"); try requireIdentifier(sessionID, name: "session ID")
         try requireIdentifier(activeSetID, name: "active set ID")
+        guard purpose == .approveEarlyEnd else { throw CompanionError.unsupportedScope }
         guard pairEpoch > 0, !targetedApproverIDs.isEmpty, targetedApproverIDs.count <= CompanionLimits.maxTargets,
               Set(targetedApproverIDs).count == targetedApproverIDs.count,
               targetBindings.count == targetedApproverIDs.count,
@@ -313,7 +360,7 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
         }
         for target in targetedApproverIDs { try requireIdentifier(target, name: "approver ID") }
         for binding in targetBindings { try binding.validateShape() }
-        if let message { guard !message.isEmpty, message.utf8.count <= CompanionLimits.maxMessageBytes else { throw CompanionError.malformed("message too long") } }
+        guard message == nil else { throw CompanionError.malformed("request material is not permitted") }
         try requireTimestamp(createdAt, name: "request time"); try requireTimestamp(expiresAt, name: "request expiry")
     }
 
@@ -325,6 +372,9 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
 
 public struct Approval: Codable, Hashable, Sendable {
     public let approvalID: String
+    /// Fresh per approval. An empty value is accepted only when decoding a
+    /// pre-scope snapshot; newly submitted approvals must carry a nonce.
+    public let nonce: Data
     public let requestID: String
     public let pairingID: String
     public let pairEpoch: UInt64
@@ -335,7 +385,44 @@ public struct Approval: Codable, Hashable, Sendable {
     public let issuedAt: Date
     public let signature: Data
 
+    public init(approvalID: String, requestID: String, pairingID: String, pairEpoch: UInt64,
+                sessionID: String, activeSetID: String, approver: DeviceIdentity,
+                decision: ApproverDecision, issuedAt: Date,
+                nonce: Data = Data(repeating: 0, count: 16), signature: Data) {
+        self.approvalID = approvalID; self.requestID = requestID; self.pairingID = pairingID
+        self.pairEpoch = pairEpoch; self.sessionID = sessionID; self.activeSetID = activeSetID
+        self.approver = approver; self.decision = decision; self.issuedAt = issuedAt
+        self.nonce = nonce; self.signature = signature
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case approvalID, nonce, requestID, pairingID, pairEpoch, sessionID, activeSetID,
+             approver, decision, issuedAt, signature
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.approvalID = try container.decode(String.self, forKey: .approvalID)
+        self.nonce = try container.decodeIfPresent(Data.self, forKey: .nonce) ?? Data()
+        self.requestID = try container.decode(String.self, forKey: .requestID)
+        self.pairingID = try container.decode(String.self, forKey: .pairingID)
+        self.pairEpoch = try container.decode(UInt64.self, forKey: .pairEpoch)
+        self.sessionID = try container.decode(String.self, forKey: .sessionID)
+        self.activeSetID = try container.decode(String.self, forKey: .activeSetID)
+        self.approver = try container.decode(DeviceIdentity.self, forKey: .approver)
+        self.decision = try container.decode(ApproverDecision.self, forKey: .decision)
+        self.issuedAt = try container.decode(Date.self, forKey: .issuedAt)
+        self.signature = try container.decode(Data.self, forKey: .signature)
+    }
+
     public func signingFields() -> [String] {
+        var fields = [approvalID, requestID, pairingID, String(pairEpoch), sessionID, activeSetID, approver.identityID,
+                      base64URL(approver.publicKey), decision.rawValue, String(milliseconds(issuedAt))]
+        if !nonce.isEmpty { fields.append(base64URL(nonce)) }
+        return fields
+    }
+
+    private func legacySigningFields() -> [String] {
         [approvalID, requestID, pairingID, String(pairEpoch), sessionID, activeSetID, approver.identityID,
          base64URL(approver.publicKey), decision.rawValue, String(milliseconds(issuedAt))]
     }
@@ -344,9 +431,11 @@ public struct Approval: Codable, Hashable, Sendable {
         try requireIdentifier(approvalID, name: "approval ID"); try requireIdentifier(requestID, name: "request ID")
         try requireIdentifier(pairingID, name: "pairing ID"); try requireIdentifier(sessionID, name: "session ID")
         try requireIdentifier(activeSetID, name: "active set ID"); try approver.validate(); try requireTimestamp(issuedAt, name: "approval time")
-        guard pairEpoch > 0, decision != .pending, signature.count == 64,
+        guard pairEpoch > 0, decision != .pending,
+              nonce.isEmpty || (nonce.count >= 16 && nonce.count <= 64), signature.count == 64,
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: approver.publicKey),
-              key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).approval", fields: signingFields())) else {
+              (key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).approval", fields: signingFields()))
+               || (nonce.isEmpty && key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).approval", fields: legacySigningFields())))) else {
             throw CompanionError.invalidSignature
         }
     }
@@ -442,6 +531,8 @@ public struct SignedOperation: Codable, Hashable, Sendable {
 }
 
 public struct RelaySnapshot: Codable, Sendable {
+    static let currentSchemaVersion: UInt16 = 1
+    let schemaVersion: UInt16
     let owner: DeviceIdentity
     let currentTime: Date
     let revision: UInt64
@@ -454,19 +545,54 @@ public struct RelaySnapshot: Codable, Sendable {
     let requests: [TrustedRequest]
     let approvals: [Approval]
     let usedApprovalIDs: Set<String>
+    let usedApprovalNonces: Set<String>
+    let usedConsentNonces: Set<String>
+    let relationshipConsents: [RelationshipConsent]
     let operationRecords: [RelayOperationRecord]
 
     init(owner: DeviceIdentity, currentTime: Date, revision: UInt64, currentSessionID: String?,
          invitations: [Invitation], usedInviteIDs: Set<String>,
          pendingAcceptances: [PairingAcceptance], pairings: [Pairing], sessions: [ActiveSession],
          requests: [TrustedRequest], approvals: [Approval], usedApprovalIDs: Set<String>,
+         usedApprovalNonces: Set<String> = [], usedConsentNonces: Set<String> = [],
+         relationshipConsents: [RelationshipConsent] = [],
          operationRecords: [RelayOperationRecord]) {
+        self.schemaVersion = Self.currentSchemaVersion
         self.owner = owner; self.currentTime = currentTime; self.revision = revision
         self.currentSessionID = currentSessionID
         self.invitations = invitations; self.usedInviteIDs = usedInviteIDs
         self.pendingAcceptances = pendingAcceptances; self.pairings = pairings; self.sessions = sessions
         self.requests = requests; self.approvals = approvals; self.usedApprovalIDs = usedApprovalIDs
+        self.usedApprovalNonces = usedApprovalNonces; self.usedConsentNonces = usedConsentNonces
+        self.relationshipConsents = relationshipConsents
         self.operationRecords = operationRecords
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, owner, currentTime, revision, currentSessionID, invitations,
+             usedInviteIDs, pendingAcceptances, pairings, sessions, requests, approvals,
+             usedApprovalIDs, usedApprovalNonces, usedConsentNonces, relationshipConsents, operationRecords
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try c.decodeIfPresent(UInt16.self, forKey: .schemaVersion) ?? 0
+        self.owner = try c.decode(DeviceIdentity.self, forKey: .owner)
+        self.currentTime = try c.decode(Date.self, forKey: .currentTime)
+        self.revision = try c.decode(UInt64.self, forKey: .revision)
+        self.currentSessionID = try c.decodeIfPresent(String.self, forKey: .currentSessionID)
+        self.invitations = try c.decode([Invitation].self, forKey: .invitations)
+        self.usedInviteIDs = try c.decode(Set<String>.self, forKey: .usedInviteIDs)
+        self.pendingAcceptances = try c.decode([PairingAcceptance].self, forKey: .pendingAcceptances)
+        self.pairings = try c.decode([Pairing].self, forKey: .pairings)
+        self.sessions = try c.decode([ActiveSession].self, forKey: .sessions)
+        self.requests = try c.decode([TrustedRequest].self, forKey: .requests)
+        self.approvals = try c.decode([Approval].self, forKey: .approvals)
+        self.usedApprovalIDs = try c.decode(Set<String>.self, forKey: .usedApprovalIDs)
+        self.usedApprovalNonces = try c.decodeIfPresent(Set<String>.self, forKey: .usedApprovalNonces) ?? []
+        self.usedConsentNonces = try c.decodeIfPresent(Set<String>.self, forKey: .usedConsentNonces) ?? []
+        self.relationshipConsents = try c.decodeIfPresent([RelationshipConsent].self, forKey: .relationshipConsents) ?? []
+        self.operationRecords = try c.decode([RelayOperationRecord].self, forKey: .operationRecords)
     }
 }
 
@@ -484,6 +610,7 @@ public protocol CompanionTransport: Sendable {
 
 public enum RelayResult: Codable, Hashable, Sendable {
     case invitation(Invitation)
+    case consent(RelationshipConsent)
     case acceptance(PairingAcceptance)
     case pairing(Pairing)
     case session(ActiveSession)
@@ -559,6 +686,42 @@ public struct CompanionClient: Sendable {
         return value
     }
 
+    public func grantScopes(pairing: Pairing, scopes: [CompanionScope], nonce: Data? = nil) throws -> RelationshipConsent {
+        guard signer.identity == pairing.owner else { throw CompanionError.unauthorized }
+        let mutation = try RelationshipConsentMutation(
+            relationshipID: pairing.pairingID, pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+            owner: pairing.owner, approver: pairing.approver, action: .ownerGrant,
+            scopes: try CompanionScopeSet(scopes), nonce: nonce ?? randomNonce(), issuedAt: now())
+        guard case let .consent(value) = try submit("consent", mutation) else { throw CompanionError.malformed("relay response") }
+        return value
+    }
+
+    public func acceptScopes(pairing: Pairing, scopes: [CompanionScope], nonce: Data? = nil) throws -> RelationshipConsent {
+        guard signer.identity == pairing.approver else { throw CompanionError.unauthorized }
+        let mutation = try RelationshipConsentMutation(
+            relationshipID: pairing.pairingID, pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+            owner: pairing.owner, approver: pairing.approver, action: .approverAccept,
+            scopes: try CompanionScopeSet(scopes), nonce: nonce ?? randomNonce(), issuedAt: now())
+        guard case let .consent(value) = try submit("consent", mutation) else { throw CompanionError.malformed("relay response") }
+        return value
+    }
+
+    public func revokeScopes(pairing: Pairing, scopes: [CompanionScope], nonce: Data? = nil) throws -> RelationshipConsent {
+        let action: ConsentMutationAction
+        if signer.identity == pairing.owner { action = .ownerRevoke }
+        else if signer.identity == pairing.approver { action = .approverRevoke }
+        else { throw CompanionError.unauthorized }
+        let mutation = try RelationshipConsentMutation(
+            relationshipID: pairing.pairingID, pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+            owner: pairing.owner, approver: pairing.approver, action: action,
+            scopes: try CompanionScopeSet(scopes), nonce: nonce ?? randomNonce(), issuedAt: now())
+        guard case let .consent(value) = try submit("consent", mutation) else { throw CompanionError.malformed("relay response") }
+        return value
+    }
+
+    /// A trusted-person approval is intentionally the only request purpose.
+    /// The request contains session identity and selected relationship IDs,
+    /// never policy selections, usage, steps, or task material.
     public func requestUnlock(requestID: String, pairing: Pairing, session: ActiveSession, target: String,
                               message: String?, validFor: TimeInterval) throws -> TrustedRequest {
         try requestUnlock(requestID: requestID, pairings: [pairing], session: session, targets: [target],
@@ -584,15 +747,17 @@ public struct CompanionClient: Sendable {
     }
 
     public func submitApproval(request: TrustedRequest, pairing: Pairing, decision: ApproverDecision,
-                                approvalID: String = UUID().uuidString) throws -> Approval {
+                                approvalID: String = UUID().uuidString, nonce: Data? = nil) throws -> Approval {
         guard signer.identity == pairing.approver else { throw CompanionError.unauthorized }
         let unsigned = Approval(approvalID: approvalID, requestID: request.requestID, pairingID: pairing.pairingID,
                                 pairEpoch: pairing.epoch, sessionID: request.sessionID, activeSetID: request.activeSetID,
-                                approver: signer.identity, decision: decision, issuedAt: now(), signature: Data())
+                                approver: signer.identity, decision: decision, issuedAt: now(),
+                                nonce: nonce ?? randomNonce(), signature: Data())
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).approval", fields: unsigned.signingFields())
         let approval = Approval(approvalID: unsigned.approvalID, requestID: unsigned.requestID, pairingID: unsigned.pairingID,
                                pairEpoch: unsigned.pairEpoch, sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
-                               approver: unsigned.approver, decision: unsigned.decision, issuedAt: unsigned.issuedAt, signature: signature)
+                               approver: unsigned.approver, decision: unsigned.decision, issuedAt: unsigned.issuedAt,
+                               nonce: unsigned.nonce, signature: signature)
         guard case let .approval(value) = try submit("approval", approval) else { throw CompanionError.malformed("relay response") }
         return value
     }
@@ -643,6 +808,10 @@ public struct CompanionClient: Sendable {
         }
         return pairing
     }
+}
+
+private func randomNonce() -> Data {
+    Data((0..<24).map { _ in UInt8.random(in: 0...255) })
 }
 
 private func operationIdentifier(kind: String, signer: DeviceIdentity, body: Data) -> String {

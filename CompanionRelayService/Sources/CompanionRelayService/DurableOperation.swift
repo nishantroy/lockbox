@@ -82,6 +82,12 @@ func isValidIdentifier(_ value: String) -> Bool {
     !value.contains(where: { $0.isWhitespace })
 }
 
+func durableDataFromBase64URL(_ value: String) -> Data? {
+    var text = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    text += String(repeating: "=", count: (4 - text.count % 4) % 4)
+    return Data(base64Encoded: text)
+}
+
 func durableBase64URL(_ data: Data) -> String {
     data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")

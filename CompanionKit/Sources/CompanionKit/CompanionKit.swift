@@ -25,6 +25,8 @@ public enum CompanionError: Error, Equatable, Sendable {
     case staleRevision(expected: UInt64, actual: UInt64)
     case operationConflict
     case missingOperationRevision
+    case unsupportedScope
+    case consentRequired
 
     /// A transport may retry a command only when it can resend the exact same
     /// signed operation. These errors describe terminal command outcomes; the
@@ -35,7 +37,8 @@ public enum CompanionError: Error, Equatable, Sendable {
              .malformed, .invalidSignature, .unknownIdentity, .unauthorized,
              .revokedPairing, .expired, .replay, .staleSession, .wrongTarget,
              .wrongVerificationCode, .rateLimited, .keyUnavailable,
-             .alreadyPaired, .notFound, .invalidTransition:
+             .alreadyPaired, .notFound, .invalidTransition, .unsupportedScope,
+             .consentRequired:
             return false
         }
     }
@@ -60,6 +63,8 @@ public enum CompanionError: Error, Equatable, Sendable {
         case .alreadyPaired: return "already_paired"
         case .notFound: return "not_found"
         case .invalidTransition: return "invalid_transition"
+        case .unsupportedScope: return "unsupported_scope"
+        case .consentRequired: return "consent_required"
         }
     }
 }

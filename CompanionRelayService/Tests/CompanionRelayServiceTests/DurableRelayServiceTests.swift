@@ -187,6 +187,62 @@ final class DurableRelayServiceTests: XCTestCase {
         XCTAssertTrue(try store.read().owners.isEmpty)
     }
 
+    func testScopedOwnerRequestRequiresBilateralConsentInsideTransaction() throws {
+        let ownerSigner = try owner()
+        let approver = try DeviceSigner.create(role: .trustedApprover,
+                                               keyStore: InMemoryDeviceKeyStore())
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let pairing = try Pairing(pairingID: "durable-scope-pairing", owner: ownerSigner.identity,
+                                  approver: approver.identity, epoch: 1, createdAt: now, state: .active)
+        let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "durable-scope-session",
+                                        activeSetID: "durable-scope-set", startsAt: now.addingTimeInterval(-1),
+                                        endsAt: now.addingTimeInterval(600))
+        let request = try TrustedRequest(requestID: "durable-scope-request", owner: ownerSigner.identity,
+                                         pairing: pairing, session: session,
+                                         targets: [approver.identity.identityID], message: nil,
+                                         createdAt: now, expiresAt: now.addingTimeInterval(300))
+        let consent = try RelationshipConsent(relationshipID: pairing.pairingID,
+                                               pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                               owner: ownerSigner.identity, approver: approver.identity,
+                                               ownerScopes: [.approveEarlyEnd, .receiveRequests],
+                                               approverScopes: [.approveEarlyEnd, .receiveRequests],
+                                               ownerState: .active, approverState: .active, updatedAt: now)
+        let ledger = DurableOwnerLedger(owner: ownerSigner.identity,
+                                        pairings: [pairing.pairingID: DurablePairingRecord(pairing: pairing)],
+                                        relationshipConsents: [pairing.pairingID: consent])
+        let store = try InMemoryDurableRelayStore(database: DurableRelayDatabase(
+            owners: [ownerSigner.identity.identityID: ledger]))
+        let policy = DurableAuthorizationPolicy.ownerAndActivePairing(
+            ownerOnlyKinds: ["request"], approverKinds: [],
+            requiredScopes: ["request": .approveEarlyEnd])
+        let service = DurableRelayService(store: store, authorization: policy)
+        let operation = try DurableOperationFactory.make(kind: "request", operationID: "durable-scoped-request",
+                                                         expectedRevision: 0, payload: request, signer: ownerSigner)
+        XCTAssertNoThrow(try service.submit(operation, owner: ownerSigner.identity) { _, _ in RelayResult.request(request) })
+
+        let staleLedger = DurableOwnerLedger(owner: ownerSigner.identity,
+                                              pairings: [pairing.pairingID: DurablePairingRecord(pairing: pairing)])
+        let staleStore = try InMemoryDurableRelayStore(database: DurableRelayDatabase(
+            owners: [ownerSigner.identity.identityID: staleLedger]))
+        let staleService = DurableRelayService(store: staleStore, authorization: policy)
+        XCTAssertThrowsError(try staleService.submit(operation, owner: ownerSigner.identity) { _, _ in
+            XCTFail("stale consent must be rejected before mutation")
+            return RelayResult.request(request)
+        }) { XCTAssertEqual($0 as? DurableRelayError, .unauthorized) }
+    }
+
+    func testR6ScopedDeliveryCannotBeAuthorizedByR5Policy() throws {
+        let signer = try owner()
+        let policy = DurableAuthorizationPolicy.ownerOnly(kinds: ["notice"],
+                                                           requiredScopes: ["notice": .earlyEndNotices])
+        let service = DurableRelayService(store: InMemoryDurableRelayStore(), authorization: policy)
+        let operation = try operation(signer: signer, id: "r6-notice", revision: 0, kind: "notice")
+        XCTAssertThrowsError(try service.submit(operation, owner: signer.identity) { _, _ in
+            XCTFail("R6 notice capability must not authorize a mutation")
+            return .acknowledgement
+        }) { XCTAssertEqual($0 as? DurableRelayError, .unauthorized) }
+    }
+
     func testInitialDatabaseRejectsOperationDictionaryKeyMismatch() throws {
         let signer = try owner()
         let response = Data("{}".utf8)

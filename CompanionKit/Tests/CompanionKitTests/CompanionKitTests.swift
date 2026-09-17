@@ -16,6 +16,8 @@ final class CompanionKitTests: XCTestCase {
                                                 nonce: Data(repeating: 7, count: 24))
         let acceptance = try approver.accept(invitation, acceptanceID: "accept-1", now: t)
         let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
         let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "session-1", activeSetID: "set-1",
                                         startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(3_600))
         _ = try owner.publishSession(session)
@@ -77,6 +79,8 @@ final class CompanionKitTests: XCTestCase {
                                                   nonce: Data(repeating: 10, count: 24))
         let secondAcceptance = try approver.accept(secondInvite, acceptanceID: "same-identity-acceptance", now: t)
         let secondPairing = try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try approver.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
         XCTAssertNotEqual(firstPairing.pairingID, secondPairing.pairingID)
 
         let request = try owner.requestUnlock(requestID: "exact-target", pairing: secondPairing, session: session,
@@ -116,7 +120,7 @@ final class CompanionKitTests: XCTestCase {
     func testApprovalBindsPairingSessionAndRequestAndIsSingleUse() throws {
         let (relay, owner, approver, pairing, session) = try harness()
         let request = try owner.requestUnlock(requestID: "request-1", pairing: pairing, session: session,
-                                              target: approver.signer.identity.identityID, message: "Please let me finish", validFor: 600)
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
         let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
         try approval.validateSignature()
         let verification = try owner.useApproval(approval, request: request, useID: "use-1")
@@ -184,6 +188,41 @@ final class CompanionKitTests: XCTestCase {
         _ = relay
     }
 
+    func testFirstValidApprovalWinsAcrossSelectedApprovers() throws {
+        let (relay, owner, first, firstPairing, session) = try harness()
+        let secondStore = InMemoryDeviceKeyStore()
+        let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondStore)
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let second = CompanionClient(signer: secondSigner, transport: relay, now: { fixedNow })
+        let invite = try owner.createInvite(inviteID: "first-valid-invite", validFor: 3_600, now: t,
+                                            nonce: Data(repeating: 11, count: 24))
+        let acceptance = try second.accept(invite, acceptanceID: "first-valid-accept", now: t)
+        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let request = try owner.requestUnlock(requestID: "first-valid-request",
+                                              pairings: [firstPairing, secondPairing], session: session,
+                                              targets: [first.signer.identity.identityID, second.signer.identity.identityID],
+                                              message: nil, validFor: 600)
+        _ = try first.submitApproval(request: request, pairing: firstPairing, decision: .approved,
+                                     approvalID: "first-wins", nonce: Data(repeating: 12, count: 24))
+        XCTAssertThrowsError(try second.submitApproval(request: request, pairing: secondPairing,
+                                                       decision: .approved,
+                                                       approvalID: "late-second", nonce: Data(repeating: 13, count: 24)))
+    }
+
+    func testApprovalNonceCannotBeReusedUnderAnotherApprovalID() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "nonce-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let nonce = Data(repeating: 14, count: 24)
+        _ = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                        approvalID: "nonce-first", nonce: nonce)
+        XCTAssertThrowsError(try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                         approvalID: "nonce-second", nonce: nonce))
+        _ = relay
+    }
+
     func testDeclineByOneApproverDoesNotInvalidateAnotherTarget() throws {
         let (relay, owner, first, firstPairing, session) = try harness()
         let secondKeys = InMemoryDeviceKeyStore()
@@ -192,6 +231,8 @@ final class CompanionKitTests: XCTestCase {
         let invite = try owner.createInvite(inviteID: "invite-2", validFor: 3_600, now: t, nonce: Data(repeating: 8, count: 24))
         let acceptance = try second.accept(invite, acceptanceID: "accept-2", now: t)
         let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
         let targets = [first.signer.identity.identityID, second.signer.identity.identityID]
         let multi = try owner.requestUnlock(requestID: "multi", pairings: [firstPairing, secondPairing], session: session,
                                             targets: targets, message: nil, validFor: 600)
@@ -217,6 +258,8 @@ final class CompanionKitTests: XCTestCase {
                                             nonce: Data(repeating: 9, count: 24))
         let acceptance = try second.accept(invite, acceptanceID: "collision-acceptance", now: t)
         let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
         let secondRequest = try owner.requestUnlock(requestID: "collision-second", pairing: secondPairing, session: session,
                                                     target: second.signer.identity.identityID, message: nil, validFor: 600)
         XCTAssertThrowsError(try second.submitApproval(request: secondRequest, pairing: secondPairing, decision: .approved,
@@ -573,6 +616,7 @@ final class CompanionKitTests: XCTestCase {
             replacementID: "replacement-1", previousPairing: oldPairing,
             replacementPairingID: "replacement-pairing-1", signer: replacementSigner, issuedAt: t)
         let newPairing = try owner.replacePairing(proposal)
+        _ = try owner.grantScopes(pairing: newPairing, scopes: [.approveEarlyEnd, .receiveRequests])
         XCTAssertEqual(try relay.pairing(id: oldPairing.pairingID).state, .revoked)
         XCTAssertEqual(try relay.pairing(id: newPairing.pairingID), newPairing)
         XCTAssertEqual(newPairing.approver, replacementSigner.identity)
@@ -583,12 +627,71 @@ final class CompanionKitTests: XCTestCase {
 
         let replacement = CompanionClient(signer: replacementSigner, transport: relay,
                                           now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        _ = try replacement.acceptScopes(pairing: newPairing, scopes: [.approveEarlyEnd, .receiveRequests])
         let newRequest = try owner.requestUnlock(requestID: "replacement-new-request",
                                                  pairing: newPairing, session: session,
                                                  target: replacementSigner.identity.identityID,
                                                  message: nil, validFor: 600)
         XCTAssertNoThrow(try replacement.submitApproval(request: newRequest,
                                                          pairing: newPairing, decision: .approved))
+    }
+
+    func testScopeConsentIsBilateralAndRevocationInvalidatesApproval() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "consent-revoke-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "consent-revoke-approval")
+        _ = try approver.revokeScopes(pairing: pairing, scopes: [.approveEarlyEnd])
+        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "consent-revoke-use"))
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "consent-revoked-new", pairing: pairing, session: session,
+                                                     target: approver.signer.identity.identityID, message: nil, validFor: 600)) {
+            XCTAssertEqual($0 as? CompanionError, .consentRequired)
+        }
+        XCTAssertEqual(try relay.consent(relationshipID: pairing.pairingID).activeScopes(), [.receiveRequests])
+    }
+
+    func testR6ScopeCannotBeGrantedOrAuthorizeDelivery() throws {
+        let (relay, owner, approver, pairing, _) = try harness()
+        XCTAssertThrowsError(try owner.grantScopes(pairing: pairing, scopes: [.earlyEndNotices])) {
+            XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
+        }
+        XCTAssertThrowsError(try approver.acceptScopes(pairing: pairing, scopes: [.weeklySharedSummaries])) {
+            XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
+        }
+        XCTAssertEqual(try relay.consent(relationshipID: pairing.pairingID).activeScopes(),
+                       [.approveEarlyEnd, .receiveRequests])
+    }
+
+    func testConsentIsNotCopiedToReplacementPairing() throws {
+        let (relay, owner, _, oldPairing, session) = try harness()
+        let replacementStore = InMemoryDeviceKeyStore()
+        let replacementSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: replacementStore)
+        let proposal = try PairingReplacement.propose(replacementID: "scope-replacement",
+                                                       previousPairing: oldPairing,
+                                                       replacementPairingID: "scope-replacement-pairing",
+                                                       signer: replacementSigner, issuedAt: t)
+        let replacementPairing = try owner.replacePairing(proposal)
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "stale-consent", pairing: replacementPairing,
+                                                     session: session,
+                                                     target: replacementSigner.identity.identityID,
+                                                     message: nil, validFor: 600)) {
+            XCTAssertEqual($0 as? CompanionError, .consentRequired)
+        }
+        _ = relay
+    }
+
+    func testPreScopeRequestDecodeDropsLegacyMessageAndDefaultsPurpose() throws {
+        let (_, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "legacy-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as! [String: Any]
+        object.removeValue(forKey: "purpose")
+        object["message"] = "selected-apps-and-steps"
+        let migrated = try JSONDecoder().decode(TrustedRequest.self,
+                                                 from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(migrated.purpose, .approveEarlyEnd)
+        XCTAssertNil(migrated.message)
     }
 
     func testQuietHoursArePrivateLocalNotificationPolicy() throws {
@@ -630,6 +733,9 @@ final class CompanionKitTests: XCTestCase {
         let invitation = try owner.createInvite(inviteID: "invite-\(suffix)", validFor: 3_600, now: t,
                                                 nonce: Data(repeating: 3, count: 24))
         let acceptance = try approver.accept(invitation, acceptanceID: "accept-\(suffix)", now: t)
-        return try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        return pairing
     }
 }

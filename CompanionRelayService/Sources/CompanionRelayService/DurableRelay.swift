@@ -7,39 +7,71 @@ import CompanionKit
 public struct DurableAuthorizationPolicy: Sendable {
     public typealias ApproverAuthorization = @Sendable
         (_ operation: SignedOperation, _ owner: DeviceIdentity, _ ledger: DurableOwnerLedger) throws -> Bool
+    public typealias ScopedAuthorization = @Sendable
+        (_ operation: SignedOperation, _ envelope: DurableOperationEnvelope,
+         _ owner: DeviceIdentity, _ ledger: DurableOwnerLedger, _ scope: CompanionScope) throws -> Bool
 
     private let ownerOnlyKinds: Set<String>
     private let approverKinds: Set<String>
     private let approverAuthorization: ApproverAuthorization
+    private let requiredScopes: [String: CompanionScope]
+    private let scopedAuthorization: ScopedAuthorization?
 
     public init(ownerOnlyKinds: Set<String>, approverKinds: Set<String>,
-                approverAuthorization: @escaping ApproverAuthorization) {
+                requiredScopes: [String: CompanionScope] = [:],
+                approverAuthorization: @escaping ApproverAuthorization,
+                scopedAuthorization: ScopedAuthorization? = nil) {
         self.ownerOnlyKinds = ownerOnlyKinds
         self.approverKinds = approverKinds
+        var effectiveScopes = requiredScopes
+        if effectiveScopes["request"] == nil { effectiveScopes["request"] = .approveEarlyEnd }
+        if effectiveScopes["approval"] == nil { effectiveScopes["approval"] = .approveEarlyEnd }
+        self.requiredScopes = effectiveScopes
         self.approverAuthorization = approverAuthorization
+        self.scopedAuthorization = scopedAuthorization
+    }
+
+    /// Source-compatible initializer for existing relay adapters that supply
+    /// only pairing authorization.
+    public init(ownerOnlyKinds: Set<String>, approverKinds: Set<String>,
+                approverAuthorization: @escaping ApproverAuthorization) {
+        self.init(ownerOnlyKinds: ownerOnlyKinds, approverKinds: approverKinds,
+                  requiredScopes: [:], approverAuthorization: approverAuthorization,
+                  scopedAuthorization: nil)
     }
 
     /// Safe default for the reference tests: only the explicitly listed kind
     /// can be submitted, and it must be signed by the target owner.
-    public static func ownerOnly(kinds: Set<String> = ["ack"]) -> Self {
-        Self(ownerOnlyKinds: kinds, approverKinds: [], approverAuthorization: { _, _, _ in false })
+    public static func ownerOnly(kinds: Set<String> = ["ack"],
+                                 requiredScopes: [String: CompanionScope] = [:]) -> Self {
+        Self(ownerOnlyKinds: kinds, approverKinds: [], requiredScopes: requiredScopes,
+             approverAuthorization: { _, _, _ in false }, scopedAuthorization: { operation, envelope, owner, ledger, scope in
+                 try Self.authorizeScope(operation: operation, envelope: envelope,
+                                         owner: owner, ledger: ledger, scope: scope)
+             })
     }
 
     /// Convenience policy for operations whose approver must have an active,
     /// validated pairing in the target owner's ledger.
     public static func ownerAndActivePairing(ownerOnlyKinds: Set<String> = ["ack"],
-                                             approverKinds: Set<String>) -> Self {
-        Self(ownerOnlyKinds: ownerOnlyKinds, approverKinds: approverKinds) { operation, owner, ledger in
+                                             approverKinds: Set<String>,
+                                             requiredScopes: [String: CompanionScope] = [:]) -> Self {
+        Self(ownerOnlyKinds: ownerOnlyKinds, approverKinds: approverKinds,
+             requiredScopes: requiredScopes,
+             approverAuthorization: { operation, owner, ledger in
             guard operation.signer.role == .trustedApprover else { return false }
             return ledger.pairings.values.contains { record in
                 record.pairing.owner == owner && record.pairing.approver == operation.signer &&
                 record.pairing.state == .active && (try? record.pairing.validate()) != nil
             }
-        }
+        }, scopedAuthorization: { operation, envelope, owner, ledger, scope in
+            try DurableAuthorizationPolicy.authorizeScope(operation: operation, envelope: envelope,
+                                                          owner: owner, ledger: ledger, scope: scope)
+        })
     }
 
-    fileprivate func authorize(operation: SignedOperation, owner: DeviceIdentity,
-                               ledger: DurableOwnerLedger) throws {
+    fileprivate func authorize(operation: SignedOperation, envelope: DurableOperationEnvelope,
+                               owner: DeviceIdentity, ledger: DurableOwnerLedger) throws {
         let ownerOperation = ownerOnlyKinds.contains(operation.kind)
         let approverOperation = approverKinds.contains(operation.kind)
         guard ownerOperation != approverOperation else {
@@ -53,6 +85,52 @@ public struct DurableAuthorizationPolicy: Sendable {
                 throw DurableRelayError.unauthorized
             }
         }
+        if let scope = requiredScopes[operation.kind] {
+            guard scope.isR5, let scopedAuthorization,
+                  try scopedAuthorization(operation, envelope, owner, ledger, scope) else {
+                throw DurableRelayError.unauthorized
+            }
+        }
+    }
+
+    private static func authorizeScope(operation: SignedOperation,
+                                       envelope: DurableOperationEnvelope,
+                                       owner: DeviceIdentity,
+                                       ledger: DurableOwnerLedger,
+                                       scope: CompanionScope) throws -> Bool {
+        guard scope.isR5 else { return false }
+        let decoder = JSONDecoder()
+        if operation.kind == "request" {
+            guard let request = try? decoder.decode(TrustedRequest.self, from: envelope.payload),
+                  request.owner == owner, request.purpose == .approveEarlyEnd else { return false }
+            return request.targetBindings.allSatisfy { binding in
+                guard let pairing = ledger.pairings[binding.pairingID]?.pairing,
+                      pairing.owner == owner, pairing.state == .active,
+                      pairing.epoch == binding.pairEpoch,
+                      pairing.approver.identityID == binding.approverIdentityID,
+                      let consent = ledger.relationshipConsents[binding.pairingID],
+                      consent.pairEpoch == binding.pairEpoch else { return false }
+                return consent.authorizes(scope)
+                    && consent.authorizes(.approveEarlyEnd)
+                    && consent.authorizes(.receiveRequests)
+            }
+        }
+        if operation.kind == "approval" {
+            guard let approval = try? decoder.decode(Approval.self, from: envelope.payload),
+                  approval.approver.role == .trustedApprover,
+                  approval.nonce.count >= 16,
+                  let pairing = ledger.pairings[approval.pairingID]?.pairing,
+                  pairing.owner == owner, pairing.state == .active,
+                  pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
+                  let consent = ledger.relationshipConsents[approval.pairingID],
+                  consent.pairEpoch == approval.pairEpoch else { return false }
+            return consent.authorizes(scope)
+                && consent.authorizes(.approveEarlyEnd)
+                && consent.authorizes(.receiveRequests)
+        }
+        // No R5 scope authorizes delivery, summaries, start, extension, or
+        // rule changes through a generic durable operation.
+        return false
     }
 }
 
@@ -97,7 +175,7 @@ public final class DurableRelayService: @unchecked Sendable {
         let bodyDigest = CompanionCanonical.digest(operation.body)
         return try store.transaction { database in
             var ledger = try ledger(for: owner, in: &database)
-            try authorization.authorize(operation: operation, owner: owner, ledger: ledger)
+            try authorization.authorize(operation: operation, envelope: envelope, owner: owner, ledger: ledger)
 
             if let prior = ledger.operations[envelope.operationID] {
                 guard prior.ownerID == owner.identityID,
@@ -180,6 +258,7 @@ private enum DurableResultCodec {
         encoder.outputFormatting = [.sortedKeys]
         switch result {
         case .invitation(let value): return Encoded(kind: "invitation", body: try encoder.encode(value))
+        case .consent(let value): return Encoded(kind: "consent", body: try encoder.encode(value))
         case .acceptance(let value): return Encoded(kind: "acceptance", body: try encoder.encode(value))
         case .pairing(let value): return Encoded(kind: "pairing", body: try encoder.encode(value))
         case .session(let value): return Encoded(kind: "session", body: try encoder.encode(value))
@@ -196,6 +275,7 @@ private enum DurableResultCodec {
         do {
             switch kind {
             case "invitation": return .invitation(try decoder.decode(Invitation.self, from: body))
+            case "consent": return .consent(try decoder.decode(RelationshipConsent.self, from: body))
             case "acceptance": return .acceptance(try decoder.decode(PairingAcceptance.self, from: body))
             case "pairing": return .pairing(try decoder.decode(Pairing.self, from: body))
             case "session": return .session(try decoder.decode(ActiveSession.self, from: body))

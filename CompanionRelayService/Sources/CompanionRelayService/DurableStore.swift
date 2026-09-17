@@ -28,6 +28,8 @@ public struct DurableOwnerLedger: Codable, Sendable {
     public var requests: [String: DurableRequestRecord]
     public var approvals: [String: DurableApprovalRecord]
     public var approvalUses: [String: DurableApprovalUseRecord]
+    public var relationshipConsents: [String: RelationshipConsent]
+    public var usedConsentNonces: Set<String>
     public var rateLimits: [String: DurableRateLimitRecord]
     public var audit: [DurableAuditEvent]
 
@@ -41,6 +43,8 @@ public struct DurableOwnerLedger: Codable, Sendable {
                 requests: [String: DurableRequestRecord] = [:],
                 approvals: [String: DurableApprovalRecord] = [:],
                 approvalUses: [String: DurableApprovalUseRecord] = [:],
+                relationshipConsents: [String: RelationshipConsent] = [:],
+                usedConsentNonces: Set<String> = [],
                 rateLimits: [String: DurableRateLimitRecord] = [:],
                 audit: [DurableAuditEvent] = []) {
         self.owner = owner
@@ -55,8 +59,36 @@ public struct DurableOwnerLedger: Codable, Sendable {
         self.requests = requests
         self.approvals = approvals
         self.approvalUses = approvalUses
+        self.relationshipConsents = relationshipConsents
+        self.usedConsentNonces = usedConsentNonces
         self.rateLimits = rateLimits
         self.audit = audit
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case owner, revision, operations, invitations, pendingAcceptances, pairings,
+             pairingEpochs, sessions, currentSessionID, requests, approvals, approvalUses,
+             relationshipConsents, usedConsentNonces, rateLimits, audit
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.owner = try c.decode(DeviceIdentity.self, forKey: .owner)
+        self.revision = try c.decode(Int64.self, forKey: .revision)
+        self.operations = try c.decode([String: DurableOperationRecord].self, forKey: .operations)
+        self.invitations = try c.decode([String: DurableInvitationRecord].self, forKey: .invitations)
+        self.pendingAcceptances = try c.decode([String: PairingAcceptance].self, forKey: .pendingAcceptances)
+        self.pairings = try c.decode([String: DurablePairingRecord].self, forKey: .pairings)
+        self.pairingEpochs = try c.decode([String: UInt64].self, forKey: .pairingEpochs)
+        self.sessions = try c.decode([String: DurableSessionRecord].self, forKey: .sessions)
+        self.currentSessionID = try c.decodeIfPresent(String.self, forKey: .currentSessionID)
+        self.requests = try c.decode([String: DurableRequestRecord].self, forKey: .requests)
+        self.approvals = try c.decode([String: DurableApprovalRecord].self, forKey: .approvals)
+        self.approvalUses = try c.decode([String: DurableApprovalUseRecord].self, forKey: .approvalUses)
+        self.relationshipConsents = try c.decodeIfPresent([String: RelationshipConsent].self, forKey: .relationshipConsents) ?? [:]
+        self.usedConsentNonces = try c.decodeIfPresent(Set<String>.self, forKey: .usedConsentNonces) ?? []
+        self.rateLimits = try c.decode([String: DurableRateLimitRecord].self, forKey: .rateLimits)
+        self.audit = try c.decode([DurableAuditEvent].self, forKey: .audit)
     }
 }
 
@@ -286,7 +318,9 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                   ledger.sessions.count <= CompanionLimits.maxSnapshotRecords,
                   ledger.requests.count <= CompanionLimits.maxSnapshotRecords,
                   ledger.approvals.count <= CompanionLimits.maxSnapshotRecords,
-                  ledger.approvalUses.count <= CompanionLimits.maxSnapshotRecords else {
+                  ledger.approvalUses.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.relationshipConsents.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.usedConsentNonces.count <= CompanionLimits.maxSnapshotRecords else {
                 throw DurableStoreError.invalidSnapshot
             }
             try ledger.owner.validate()
@@ -346,6 +380,23 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
             for (key, approval) in ledger.approvals {
                 guard key == approval.approval.approvalID else { throw DurableStoreError.invalidSnapshot }
                 try approval.approval.validateSignature(); try requireValidDate(approval.acceptedAt)
+            }
+            for (key, consent) in ledger.relationshipConsents {
+                guard key == consent.relationshipID, consent.owner == ledger.owner else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try consent.validate()
+                guard let pairing = ledger.pairings[consent.pairingID]?.pairing,
+                      pairing.owner == ledger.owner,
+                      pairing.approver == consent.approver,
+                      pairing.epoch == consent.pairEpoch else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+            }
+            for nonce in ledger.usedConsentNonces {
+                guard let data = durableDataFromBase64URL(nonce), data.count >= 16, data.count <= 64 else {
+                    throw DurableStoreError.invalidSnapshot
+                }
             }
             for (key, use) in ledger.approvalUses {
                 guard key == use.useID, isValidIdentifier(use.useID),

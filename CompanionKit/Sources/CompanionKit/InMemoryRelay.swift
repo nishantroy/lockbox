@@ -16,6 +16,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     private var requests: [String: TrustedRequest] = [:]
     private var approvals: [String: Approval] = [:]
     private var usedApprovalIDs = Set<String>()
+    private var usedApprovalNonces = Set<String>()
+    private var usedConsentNonces = Set<String>()
+    private var relationshipConsents: [String: RelationshipConsent] = [:]
     private var operationRecords: [String: RelayOperationRecord] = [:]
     private var revision: UInt64 = 0
     private var operationTimes: [String: [Date]] = [:]
@@ -62,6 +65,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.requests = Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.requestID, $0) })
         self.approvals = Dictionary(uniqueKeysWithValues: snapshot.approvals.map { ($0.approvalID, $0) })
         self.usedApprovalIDs = snapshot.usedApprovalIDs
+        self.usedApprovalNonces = snapshot.usedApprovalNonces
+        self.usedConsentNonces = snapshot.usedConsentNonces
+        self.relationshipConsents = Dictionary(uniqueKeysWithValues: snapshot.relationshipConsents.map { ($0.relationshipID, $0) })
         self.operationRecords = Dictionary(uniqueKeysWithValues: snapshot.operationRecords.map { ($0.operationID, $0) })
         self.revision = snapshot.revision
     }
@@ -90,8 +96,14 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
               snapshot.approvals.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.usedInviteIDs.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.usedApprovalIDs.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.usedApprovalNonces.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.usedConsentNonces.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.relationshipConsents.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.operationRecords.count <= CompanionLimits.maxSnapshotRecords else {
             throw CompanionError.malformed("relay snapshot too large")
+        }
+        guard snapshot.schemaVersion == 0 || snapshot.schemaVersion == RelaySnapshot.currentSchemaVersion else {
+            throw CompanionError.malformed("unsupported relay snapshot schema")
         }
         guard snapshot.owner.role == .owner else { throw CompanionError.unauthorized }
         try snapshot.owner.validate(); try requireTimestamp(snapshot.currentTime, name: "snapshot time")
@@ -185,9 +197,11 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
 
         var approvals: [String: Approval] = [:]
         var approvalTargets: [String: Set<String>] = [:]
+        var approvalNonces = Set<String>()
         for approval in snapshot.approvals {
             try approval.validateSignature()
             let targetWasUnique = approvalTargets[approval.requestID, default: []].insert(approval.approver.identityID).inserted
+            let nonceWasUnique = approval.nonce.isEmpty || approvalNonces.insert(base64URL(approval.nonce)).inserted
             guard approvals[approval.approvalID] == nil,
                   let request = requests[approval.requestID], request.owner == snapshot.owner,
                   request.sessionID == approval.sessionID, request.activeSetID == approval.activeSetID,
@@ -195,13 +209,41 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   request.binding(for: approval.approver.identityID)?.pairEpoch == approval.pairEpoch,
                   let pairing = pairings[approval.pairingID], pairing.owner == snapshot.owner,
                   pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
-                  targetWasUnique,
+                  targetWasUnique, nonceWasUnique,
                   request.decisions[approval.approver.identityID] == approval.decision else {
                 throw CompanionError.malformed("invalid approval graph")
             }
             approvals[approval.approvalID] = approval
         }
         for approvalID in snapshot.usedApprovalIDs { try requireIdentifier(approvalID, name: "used approval ID") }
+        for nonce in snapshot.usedApprovalNonces {
+            guard let data = dataFromBase64URL(nonce), data.count >= 16, data.count <= 64 else {
+                throw CompanionError.malformed("invalid approval nonce marker")
+            }
+        }
+        for nonce in snapshot.usedConsentNonces {
+            guard let data = dataFromBase64URL(nonce), data.count >= 16, data.count <= 64 else {
+                throw CompanionError.malformed("invalid consent nonce marker")
+            }
+        }
+        guard snapshot.usedApprovalNonces.isSuperset(of: approvalNonces.filter { !$0.isEmpty }) else {
+            throw CompanionError.malformed("missing approval nonce marker")
+        }
+
+        var consents: [String: RelationshipConsent] = [:]
+        for consent in snapshot.relationshipConsents {
+            try consent.validate()
+            guard consent.owner == snapshot.owner,
+                  let pairing = pairings[consent.pairingID],
+                  pairing.owner == snapshot.owner,
+                  pairing.approver == consent.approver,
+                  pairing.epoch == consent.pairEpoch,
+                  consent.relationshipID == consent.pairingID,
+                  consents[consent.relationshipID] == nil else {
+                throw CompanionError.malformed("invalid relationship consent graph")
+            }
+            consents[consent.relationshipID] = consent
+        }
 
         // Decisions are durable relay outcomes. Do not restore an approved or
         // declined decision without the corresponding accepted signed record.
@@ -237,6 +279,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                                   requests: requests.values.sorted { $0.requestID < $1.requestID },
                                   approvals: approvals.values.sorted { $0.approvalID < $1.approvalID },
                                   usedApprovalIDs: usedApprovalIDs,
+                                  usedApprovalNonces: usedApprovalNonces,
+                                  usedConsentNonces: usedConsentNonces,
+                                  relationshipConsents: relationshipConsents.values.sorted { $0.relationshipID < $1.relationshipID },
                                   operationRecords: operationRecords.values.sorted { $0.operationID < $1.operationID })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(value)
@@ -255,6 +300,12 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         }
         return try InboxResponse(ownerIdentityID: query.identityID, revision: revision,
                                  requests: values.sorted { $0.createdAt < $1.createdAt })
+    }
+
+    public func consent(relationshipID: String) throws -> RelationshipConsent {
+        lock.lock(); defer { lock.unlock() }
+        guard let consent = relationshipConsents[relationshipID] else { throw CompanionError.notFound }
+        return consent
     }
 
     public func pairing(id: String) throws -> Pairing {
@@ -345,9 +396,62 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             // owner confirmation arrived. None may be confirmed later.
             pendingAcceptances = pendingAcceptances.filter { $0.value.inviteID != acceptance.inviteID }
             let pairingID = base64URL(Data(SHA256.hash(data: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).pairing", fields: [acceptance.inviteID, acceptance.approver.identityID])))).prefix(32).description
-            let pairing = Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver, epoch: 1, createdAt: currentTime, state: .active)
+            let pairing = try Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver, epoch: 1, createdAt: currentTime, state: .active)
             pairings[pairingID] = pairing
             return .pairing(pairing)
+
+        case "consent":
+            let mutation = try decode(RelationshipConsentMutation.self, operation.body)
+            guard mutation.owner == owner,
+                  let pairing = pairings[mutation.pairingID], pairing.owner == owner,
+                  pairing.approver == mutation.approver,
+                  pairing.epoch == mutation.pairEpoch, pairing.state == .active,
+                  mutation.relationshipID == mutation.pairingID,
+                  mutation.issuedAt <= currentTime.addingTimeInterval(60) else {
+                throw CompanionError.wrongTarget
+            }
+            guard mutation.scopes.scopes.allSatisfy(\.isR5) else { throw CompanionError.unsupportedScope }
+            let signerIsOwner = operation.signer == owner
+            let signerIsApprover = operation.signer == pairing.approver
+            guard (mutation.action == .ownerGrant || mutation.action == .ownerRevoke) ? signerIsOwner : signerIsApprover else {
+                throw CompanionError.unauthorized
+            }
+            let nonceKey = base64URL(mutation.nonce)
+            guard !usedConsentNonces.contains(nonceKey) else { throw CompanionError.replay }
+            var consent: RelationshipConsent
+            if let existing = relationshipConsents[mutation.relationshipID] {
+                consent = existing
+            } else {
+                consent = try RelationshipConsent(relationshipID: mutation.relationshipID, pairingID: pairing.pairingID,
+                                                  pairEpoch: pairing.epoch, owner: owner, approver: pairing.approver,
+                                                  updatedAt: currentTime)
+            }
+            switch mutation.action {
+            case .ownerGrant:
+                consent.ownerScopes = mutation.scopes.scopes
+                consent.approverScopes = consent.approverScopes.filter { mutation.scopes.contains($0) }
+                consent.ownerState = mutation.scopes.isEmpty ? .revoked : .active
+                consent.approverState = consent.approverScopes.isEmpty ? .pending : .active
+            case .approverAccept:
+                guard Set(mutation.scopes.scopes).isSubset(of: Set(consent.ownerScopes)) else {
+                    throw CompanionError.consentRequired
+                }
+                consent.approverScopes = mutation.scopes.scopes
+                consent.approverState = mutation.scopes.isEmpty ? .revoked : .active
+            case .ownerRevoke:
+                consent.ownerScopes.removeAll { mutation.scopes.contains($0) }
+                consent.approverScopes.removeAll { mutation.scopes.contains($0) }
+                consent.ownerState = consent.ownerScopes.isEmpty ? .revoked : .active
+                consent.approverState = consent.approverScopes.isEmpty ? .pending : .active
+            case .approverRevoke:
+                consent.approverScopes.removeAll { mutation.scopes.contains($0) }
+                consent.approverState = consent.approverScopes.isEmpty ? .revoked : .active
+            }
+            consent.updatedAt = currentTime
+            try consent.validate()
+            usedConsentNonces.insert(nonceKey)
+            relationshipConsents[mutation.relationshipID] = consent
+            return .consent(consent)
 
         case "session":
             let session = try decode(ActiveSession.self, operation.body)
@@ -369,6 +473,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   request.createdAt <= currentTime.addingTimeInterval(60) else { throw CompanionError.staleSession }
             try request.validateShape()
             try validateRequestPairing(request, session: session)
+            for binding in request.targetBindings {
+                try requireActiveScope(.receiveRequests, for: binding)
+                try requireActiveScope(.approveEarlyEnd, for: binding)
+            }
             guard requests[request.requestID] == nil else { throw CompanionError.replay }
             requests[request.requestID] = request
             return .request(request)
@@ -378,7 +486,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard operation.signer == approval.approver else { throw CompanionError.unauthorized }
             try approval.validateSignature()
             guard approvals[approval.approvalID] == nil,
-                  !usedApprovalIDs.contains(approval.approvalID) else { throw CompanionError.replay }
+                  !usedApprovalIDs.contains(approval.approvalID),
+                  approval.nonce.count >= 16, approval.nonce.count <= 64,
+                  !usedApprovalNonces.contains(base64URL(approval.nonce)) else { throw CompanionError.replay }
             guard let request = requests[approval.requestID] else { throw CompanionError.notFound }
             var currentRequest = request; updateExpiry(&currentRequest)
             guard currentRequest.effectiveStatus(at: currentTime) == .pending,
@@ -388,9 +498,15 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   let pairing = pairings[approval.pairingID], pairing.owner == owner,
                   pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
                   pairing.state == .active else { throw CompanionError.wrongTarget }
+            guard request.purpose == .approveEarlyEnd,
+                  relationshipConsents[approval.pairingID]?.authorizes(.receiveRequests) == true,
+                  relationshipConsents[approval.pairingID]?.authorizes(.approveEarlyEnd) == true else {
+                throw CompanionError.consentRequired
+            }
             guard approval.issuedAt <= currentTime.addingTimeInterval(60) else { throw CompanionError.expired }
             guard currentRequest.decisions[approval.approver.identityID] == .pending else { throw CompanionError.replay }
             approvals[approval.approvalID] = approval
+            usedApprovalNonces.insert(base64URL(approval.nonce))
             currentRequest.decisions[approval.approver.identityID] = approval.decision
             if approval.decision == .approved { currentRequest.status = .approved }
             else if currentRequest.decisions.values.allSatisfy({ $0 == .declined }) { currentRequest.status = .declined }
@@ -424,7 +540,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   use.approval.decision == .approved else { throw CompanionError.replay }
             guard let pairing = pairings[acceptedApproval.pairingID], pairing.owner == owner,
                   pairing.state == .active, pairing.epoch == acceptedApproval.pairEpoch,
-                  pairing.approver == acceptedApproval.approver else {
+                  pairing.approver == acceptedApproval.approver,
+                  relationshipConsents[acceptedApproval.pairingID]?.authorizes(.approveEarlyEnd) == true,
+                  relationshipConsents[acceptedApproval.pairingID]?.authorizes(.receiveRequests) == true else {
                 throw CompanionError.revokedPairing
             }
             try acceptedApproval.validateSignature()
@@ -464,7 +582,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard pairings[replacement.replacementPairingID] == nil else { throw CompanionError.replay }
             var revoked = previous
             revoked.state = .revoked
-            let activated = Pairing(pairingID: replacement.replacementPairingID, owner: owner,
+            let activated = try Pairing(pairingID: replacement.replacementPairingID, owner: owner,
                                     approver: replacement.replacement,
                                     epoch: replacement.replacementEpoch,
                                     createdAt: currentTime, state: .active)
@@ -484,6 +602,16 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         default:
             throw CompanionError.malformed("unknown operation")
         }
+    }
+
+    private func requireActiveScope(_ scope: CompanionScope, for binding: RequestTargetBinding) throws {
+        guard scope.isR5,
+              let consent = relationshipConsents[binding.pairingID],
+              consent.pairEpoch == binding.pairEpoch,
+              consent.approver.identityID == binding.approverIdentityID else {
+            throw CompanionError.consentRequired
+        }
+        guard consent.authorizes(scope) else { throw CompanionError.consentRequired }
     }
 
     private func validateRequestPairing(_ request: TrustedRequest, session: ActiveSession) throws {
