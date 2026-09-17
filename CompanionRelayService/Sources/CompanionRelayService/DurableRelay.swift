@@ -17,6 +17,13 @@ public struct DurableAuthorizationPolicy: Sendable {
     private let requiredScopes: [String: CompanionScope]
     private let scopedAuthorization: ScopedAuthorization?
 
+    /// Closed protocol boundary. `ack` is an owner-only inert receipt hook;
+    /// every stateful friend-permission operation is reduced below.
+    fileprivate static let modeledKinds: Set<String> = [
+        "ack", "invite", "accept", "confirm", "consent", "session", "request",
+        "approval", "cancel", "use", "natural_end", "revoke", "replace_pairing"
+    ]
+
     public init(ownerOnlyKinds: Set<String>, approverKinds: Set<String>,
                 requiredScopes: [String: CompanionScope] = [:],
                 approverAuthorization: @escaping ApproverAuthorization,
@@ -24,8 +31,9 @@ public struct DurableAuthorizationPolicy: Sendable {
         self.ownerOnlyKinds = ownerOnlyKinds
         self.approverKinds = approverKinds
         var effectiveScopes = requiredScopes
-        if effectiveScopes["request"] == nil { effectiveScopes["request"] = .approveEarlyEnd }
-        if effectiveScopes["approval"] == nil { effectiveScopes["approval"] = .approveEarlyEnd }
+        // These two operations can never be made scope-free by an embedding.
+        effectiveScopes["request"] = .approveEarlyEnd
+        effectiveScopes["approval"] = .approveEarlyEnd
         self.requiredScopes = effectiveScopes
         self.approverAuthorization = approverAuthorization
         self.scopedAuthorization = scopedAuthorization
@@ -72,15 +80,23 @@ public struct DurableAuthorizationPolicy: Sendable {
 
     fileprivate func authorize(operation: SignedOperation, envelope: DurableOperationEnvelope,
                                owner: DeviceIdentity, ledger: DurableOwnerLedger) throws {
-        let ownerOperation = ownerOnlyKinds.contains(operation.kind)
-        let approverOperation = approverKinds.contains(operation.kind)
-        guard ownerOperation != approverOperation else {
+        guard Self.modeledKinds.contains(operation.kind) else {
             throw DurableRelayError.unsupportedOperation(operation.kind)
         }
-        if ownerOperation {
-            guard operation.signer == owner else { throw DurableRelayError.unauthorized }
+        if operation.kind == "ack" && operation.signer != owner {
+            throw operation.signer.role == .trustedApprover
+                ? DurableRelayError.unsupportedOperation("ack")
+                : DurableRelayError.unauthorized
+        }
+        let ownerListed = ownerOnlyKinds.contains(operation.kind)
+        let approverListed = approverKinds.contains(operation.kind)
+        guard ownerListed || approverListed else {
+            throw DurableRelayError.unsupportedOperation(operation.kind)
+        }
+        if operation.signer == owner {
+            guard ownerListed else { throw DurableRelayError.unauthorized }
         } else {
-            guard operation.signer.role == .trustedApprover,
+            guard approverListed, operation.signer.role == .trustedApprover,
                   try approverAuthorization(operation, owner, ledger) else {
                 throw DurableRelayError.unauthorized
             }
@@ -102,14 +118,20 @@ public struct DurableAuthorizationPolicy: Sendable {
         let decoder = JSONDecoder()
         if operation.kind == "request" {
             guard let request = try? decoder.decode(TrustedRequest.self, from: envelope.payload),
-                  request.owner == owner, request.purpose == .approveEarlyEnd else { return false }
+                  request.owner == owner, request.purpose == .approveEarlyEnd,
+                  request.status == .pending,
+                  ledger.currentSessionID == request.sessionID,
+                  let session = ledger.sessions[request.sessionID]?.session,
+                  session.activeSetID == request.activeSetID else { return false }
             return request.targetBindings.allSatisfy { binding in
-                guard let pairing = ledger.pairings[binding.pairingID]?.pairing,
+                guard binding.consentGeneration > 0,
+                      let pairing = ledger.pairings[binding.pairingID]?.pairing,
                       pairing.owner == owner, pairing.state == .active,
                       pairing.epoch == binding.pairEpoch,
                       pairing.approver.identityID == binding.approverIdentityID,
                       let consent = ledger.relationshipConsents[binding.pairingID],
-                      consent.pairEpoch == binding.pairEpoch else { return false }
+                      consent.pairEpoch == binding.pairEpoch,
+                      consent.generation == binding.consentGeneration else { return false }
                 return consent.authorizes(scope)
                     && consent.authorizes(.approveEarlyEnd)
                     && consent.authorizes(.receiveRequests)
@@ -118,11 +140,17 @@ public struct DurableAuthorizationPolicy: Sendable {
         if operation.kind == "approval" {
             guard let approval = try? decoder.decode(Approval.self, from: envelope.payload),
                   approval.approver.role == .trustedApprover,
-                  approval.nonce.count >= 16,
+                  approval.consentGeneration > 0, approval.nonce.count >= 16,
+                  let request = ledger.requests[approval.requestID]?.request,
+                  request.status == .pending,
+                  request.sessionID == approval.sessionID,
+                  request.activeSetID == approval.activeSetID,
+                  request.binding(for: approval.approver.identityID)?.consentGeneration == approval.consentGeneration,
                   let pairing = ledger.pairings[approval.pairingID]?.pairing,
                   pairing.owner == owner, pairing.state == .active,
                   pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
                   let consent = ledger.relationshipConsents[approval.pairingID],
+                  consent.generation == approval.consentGeneration,
                   consent.pairEpoch == approval.pairEpoch else { return false }
             return consent.authorizes(scope)
                 && consent.authorizes(.approveEarlyEnd)
@@ -137,11 +165,14 @@ public struct DurableAuthorizationPolicy: Sendable {
 public final class DurableRelayService: @unchecked Sendable {
     public let store: any DurableRelayStore
     public let authorization: DurableAuthorizationPolicy
+    public let now: @Sendable () -> Date
 
     public init(store: any DurableRelayStore,
-                authorization: DurableAuthorizationPolicy = .ownerOnly()) {
+                authorization: DurableAuthorizationPolicy = .ownerOnly(),
+                now: @escaping @Sendable () -> Date = Date.init) {
         self.store = store
         self.authorization = authorization
+        self.now = now
     }
 
     /// Applies one signed mutation and records its response in the same store
@@ -151,6 +182,13 @@ public final class DurableRelayService: @unchecked Sendable {
     /// The owner argument is deliberately explicit. It prevents a revision or
     /// operation ID in one owner's partition from authorizing a mutation in a
     /// different partition.
+    public func submit(
+        _ operation: SignedOperation,
+        owner: DeviceIdentity
+    ) throws -> DurableSubmitResult {
+        try submit(operation, owner: owner) { _, _ in .acknowledgement }
+    }
+
     public func submit(
         _ operation: SignedOperation,
         owner: DeviceIdentity,
@@ -171,12 +209,19 @@ public final class DurableRelayService: @unchecked Sendable {
         } catch {
             throw DurableRelayError.invalidEnvelope
         }
+        guard operation.operationID == envelope.operationID else {
+            throw DurableRelayError.invalidEnvelope
+        }
 
         let bodyDigest = CompanionCanonical.digest(operation.body)
         return try store.transaction { database in
             var ledger = try ledger(for: owner, in: &database)
-            try authorization.authorize(operation: operation, envelope: envelope, owner: owner, ledger: ledger)
 
+            // Replay is resolved from the committed receipt before current
+            // authorization is evaluated. This is essential after a consent
+            // revoke: a lost acknowledgement must return its original result,
+            // while a newly minted operation is still checked against current
+            // state.
             if let prior = ledger.operations[envelope.operationID] {
                 guard prior.ownerID == owner.identityID,
                       prior.kind == operation.kind,
@@ -196,6 +241,8 @@ public final class DurableRelayService: @unchecked Sendable {
                 return DurableSubmitResult(result: result, receipt: receipt)
             }
 
+            try authorization.authorize(operation: operation, envelope: envelope, owner: owner, ledger: ledger)
+
             guard envelope.expectedRevision == ledger.revision else {
                 throw DurableRelayError.staleRevision(expected: envelope.expectedRevision,
                                                        actual: ledger.revision)
@@ -203,7 +250,22 @@ public final class DurableRelayService: @unchecked Sendable {
             let baseRevision = ledger.revision
             guard baseRevision < Int64.max else { throw DurableRelayError.revisionOverflow }
 
-            let result = try mutation(&ledger, envelope)
+            let result: RelayResult
+            if DurableAuthorizationPolicy.modeledKinds.contains(operation.kind), operation.kind != "ack" {
+                // Stateful protocol kinds are never delegated to an arbitrary
+                // closure. The owner-locked reducer validates the complete
+                // graph and performs the mutation before the receipt row.
+                result = try DurableProtocolReducer.apply(kind: operation.kind,
+                                                          envelope: envelope,
+                                                          signer: operation.signer,
+                                                          owner: owner,
+                                                          ledger: &ledger,
+                                                          now: now())
+            } else {
+                // Only inert, owner-authorized integration hooks may use the
+                // generic seam; they cannot substitute for protocol state.
+                result = try mutation(&ledger, envelope)
+            }
             guard ledger.revision == baseRevision else {
                 throw DurableRelayError.mutationChangedRevision(expected: baseRevision,
                                                                  actual: ledger.revision)

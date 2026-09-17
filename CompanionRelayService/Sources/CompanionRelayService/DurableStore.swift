@@ -30,6 +30,8 @@ public struct DurableOwnerLedger: Codable, Sendable {
     public var approvalUses: [String: DurableApprovalUseRecord]
     public var relationshipConsents: [String: RelationshipConsent]
     public var usedConsentNonces: Set<String>
+    public var usedApprovalIDs: Set<String>
+    public var usedApprovalNonces: Set<String>
     public var rateLimits: [String: DurableRateLimitRecord]
     public var audit: [DurableAuditEvent]
 
@@ -45,6 +47,8 @@ public struct DurableOwnerLedger: Codable, Sendable {
                 approvalUses: [String: DurableApprovalUseRecord] = [:],
                 relationshipConsents: [String: RelationshipConsent] = [:],
                 usedConsentNonces: Set<String> = [],
+                usedApprovalIDs: Set<String> = [],
+                usedApprovalNonces: Set<String> = [],
                 rateLimits: [String: DurableRateLimitRecord] = [:],
                 audit: [DurableAuditEvent] = []) {
         self.owner = owner
@@ -61,6 +65,8 @@ public struct DurableOwnerLedger: Codable, Sendable {
         self.approvalUses = approvalUses
         self.relationshipConsents = relationshipConsents
         self.usedConsentNonces = usedConsentNonces
+        self.usedApprovalIDs = usedApprovalIDs
+        self.usedApprovalNonces = usedApprovalNonces
         self.rateLimits = rateLimits
         self.audit = audit
     }
@@ -68,7 +74,8 @@ public struct DurableOwnerLedger: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case owner, revision, operations, invitations, pendingAcceptances, pairings,
              pairingEpochs, sessions, currentSessionID, requests, approvals, approvalUses,
-             relationshipConsents, usedConsentNonces, rateLimits, audit
+             relationshipConsents, usedConsentNonces, usedApprovalIDs, usedApprovalNonces,
+             rateLimits, audit
     }
 
     public init(from decoder: Decoder) throws {
@@ -84,9 +91,16 @@ public struct DurableOwnerLedger: Codable, Sendable {
         self.currentSessionID = try c.decodeIfPresent(String.self, forKey: .currentSessionID)
         self.requests = try c.decode([String: DurableRequestRecord].self, forKey: .requests)
         self.approvals = try c.decode([String: DurableApprovalRecord].self, forKey: .approvals)
-        self.approvalUses = try c.decode([String: DurableApprovalUseRecord].self, forKey: .approvalUses)
+        let decodedUses = try c.decode([String: DurableApprovalUseRecord].self, forKey: .approvalUses)
+        self.approvalUses = decodedUses
         self.relationshipConsents = try c.decodeIfPresent([String: RelationshipConsent].self, forKey: .relationshipConsents) ?? [:]
         self.usedConsentNonces = try c.decodeIfPresent(Set<String>.self, forKey: .usedConsentNonces) ?? []
+        let migratedApprovalIDs = Set(decodedUses.values.flatMap { [$0.useID, $0.approvalID] })
+        self.usedApprovalIDs = try c.decodeIfPresent(Set<String>.self, forKey: .usedApprovalIDs) ?? migratedApprovalIDs
+        let migratedApprovalNonces = Set(self.approvals.values.compactMap {
+            $0.approval.nonce.isEmpty ? nil : durableBase64URL($0.approval.nonce)
+        })
+        self.usedApprovalNonces = try c.decodeIfPresent(Set<String>.self, forKey: .usedApprovalNonces) ?? migratedApprovalNonces
         self.rateLimits = try c.decode([String: DurableRateLimitRecord].self, forKey: .rateLimits)
         self.audit = try c.decode([DurableAuditEvent].self, forKey: .audit)
     }
@@ -320,14 +334,18 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                   ledger.approvals.count <= CompanionLimits.maxSnapshotRecords,
                   ledger.approvalUses.count <= CompanionLimits.maxSnapshotRecords,
                   ledger.relationshipConsents.count <= CompanionLimits.maxSnapshotRecords,
-                  ledger.usedConsentNonces.count <= CompanionLimits.maxSnapshotRecords else {
+                  ledger.usedConsentNonces.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.usedApprovalIDs.count <= CompanionLimits.maxSnapshotRecords,
+                  ledger.usedApprovalNonces.count <= CompanionLimits.maxSnapshotRecords else {
                 throw DurableStoreError.invalidSnapshot
             }
             try ledger.owner.validate()
 
+            var operationRevisions = Set<Int64>()
             for (key, record) in ledger.operations {
                 guard key == record.operationID, record.ownerID == ownerID,
                       record.committedRevision > 0, record.committedRevision <= ledger.revision,
+                      operationRevisions.insert(record.committedRevision).inserted,
                       record.bodyDigest.count == 32, record.responseDigest.count == 32,
                       record.responseDigest == Data(SHA256.hash(data: record.responseBody)) else {
                     throw DurableStoreError.invalidSnapshot
@@ -373,13 +391,47 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                     throw DurableStoreError.invalidSnapshot
                 }
                 try request.request.validateShapeForDurableStore()
+                guard request.request.purpose == .approveEarlyEnd,
+                      request.request.message == nil,
+                      (request.request.consentGeneration > 0
+                       && request.request.targetBindings.allSatisfy({ $0.consentGeneration > 0 })
+                       || (request.request.status == .expired && request.request.consentGeneration == 0
+                           && request.request.targetBindings.allSatisfy({ $0.consentGeneration == 0 }))) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                guard request.request.targetBindings.allSatisfy({ binding in
+                    guard let pairing = ledger.pairings[binding.pairingID]?.pairing else { return false }
+                    return pairing.owner == ledger.owner
+                        && pairing.approver.identityID == binding.approverIdentityID
+                        && pairing.epoch == binding.pairEpoch
+                }) else { throw DurableStoreError.invalidSnapshot }
+                guard ledger.sessions[request.request.sessionID] != nil,
+                      ledger.sessions[request.request.sessionID]?.session.activeSetID == request.request.activeSetID else {
+                    throw DurableStoreError.invalidSnapshot
+                }
                 if let date = request.cancelledAt { try requireValidDate(date) }
                 if let date = request.expiredAt { try requireValidDate(date) }
                 if let date = request.supersededAt { try requireValidDate(date) }
             }
+            var approvalTargets: [String: Set<String>] = [:]
+            var approvalNonces = Set<String>()
             for (key, approval) in ledger.approvals {
                 guard key == approval.approval.approvalID else { throw DurableStoreError.invalidSnapshot }
                 try approval.approval.validateSignature(); try requireValidDate(approval.acceptedAt)
+                guard approval.approval.decision != .pending,
+                      let request = ledger.requests[approval.approval.requestID]?.request,
+                      request.sessionID == approval.approval.sessionID,
+                      request.activeSetID == approval.approval.activeSetID,
+                      request.binding(for: approval.approval.approver.identityID)?.pairingID == approval.approval.pairingID,
+                      request.binding(for: approval.approval.approver.identityID)?.pairEpoch == approval.approval.pairEpoch,
+                      request.binding(for: approval.approval.approver.identityID)?.consentGeneration == approval.approval.consentGeneration,
+                      approvalTargets[approval.approval.requestID, default: []].insert(approval.approval.approver.identityID).inserted,
+                      (approval.approval.nonce.isEmpty || approvalNonces.insert(durableBase64URL(approval.approval.nonce)).inserted) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+            }
+            guard ledger.usedApprovalNonces.isSuperset(of: approvalNonces.filter { !$0.isEmpty }) else {
+                throw DurableStoreError.invalidSnapshot
             }
             for (key, consent) in ledger.relationshipConsents {
                 guard key == consent.relationshipID, consent.owner == ledger.owner else {
@@ -398,10 +450,20 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                     throw DurableStoreError.invalidSnapshot
                 }
             }
+            for approvalID in ledger.usedApprovalIDs {
+                guard isValidIdentifier(approvalID) else { throw DurableStoreError.invalidSnapshot }
+            }
+            for nonce in ledger.usedApprovalNonces {
+                guard let data = durableDataFromBase64URL(nonce), data.count >= 16, data.count <= 64 else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+            }
             for (key, use) in ledger.approvalUses {
                 guard key == use.useID, isValidIdentifier(use.useID),
                       isValidIdentifier(use.approvalID), isValidIdentifier(use.requestID),
-                      use.committedRevision > 0, use.committedRevision <= ledger.revision else {
+                      use.committedRevision > 0, use.committedRevision <= ledger.revision,
+                      ledger.usedApprovalIDs.contains(use.useID), ledger.usedApprovalIDs.contains(use.approvalID),
+                      ledger.approvals[use.approvalID]?.approval.requestID == use.requestID else {
                     throw DurableStoreError.invalidSnapshot
                 }
                 try requireValidDate(use.usedAt)
@@ -438,8 +500,13 @@ private extension TrustedRequest {
         guard !requestID.isEmpty, requestID.utf8.count <= CompanionLimits.maxIdentifierLength,
               !sessionID.isEmpty, !activeSetID.isEmpty, !pairingID.isEmpty,
               pairEpoch > 0, !targetedApproverIDs.isEmpty,
+              targetedApproverIDs.count <= CompanionLimits.maxTargets,
               targetedApproverIDs.count == targetBindings.count,
               Set(targetedApproverIDs).count == targetedApproverIDs.count,
+              targetBindings.map(\.approverIdentityID) == targetedApproverIDs,
+              targetBindings.first?.pairingID == pairingID,
+              targetBindings.first?.pairEpoch == pairEpoch,
+              targetBindings.first?.consentGeneration == consentGeneration,
               Set(decisions.keys) == Set(targetedApproverIDs), expiresAt > createdAt,
               expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime else {
             throw CompanionError.malformed("invalid durable request")
@@ -451,8 +518,11 @@ private extension TrustedRequest {
             guard decisions[target] != nil else { throw CompanionError.malformed("missing durable decision") }
         }
         for binding in targetBindings { try binding.validateShape() }
-        if let message = message, message.isEmpty || message.utf8.count > CompanionLimits.maxMessageBytes {
-            throw CompanionError.malformed("invalid durable message")
+        guard message == nil,
+              (consentGeneration > 0 && targetBindings.allSatisfy({ $0.consentGeneration > 0 })
+               || (status == .expired && consentGeneration == 0
+                   && targetBindings.allSatisfy({ $0.consentGeneration == 0 }))) else {
+            throw CompanionError.malformed("invalid durable request authority")
         }
         try requireValidDate(createdAt); try requireValidDate(expiresAt)
     }

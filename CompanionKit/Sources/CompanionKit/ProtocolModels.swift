@@ -218,20 +218,39 @@ public struct RequestTargetBinding: Codable, Hashable, Sendable {
     public let approverIdentityID: String
     public let pairingID: String
     public let pairEpoch: UInt64
+    /// The exact bilateral-consent generation observed when this target was
+    /// selected. Zero is accepted only by legacy decoding and is never
+    /// accepted by a relay request/approval reducer.
+    public let consentGeneration: UInt64
 
-    public init(pairing: Pairing) throws {
+    public init(pairing: Pairing, consentGeneration: UInt64 = 1) throws {
         try pairing.validate()
         guard pairing.state == .active else { throw CompanionError.revokedPairing }
         self.approverIdentityID = pairing.approver.identityID
         self.pairingID = pairing.pairingID
         self.pairEpoch = pairing.epoch
+        self.consentGeneration = consentGeneration
     }
 
-    public init(approverIdentityID: String, pairingID: String, pairEpoch: UInt64) throws {
+    public init(approverIdentityID: String, pairingID: String, pairEpoch: UInt64,
+                consentGeneration: UInt64 = 1) throws {
         try requireIdentifier(approverIdentityID, name: "approver ID")
         try requireIdentifier(pairingID, name: "pairing ID")
         guard pairEpoch > 0 else { throw CompanionError.malformed("invalid pairing epoch") }
         self.approverIdentityID = approverIdentityID; self.pairingID = pairingID; self.pairEpoch = pairEpoch
+        self.consentGeneration = consentGeneration
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case approverIdentityID, pairingID, pairEpoch, consentGeneration
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(approverIdentityID: c.decode(String.self, forKey: .approverIdentityID),
+                      pairingID: c.decode(String.self, forKey: .pairingID),
+                      pairEpoch: c.decode(UInt64.self, forKey: .pairEpoch),
+                      consentGeneration: c.decodeIfPresent(UInt64.self, forKey: .consentGeneration) ?? 0)
     }
 
     public func validateShape() throws {
@@ -248,6 +267,9 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
     /// also be checked through `targetBindings`.
     public let pairingID: String
     public let pairEpoch: UInt64
+    /// Compatibility value for the first target. Multi-target requests bind
+    /// each target's generation in `targetBindings`.
+    public let consentGeneration: UInt64
     public let sessionID: String
     public let activeSetID: String
     public let purpose: TrustedRequestPurpose
@@ -279,6 +301,7 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
         try requireIdentifier(requestID, name: "request ID")
         guard !targetBindings.isEmpty, targetBindings.count <= CompanionLimits.maxTargets,
               Set(targetBindings.map(\.approverIdentityID)).count == targetBindings.count,
+              targetBindings.allSatisfy({ $0.consentGeneration > 0 }),
               session.owner == owner, purpose == .approveEarlyEnd,
               expiresAt > createdAt, expiresAt <= session.endsAt,
               expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime else {
@@ -293,6 +316,7 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
         let targets = targetBindings.map(\.approverIdentityID)
         self.requestID = requestID; self.owner = owner
         self.pairingID = targetBindings[0].pairingID; self.pairEpoch = targetBindings[0].pairEpoch
+        self.consentGeneration = targetBindings[0].consentGeneration
         self.sessionID = session.sessionID; self.activeSetID = session.activeSetID
         self.purpose = purpose
         self.targetedApproverIDs = targets; self.targetBindings = targetBindings
@@ -301,7 +325,7 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case requestID, owner, pairingID, pairEpoch, sessionID, activeSetID, purpose,
+        case requestID, owner, pairingID, pairEpoch, consentGeneration, sessionID, activeSetID, purpose,
              targetedApproverIDs, targetBindings, message, createdAt, expiresAt, status, decisions
     }
 
@@ -315,13 +339,21 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
         self.activeSetID = try container.decode(String.self, forKey: .activeSetID)
         self.purpose = try container.decodeIfPresent(TrustedRequestPurpose.self, forKey: .purpose) ?? .approveEarlyEnd
         self.targetedApproverIDs = try container.decode([String].self, forKey: .targetedApproverIDs)
-        self.targetBindings = try container.decode([RequestTargetBinding].self, forKey: .targetBindings)
+        let targetBindings = try container.decode([RequestTargetBinding].self, forKey: .targetBindings)
+        self.targetBindings = targetBindings
+        self.consentGeneration = try container.decodeIfPresent(UInt64.self, forKey: .consentGeneration)
+            ?? targetBindings.first?.consentGeneration ?? 0
         // Drop the pre-scope free-form field during migration rather than
         // exposing historical material through a trusted-person inbox.
         self.message = nil
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
-        self.status = try container.decode(TrustedRequestStatus.self, forKey: .status)
+        let decodedStatus = try container.decode(TrustedRequestStatus.self, forKey: .status)
+        let legacyGeneration = self.consentGeneration == 0 || targetBindings.contains { $0.consentGeneration == 0 }
+        // An old approved request is a historical artifact, not a capability.
+        // Keep it inspectable as expired but never let a later consent grant
+        // make it eligible again.
+        self.status = legacyGeneration ? .expired : decodedStatus
         self.decisions = try container.decode([String: ApproverDecision].self, forKey: .decisions)
     }
 
@@ -332,19 +364,21 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
     public func validateShape() throws {
         try validateCommon()
         guard purpose == .approveEarlyEnd,
+              consentGeneration > 0,
+              targetBindings.allSatisfy({ $0.consentGeneration > 0 }),
               status == .pending, decisions.values.allSatisfy({ $0 == .pending }) else {
             throw CompanionError.malformed("invalid trusted request")
         }
     }
 
     func validatePersisted() throws {
-        try validateCommon()
+        try validateCommon(allowLegacyTerminal: true)
         guard decisions.values.allSatisfy({ $0 == .pending || $0 == .approved || $0 == .declined }) else {
             throw CompanionError.malformed("invalid stored decision")
         }
     }
 
-    private func validateCommon() throws {
+    private func validateCommon(allowLegacyTerminal: Bool = false) throws {
         try requireIdentifier(requestID, name: "request ID"); try owner.validate()
         try requireIdentifier(pairingID, name: "pairing ID"); try requireIdentifier(sessionID, name: "session ID")
         try requireIdentifier(activeSetID, name: "active set ID")
@@ -354,6 +388,10 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
               targetBindings.count == targetedApproverIDs.count,
               targetBindings.map(\.approverIdentityID) == targetedApproverIDs,
               targetBindings.first?.pairingID == pairingID, targetBindings.first?.pairEpoch == pairEpoch,
+              targetBindings.first?.consentGeneration == consentGeneration,
+              (consentGeneration > 0 && targetBindings.allSatisfy({ $0.consentGeneration > 0 })
+               || (allowLegacyTerminal && status == .expired && consentGeneration == 0
+                   && targetBindings.allSatisfy({ $0.consentGeneration == 0 }))),
               Set(decisions.keys) == Set(targetedApproverIDs), expiresAt > createdAt,
               expiresAt.timeIntervalSince(createdAt) <= CompanionLimits.maxRequestLifetime else {
             throw CompanionError.malformed("invalid stored request")
@@ -373,11 +411,14 @@ public struct TrustedRequest: Codable, Hashable, Sendable {
 public struct Approval: Codable, Hashable, Sendable {
     public let approvalID: String
     /// Fresh per approval. An empty value is accepted only when decoding a
-    /// pre-scope snapshot; newly submitted approvals must carry a nonce.
+    /// pre-generation snapshot; newly submitted approvals must carry a nonce.
     public let nonce: Data
     public let requestID: String
     public let pairingID: String
     public let pairEpoch: UInt64
+    /// Bilateral consent generation bound into the approver signature.
+    /// Generation zero is legacy and permanently unusable.
+    public let consentGeneration: UInt64
     public let sessionID: String
     public let activeSetID: String
     public let approver: DeviceIdentity
@@ -388,15 +429,16 @@ public struct Approval: Codable, Hashable, Sendable {
     public init(approvalID: String, requestID: String, pairingID: String, pairEpoch: UInt64,
                 sessionID: String, activeSetID: String, approver: DeviceIdentity,
                 decision: ApproverDecision, issuedAt: Date,
-                nonce: Data = Data(repeating: 0, count: 16), signature: Data) {
+                consentGeneration: UInt64 = 0, nonce: Data = Data(), signature: Data) {
         self.approvalID = approvalID; self.requestID = requestID; self.pairingID = pairingID
-        self.pairEpoch = pairEpoch; self.sessionID = sessionID; self.activeSetID = activeSetID
+        self.pairEpoch = pairEpoch; self.consentGeneration = consentGeneration
+        self.sessionID = sessionID; self.activeSetID = activeSetID
         self.approver = approver; self.decision = decision; self.issuedAt = issuedAt
         self.nonce = nonce; self.signature = signature
     }
 
     private enum CodingKeys: String, CodingKey {
-        case approvalID, nonce, requestID, pairingID, pairEpoch, sessionID, activeSetID,
+        case approvalID, nonce, requestID, pairingID, pairEpoch, consentGeneration, sessionID, activeSetID,
              approver, decision, issuedAt, signature
     }
 
@@ -407,6 +449,7 @@ public struct Approval: Codable, Hashable, Sendable {
         self.requestID = try container.decode(String.self, forKey: .requestID)
         self.pairingID = try container.decode(String.self, forKey: .pairingID)
         self.pairEpoch = try container.decode(UInt64.self, forKey: .pairEpoch)
+        self.consentGeneration = try container.decodeIfPresent(UInt64.self, forKey: .consentGeneration) ?? 0
         self.sessionID = try container.decode(String.self, forKey: .sessionID)
         self.activeSetID = try container.decode(String.self, forKey: .activeSetID)
         self.approver = try container.decode(DeviceIdentity.self, forKey: .approver)
@@ -416,8 +459,9 @@ public struct Approval: Codable, Hashable, Sendable {
     }
 
     public func signingFields() -> [String] {
-        var fields = [approvalID, requestID, pairingID, String(pairEpoch), sessionID, activeSetID, approver.identityID,
-                      base64URL(approver.publicKey), decision.rawValue, String(milliseconds(issuedAt))]
+        var fields = [approvalID, requestID, pairingID, String(pairEpoch), String(consentGeneration),
+                      sessionID, activeSetID, approver.identityID, base64URL(approver.publicKey),
+                      decision.rawValue, String(milliseconds(issuedAt))]
         if !nonce.isEmpty { fields.append(base64URL(nonce)) }
         return fields
     }
@@ -432,10 +476,12 @@ public struct Approval: Codable, Hashable, Sendable {
         try requireIdentifier(pairingID, name: "pairing ID"); try requireIdentifier(sessionID, name: "session ID")
         try requireIdentifier(activeSetID, name: "active set ID"); try approver.validate(); try requireTimestamp(issuedAt, name: "approval time")
         guard pairEpoch > 0, decision != .pending,
-              nonce.isEmpty || (nonce.count >= 16 && nonce.count <= 64), signature.count == 64,
+              (consentGeneration > 0 && nonce.count >= 16 && nonce.count <= 64)
+                || (consentGeneration == 0 && nonce.isEmpty), signature.count == 64,
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: approver.publicKey),
               (key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).approval", fields: signingFields()))
-               || (nonce.isEmpty && key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).approval", fields: legacySigningFields())))) else {
+               || (consentGeneration == 0 && nonce.isEmpty
+                   && key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).approval", fields: legacySigningFields())))) else {
             throw CompanionError.invalidSignature
         }
     }
@@ -445,6 +491,10 @@ public struct ApprovalVerification: Codable, Hashable, Sendable {
     public let approval: Approval
     public let verifiedAt: Date
     public let useID: String
+
+    public init(approval: Approval, verifiedAt: Date, useID: String) {
+        self.approval = approval; self.verifiedAt = verifiedAt; self.useID = useID
+    }
 }
 
 // MARK: - Signed relay envelope
@@ -531,7 +581,7 @@ public struct SignedOperation: Codable, Hashable, Sendable {
 }
 
 public struct RelaySnapshot: Codable, Sendable {
-    static let currentSchemaVersion: UInt16 = 1
+    static let currentSchemaVersion: UInt16 = 2
     let schemaVersion: UInt16
     let owner: DeviceIdentity
     let currentTime: Date
@@ -599,6 +649,10 @@ public struct RelaySnapshot: Codable, Sendable {
 // MARK: - Local transport and client
 
 public protocol CompanionTransport: Sendable {
+    /// Reads the current bilateral-consent generation before a request is
+    /// signed. A transport that cannot provide this must fail closed.
+    func consent(relationshipID: String) throws -> RelationshipConsent
+
     /// A successful response includes the committed owner-scoped revision.
     /// Implementations must persist the response receipt atomically with the
     /// command before returning it.
@@ -606,6 +660,12 @@ public protocol CompanionTransport: Sendable {
     /// Foreground fetch is also authenticated. Notification/APNs delivery is
     /// intentionally outside this package and never authorizes an action.
     func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse
+}
+
+public extension CompanionTransport {
+    func consent(relationshipID: String) throws -> RelationshipConsent {
+        throw CompanionError.notFound
+    }
 }
 
 public enum RelayResult: Codable, Hashable, Sendable {
@@ -737,7 +797,13 @@ public struct CompanionClient: Sendable {
               pairings.count == targets.count,
               Set(targets).count == targets.count,
               zip(pairings, targets).allSatisfy({ $0.0.owner == signer.identity && $0.0.approver.identityID == $0.1 }) else { throw CompanionError.wrongTarget }
-        let bindings = try pairings.map { try RequestTargetBinding(pairing: $0) }
+        let bindings = try pairings.map { pairing in
+            guard let consent = try? transport.consent(relationshipID: pairing.pairingID),
+                  consent.pairingID == pairing.pairingID,
+                  consent.pairEpoch == pairing.epoch,
+                  consent.generation > 0 else { throw CompanionError.consentRequired }
+            return try RequestTargetBinding(pairing: pairing, consentGeneration: consent.generation)
+        }
         let createdAt = now()
         let request = try TrustedRequest(requestID: requestID, owner: signer.identity,
                                          targetBindings: bindings, session: session,
@@ -749,14 +815,19 @@ public struct CompanionClient: Sendable {
     public func submitApproval(request: TrustedRequest, pairing: Pairing, decision: ApproverDecision,
                                 approvalID: String = UUID().uuidString, nonce: Data? = nil) throws -> Approval {
         guard signer.identity == pairing.approver else { throw CompanionError.unauthorized }
+        guard let binding = request.binding(for: signer.identity.identityID),
+              binding.pairingID == pairing.pairingID, binding.pairEpoch == pairing.epoch,
+              binding.consentGeneration > 0 else { throw CompanionError.wrongTarget }
         let unsigned = Approval(approvalID: approvalID, requestID: request.requestID, pairingID: pairing.pairingID,
                                 pairEpoch: pairing.epoch, sessionID: request.sessionID, activeSetID: request.activeSetID,
                                 approver: signer.identity, decision: decision, issuedAt: now(),
+                                consentGeneration: binding.consentGeneration,
                                 nonce: nonce ?? randomNonce(), signature: Data())
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).approval", fields: unsigned.signingFields())
         let approval = Approval(approvalID: unsigned.approvalID, requestID: unsigned.requestID, pairingID: unsigned.pairingID,
                                pairEpoch: unsigned.pairEpoch, sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
                                approver: unsigned.approver, decision: unsigned.decision, issuedAt: unsigned.issuedAt,
+                               consentGeneration: unsigned.consentGeneration,
                                nonce: unsigned.nonce, signature: signature)
         guard case let .approval(value) = try submit("approval", approval) else { throw CompanionError.malformed("relay response") }
         return value
@@ -764,7 +835,8 @@ public struct CompanionClient: Sendable {
 
     public func useApproval(_ approval: Approval, request: TrustedRequest, useID: String) throws -> ApprovalVerification {
         guard signer.identity == request.owner else { throw CompanionError.unauthorized }
-        let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: useID)
+        let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: useID,
+                              consentGeneration: approval.consentGeneration)
         guard case let .verification(value) = try submit("use", use) else { throw CompanionError.malformed("relay response") }
         return value
     }
@@ -835,7 +907,14 @@ public struct ApprovalUse: Codable, Sendable {
     public let approval: Approval
     public let requestID: String
     public let useID: String
-    public init(approval: Approval, requestID: String, useID: String) { self.approval = approval; self.requestID = requestID; self.useID = useID }
+    /// Redundant on purpose: a durable use command must carry the generation
+    /// it intends to consume, not merely an opaque approval blob.
+    public let consentGeneration: UInt64
+    public init(approval: Approval, requestID: String, useID: String,
+                consentGeneration: UInt64? = nil) {
+        self.approval = approval; self.requestID = requestID; self.useID = useID
+        self.consentGeneration = consentGeneration ?? approval.consentGeneration
+    }
 }
 public struct InboxQuery: Codable, Sendable {
     public let identityID: String

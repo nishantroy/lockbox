@@ -33,6 +33,19 @@ public struct DurableOperationEnvelope: Codable, Hashable, Sendable {
     }
 }
 
+/// Natural end is an owner-authenticated lifecycle transition. The reducer
+/// compares this exact session and active set with the current ledger before
+/// terminally expiring outstanding requests.
+public struct DurableNaturalEnd: Codable, Hashable, Sendable {
+    public let sessionID: String
+    public let activeSetID: String
+
+    public init(sessionID: String, activeSetID: String) {
+        self.sessionID = sessionID
+        self.activeSetID = activeSetID
+    }
+}
+
 public enum DurableDeliveryContract {
     /// APNs/push may wake a client, but carries no authority and is not state.
     public static let pushIsWakeHintOnly = true
@@ -50,10 +63,14 @@ public enum DurableOperationFactory {
                                                      expectedRevision: expectedRevision,
                                                      payload: payloadData)
         let envelopeData = try encoder.encode(envelope)
-        let fields = [kind, signer.identity.identityID, durableBase64URL(signer.identity.publicKey),
-                      durableBase64URL(CompanionCanonical.digest(envelopeData))]
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation", fields: fields)
-        return try SignedOperation(kind: kind, signer: signer.identity,
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: kind, signer: signer.identity,
+                                           body: envelopeData,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        return try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                   kind: kind, signer: signer.identity,
                                    body: envelopeData, signature: signature)
     }
 

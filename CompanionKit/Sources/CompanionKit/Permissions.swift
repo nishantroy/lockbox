@@ -1,7 +1,8 @@
 import Foundation
 
 /// Capabilities are relationship-scoped. R5 contains only the controls needed
-/// for exact-session early-end approval; the R6 values are schema reservations
+/// for exact-session early-end approval. `mutualPact` remains reserved until a
+/// pairing-bound pact operation exists; the R6 values are schema reservations
 /// and are never active in this package.
 public enum CompanionScope: String, Codable, CaseIterable, Hashable, Sendable {
     case approveEarlyEnd
@@ -12,11 +13,13 @@ public enum CompanionScope: String, Codable, CaseIterable, Hashable, Sendable {
 
     public var isR5: Bool {
         switch self {
-        case .approveEarlyEnd, .receiveRequests, .mutualPact: return true
-        case .earlyEndNotices, .weeklySharedSummaries: return false
+        case .approveEarlyEnd, .receiveRequests: return true
+        case .mutualPact, .earlyEndNotices, .weeklySharedSummaries: return false
         }
     }
 
+    /// Reserved capabilities are represented for schema compatibility but are
+    /// never accepted by consent or operation authorization.
     public var isReservedR6: Bool { !isR5 }
 }
 
@@ -57,12 +60,15 @@ public enum ConsentSide: String, Codable, Hashable, Sendable {
 /// The schema can carry R6 names for migration/forward compatibility, but
 /// activeScopes never authorizes an R6 capability.
 public struct RelationshipConsent: Codable, Hashable, Sendable {
-    public static let currentSchemaVersion: UInt16 = 1
+    public static let currentSchemaVersion: UInt16 = 2
 
     public let schemaVersion: UInt16
     public let relationshipID: String
     public let pairingID: String
     public let pairEpoch: UInt64
+    /// Monotonically advances for every consent mutation. A zero value only
+    /// exists on a migrated pre-generation record and is permanently denied.
+    public private(set) var generation: UInt64
     public let owner: DeviceIdentity
     public let approver: DeviceIdentity
     public var ownerScopes: [CompanionScope]
@@ -75,14 +81,17 @@ public struct RelationshipConsent: Codable, Hashable, Sendable {
                 owner: DeviceIdentity, approver: DeviceIdentity,
                 ownerScopes: [CompanionScope] = [], approverScopes: [CompanionScope] = [],
                 ownerState: ConsentSide = .pending, approverState: ConsentSide = .pending,
-                updatedAt: Date, schemaVersion: UInt16 = currentSchemaVersion) throws {
+                updatedAt: Date, generation: UInt64 = 1,
+                schemaVersion: UInt16 = currentSchemaVersion) throws {
         try requireIdentifier(relationshipID, name: "relationship ID")
         try requireIdentifier(pairingID, name: "pairing ID")
         guard pairEpoch > 0, relationshipID == pairingID,
               owner.role == .owner, approver.role == .trustedApprover,
               ownerScopes.count == Set(ownerScopes).count,
               approverScopes.count == Set(approverScopes).count,
-              schemaVersion == Self.currentSchemaVersion else {
+              schemaVersion == Self.currentSchemaVersion,
+              generation > 0 || (generation == 0 && ownerScopes.isEmpty && approverScopes.isEmpty
+                                 && ownerState == .revoked && approverState == .revoked) else {
             throw CompanionError.malformed("invalid relationship consent")
         }
         try owner.validate(); try approver.validate()
@@ -92,10 +101,56 @@ public struct RelationshipConsent: Codable, Hashable, Sendable {
         }
         self.schemaVersion = schemaVersion
         self.relationshipID = relationshipID; self.pairingID = pairingID; self.pairEpoch = pairEpoch
+        self.generation = generation
         self.owner = owner; self.approver = approver
         self.ownerScopes = ownerScopes.sorted { $0.rawValue < $1.rawValue }
         self.approverScopes = approverScopes.sorted { $0.rawValue < $1.rawValue }
         self.ownerState = ownerState; self.approverState = approverState; self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, relationshipID, pairingID, pairEpoch, generation, owner, approver,
+             ownerScopes, approverScopes, ownerState, approverState, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedSchema = try c.decodeIfPresent(UInt16.self, forKey: .schemaVersion) ?? 0
+        let relationshipID = try c.decode(String.self, forKey: .relationshipID)
+        let pairingID = try c.decode(String.self, forKey: .pairingID)
+        let pairEpoch = try c.decode(UInt64.self, forKey: .pairEpoch)
+        let owner = try c.decode(DeviceIdentity.self, forKey: .owner)
+        let approver = try c.decode(DeviceIdentity.self, forKey: .approver)
+        let ownerScopes = try c.decode([CompanionScope].self, forKey: .ownerScopes)
+        let approverScopes = try c.decode([CompanionScope].self, forKey: .approverScopes)
+        let ownerState = try c.decode(ConsentSide.self, forKey: .ownerState)
+        let approverState = try c.decode(ConsentSide.self, forKey: .approverState)
+        let updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        guard decodedSchema == Self.currentSchemaVersion,
+              let generation = try c.decodeIfPresent(UInt64.self, forKey: .generation), generation > 0 else {
+            // Scope-era records have no generation. Do not carry active
+            // authority forward into a later grant; migrate them to a
+            // terminal, empty consent that can only be replaced by a new
+            // signed mutation.
+            try self.init(relationshipID: relationshipID, pairingID: pairingID, pairEpoch: pairEpoch,
+                          owner: owner, approver: approver, ownerScopes: [], approverScopes: [],
+                          ownerState: .revoked, approverState: .revoked, updatedAt: updatedAt,
+                          generation: 0)
+            return
+        }
+        try self.init(relationshipID: relationshipID, pairingID: pairingID, pairEpoch: pairEpoch,
+                      owner: owner, approver: approver, ownerScopes: ownerScopes,
+                      approverScopes: approverScopes, ownerState: ownerState,
+                      approverState: approverState, updatedAt: updatedAt,
+                      generation: generation, schemaVersion: Self.currentSchemaVersion)
+    }
+
+    /// Advances the bilateral authority generation exactly once. Callers must
+    /// atomically invalidate requests and approvals before acknowledging the
+    /// enclosing consent transaction.
+    public mutating func advanceGeneration() throws {
+        guard generation < UInt64.max else { throw CompanionError.malformed("consent generation exhausted") }
+        generation += 1
     }
 
     public func activeScopes() -> Set<CompanionScope> {
@@ -114,7 +169,8 @@ public struct RelationshipConsent: Codable, Hashable, Sendable {
                                     pairEpoch: pairEpoch, owner: owner, approver: approver,
                                     ownerScopes: ownerScopes, approverScopes: approverScopes,
                                     ownerState: ownerState, approverState: approverState,
-                                    updatedAt: updatedAt, schemaVersion: schemaVersion)
+                                    updatedAt: updatedAt, generation: generation,
+                                    schemaVersion: schemaVersion)
     }
 }
 

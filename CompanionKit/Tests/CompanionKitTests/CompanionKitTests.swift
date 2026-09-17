@@ -659,6 +659,9 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertThrowsError(try approver.acceptScopes(pairing: pairing, scopes: [.weeklySharedSummaries])) {
             XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
         }
+        XCTAssertThrowsError(try owner.grantScopes(pairing: pairing, scopes: [.mutualPact])) {
+            XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
+        }
         XCTAssertEqual(try relay.consent(relationshipID: pairing.pairingID).activeScopes(),
                        [.approveEarlyEnd, .receiveRequests])
     }
@@ -681,17 +684,80 @@ final class CompanionKitTests: XCTestCase {
         _ = relay
     }
 
-    func testPreScopeRequestDecodeDropsLegacyMessageAndDefaultsPurpose() throws {
-        let (_, owner, approver, pairing, session) = try harness()
+    func testPreScopeApprovedRequestMigratesTerminalAndCannotBeUsed() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
         let request = try owner.requestUnlock(requestID: "legacy-request", pairing: pairing, session: session,
                                               target: approver.signer.identity.identityID, message: nil, validFor: 600)
-        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as! [String: Any]
-        object.removeValue(forKey: "purpose")
-        object["message"] = "selected-apps-and-steps"
-        let migrated = try JSONDecoder().decode(TrustedRequest.self,
-                                                 from: JSONSerialization.data(withJSONObject: object))
-        XCTAssertEqual(migrated.purpose, .approveEarlyEnd)
-        XCTAssertNil(migrated.message)
+        let legacyUnsigned = Approval(approvalID: "legacy-approval", requestID: request.requestID,
+                                      pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                      sessionID: request.sessionID, activeSetID: request.activeSetID,
+                                      approver: approver.signer.identity, decision: .approved,
+                                      issuedAt: t, signature: Data())
+        let legacySignature = try approver.signer.sign(
+            domain: "\(CompanionCanonical.version).approval", fields: legacyUnsigned.signingFields())
+        let legacyApproval = Approval(approvalID: legacyUnsigned.approvalID, requestID: legacyUnsigned.requestID,
+                                      pairingID: legacyUnsigned.pairingID, pairEpoch: legacyUnsigned.pairEpoch,
+                                      sessionID: legacyUnsigned.sessionID, activeSetID: legacyUnsigned.activeSetID,
+                                      approver: legacyUnsigned.approver, decision: legacyUnsigned.decision,
+                                      issuedAt: legacyUnsigned.issuedAt, signature: legacySignature)
+        var object = try JSONSerialization.jsonObject(with: relay.snapshot()) as! [String: Any]
+        var requests = object["requests"] as! [[String: Any]]
+        requests[0].removeValue(forKey: "consentGeneration")
+        var bindings = requests[0]["targetBindings"] as! [[String: Any]]
+        bindings[0].removeValue(forKey: "consentGeneration")
+        requests[0]["targetBindings"] = bindings
+        requests[0]["status"] = "approved"
+        var decisions = requests[0]["decisions"] as! [String: String]
+        decisions[approver.signer.identity.identityID] = "approved"
+        requests[0]["decisions"] = decisions
+        object["requests"] = requests
+        object["approvals"] = [try JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyApproval))]
+        let migratedRelay = try InMemoryCompanionRelay(testSnapshot: JSONSerialization.data(withJSONObject: object))
+        let migratedRequest = try migratedRelay.request(id: request.requestID)
+        XCTAssertEqual(migratedRequest.status, .expired)
+        XCTAssertEqual(migratedRequest.consentGeneration, 0)
+        let fixedNow = t
+        let migratedOwner = CompanionClient(signer: owner.signer, transport: migratedRelay, now: { fixedNow })
+        XCTAssertThrowsError(try migratedOwner.useApproval(legacyApproval, request: migratedRequest,
+                                                            useID: "legacy-use"))
+    }
+
+    func testConsentGenerationInvalidatesApprovalAcrossRegrantAndRestart() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "generation-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "generation-approval")
+        let firstGeneration = try relay.consent(relationshipID: pairing.pairingID).generation
+        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let second = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        XCTAssertGreaterThan(second.generation, firstGeneration)
+        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        XCTAssertEqual(try relay.request(id: request.requestID).status, .expired)
+        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "generation-use"))
+        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), revisionAnchor: relay.currentRevision)
+        let fixedNow = t
+        let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted, now: { fixedNow })
+        XCTAssertThrowsError(try restartedOwner.useApproval(approval, request: request, useID: "generation-restart-use"))
+    }
+
+    func testApprovalSignatureBindsConsentGeneration() throws {
+        let (_, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "generation-signature-request", pairing: pairing,
+                                              session: session, target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "generation-signature-approval")
+        let altered = Approval(approvalID: approval.approvalID, requestID: approval.requestID,
+                               pairingID: approval.pairingID, pairEpoch: approval.pairEpoch,
+                               sessionID: approval.sessionID, activeSetID: approval.activeSetID,
+                               approver: approval.approver, decision: approval.decision,
+                               issuedAt: approval.issuedAt,
+                               consentGeneration: approval.consentGeneration + 1,
+                               nonce: approval.nonce, signature: approval.signature)
+        XCTAssertThrowsError(try altered.validateSignature()) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
     }
 
     func testQuietHoursArePrivateLocalNotificationPolicy() throws {

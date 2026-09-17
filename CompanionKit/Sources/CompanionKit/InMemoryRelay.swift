@@ -102,7 +102,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
               snapshot.operationRecords.count <= CompanionLimits.maxSnapshotRecords else {
             throw CompanionError.malformed("relay snapshot too large")
         }
-        guard snapshot.schemaVersion == 0 || snapshot.schemaVersion == RelaySnapshot.currentSchemaVersion else {
+        guard snapshot.schemaVersion == 0 || snapshot.schemaVersion == 1 ||
+              snapshot.schemaVersion == RelaySnapshot.currentSchemaVersion else {
             throw CompanionError.malformed("unsupported relay snapshot schema")
         }
         guard snapshot.owner.role == .owner else { throw CompanionError.unauthorized }
@@ -207,6 +208,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   request.sessionID == approval.sessionID, request.activeSetID == approval.activeSetID,
                   request.binding(for: approval.approver.identityID)?.pairingID == approval.pairingID,
                   request.binding(for: approval.approver.identityID)?.pairEpoch == approval.pairEpoch,
+                  request.binding(for: approval.approver.identityID)?.consentGeneration == approval.consentGeneration,
                   let pairing = pairings[approval.pairingID], pairing.owner == snapshot.owner,
                   pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
                   targetWasUnique, nonceWasUnique,
@@ -424,8 +426,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             } else {
                 consent = try RelationshipConsent(relationshipID: mutation.relationshipID, pairingID: pairing.pairingID,
                                                   pairEpoch: pairing.epoch, owner: owner, approver: pairing.approver,
-                                                  updatedAt: currentTime)
+                                                  ownerState: .revoked, approverState: .revoked,
+                                                  updatedAt: currentTime, generation: 0)
             }
+            guard consent.generation < UInt64.max else { throw CompanionError.malformed("consent generation exhausted") }
             switch mutation.action {
             case .ownerGrant:
                 consent.ownerScopes = mutation.scopes.scopes
@@ -448,9 +452,14 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                 consent.approverState = consent.approverScopes.isEmpty ? .revoked : .active
             }
             consent.updatedAt = currentTime
+            try consent.advanceGeneration()
             try consent.validate()
             usedConsentNonces.insert(nonceKey)
             relationshipConsents[mutation.relationshipID] = consent
+            // The generation change and terminal invalidation are one relay
+            // transaction. A lost acknowledgement or later regrant cannot
+            // revive an accepted request from the prior generation.
+            invalidateOutstandingAuthority(pairingID: pairing.pairingID)
             return .consent(consent)
 
         case "session":
@@ -522,6 +531,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             // accepted the approval or that its target actually approved.
             guard let acceptedApproval = approvals[use.approval.approvalID],
                   acceptedApproval == use.approval else { throw CompanionError.replay }
+            guard let livePairing = pairings[acceptedApproval.pairingID], livePairing.owner == owner,
+                  livePairing.state == .active, livePairing.epoch == acceptedApproval.pairEpoch else {
+                throw CompanionError.revokedPairing
+            }
             var currentRequest = request; updateExpiry(&currentRequest)
             let currentSession = sessions[owner.identityID]
             guard currentRequest.effectiveStatus(at: currentTime) == .approved,
@@ -541,6 +554,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard let pairing = pairings[acceptedApproval.pairingID], pairing.owner == owner,
                   pairing.state == .active, pairing.epoch == acceptedApproval.pairEpoch,
                   pairing.approver == acceptedApproval.approver,
+                  relationshipConsents[acceptedApproval.pairingID]?.generation == acceptedApproval.consentGeneration,
                   relationshipConsents[acceptedApproval.pairingID]?.authorizes(.approveEarlyEnd) == true,
                   relationshipConsents[acceptedApproval.pairingID]?.authorizes(.receiveRequests) == true else {
                 throw CompanionError.revokedPairing
@@ -582,6 +596,15 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard pairings[replacement.replacementPairingID] == nil else { throw CompanionError.replay }
             var revoked = previous
             revoked.state = .revoked
+            if var consent = relationshipConsents[previous.pairingID] {
+                try consent.advanceGeneration()
+                consent.ownerScopes = []; consent.approverScopes = []
+                consent.ownerState = .revoked; consent.approverState = .revoked
+                consent.updatedAt = currentTime
+                try consent.validate()
+                relationshipConsents[previous.pairingID] = consent
+            }
+            invalidateOutstandingAuthority(pairingID: previous.pairingID)
             let activated = try Pairing(pairingID: replacement.replacementPairingID, owner: owner,
                                     approver: replacement.replacement,
                                     epoch: replacement.replacementEpoch,
@@ -597,6 +620,15 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard operation.signer == owner, var pairing = pairings[reference.pairingID], pairing.owner == owner,
                   pairing.epoch == reference.epoch else { throw CompanionError.unauthorized }
             pairing.state = .revoked; pairings[reference.pairingID] = pairing
+            if var consent = relationshipConsents[reference.pairingID] {
+                try consent.advanceGeneration()
+                consent.ownerScopes = []; consent.approverScopes = []
+                consent.ownerState = .revoked; consent.approverState = .revoked
+                consent.updatedAt = currentTime
+                try consent.validate()
+                relationshipConsents[reference.pairingID] = consent
+            }
+            invalidateOutstandingAuthority(pairingID: reference.pairingID)
             return .acknowledgement
 
         default:
@@ -605,9 +637,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     }
 
     private func requireActiveScope(_ scope: CompanionScope, for binding: RequestTargetBinding) throws {
-        guard scope.isR5,
+        guard scope.isR5, binding.consentGeneration > 0,
               let consent = relationshipConsents[binding.pairingID],
               consent.pairEpoch == binding.pairEpoch,
+              consent.generation == binding.consentGeneration,
               consent.approver.identityID == binding.approverIdentityID else {
             throw CompanionError.consentRequired
         }
@@ -622,11 +655,26 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         for binding in request.targetBindings {
             guard let pairing = pairings[binding.pairingID], pairing.owner == owner,
                   pairing.approver.identityID == binding.approverIdentityID,
-                  pairing.epoch == binding.pairEpoch, pairing.state == .active else {
+                  pairing.epoch == binding.pairEpoch, pairing.state == .active,
+                  relationshipConsents[binding.pairingID]?.generation == binding.consentGeneration else {
                 throw CompanionError.wrongTarget
             }
         }
         guard request.expiresAt <= session.endsAt else { throw CompanionError.expired }
+    }
+
+    /// Terminally invalidates every request carrying authority for a pairing.
+    /// Approval rows remain immutable audit artifacts, but no request or
+    /// approval from the old generation can pass the use reducer.
+    private func invalidateOutstandingAuthority(pairingID: String) {
+        for key in requests.keys {
+            var request = requests[key]!
+            let targetsPairing = request.targetBindings.contains { $0.pairingID == pairingID }
+            if targetsPairing && request.status != .cancelled && request.status != .declined && request.status != .expired {
+                request.status = .expired
+            }
+            requests[key] = request
+        }
     }
 
     private func expireRequests(supersededBy session: ActiveSession) {

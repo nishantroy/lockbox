@@ -28,12 +28,14 @@ public final class CompanionPrototypeModel: ObservableObject {
                                                     nonce: Data(repeating: 4, count: 24))
             let acceptance = try approver.accept(invitation, acceptanceID: "developer-acceptance", now: now)
             let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: now)
+            _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+            _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
             let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "developer-session",
                                             activeSetID: "developer-active-set", startsAt: now.addingTimeInterval(-1),
                                             endsAt: now.addingTimeInterval(3_600))
             _ = try owner.publishSession(session)
             let request = try owner.requestUnlock(requestID: "developer-request", pairing: pairing, session: session,
-                                                  target: approverSigner.identity.identityID, message: "Demo only",
+                                                  target: approverSigner.identity.identityID, message: nil,
                                                   validFor: 600)
             let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
                                                        approvalID: "developer-approval")
