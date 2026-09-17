@@ -1,6 +1,6 @@
 # Phone Lockbox — interaction design
 
-Status: target behavior specification, not a description of the current Form-based prototype. Recovery UI, immutable active rules and bounded Lock now are not integrated yet. See [roadmap](roadmap.md) and [QA evidence](status-and-qa.md). Visual polish follows reliability.
+Status: target behavior specification, not a description of the current Form-based prototype. R2/R3 session, recovery, immutable active-rule and bounded Lock now behavior is integrated in the current source candidate; focused device acceptance remains open. See [roadmap](roadmap.md) and [QA evidence](status-and-qa.md). Visual polish follows reliability.
 
 Related: [product plan](product-plan.md), [technical plan](technical-plan.md).
 
@@ -101,13 +101,24 @@ At eligibility, expose “End this lock” with confirmation. No automatic unloc
 
 ### 5. Future optional accountability (after production relay)
 
-This does not appear in the bedtime MVP. Once the authenticated, durable trusted-person relay is production-ready, the owner can opt in and select accepted trusted people one at a time. Sender consent and recipient consent are explicit; event notices and weekly summaries are separate per-person choices. A recipient can opt out, and the owner can cancel a pending relationship or delivery. Multiple recipients remain independent. A mutual pact is two one-way relationships, so neither person controls or inspects the other's lock.
+This does not appear in the bedtime MVP. Once the authenticated, durable trusted-person relay is production-ready, the owner can opt in and select accepted trusted people one at a time. Sender consent and recipient consent are explicit and revocable. Per person, the owner separately chooses approval of early end, receipt of exact-session requests, early-end notices, weekly shared summaries and (optionally) a mutual pact. An approval is one-use, signed and bound to the exact session; the initial release rule is one-of-N first valid approval. A friend cannot start or extend a lock, change rules, or see selections, usage or task steps. A recipient can opt out, and the owner can cancel a pending relationship or delivery. Multiple recipients remain independent. A mutual pact is two one-way relationships, so neither person controls or inspects the other's lock.
 
 Use calm copy such as “Your Lockbox session ended early.” Never call an early end a failure or shame the owner. Natural end, recovery, trusted approval, authorization loss/integrity warning, and developer/emergency cleanup have distinct statuses. Event recording occurs locally before ordinary release clears policy and queues for offline delivery; emergency access never waits for the network. The server inbox/fetch is authoritative, while APNs/text are wake/reminder hints only.
 
-Notification previews are generic by default, and quiet hours defer presentation rather than bypassing them. The default payload includes no app selections, app/site usage, messages, or raw schedules. An optional weekly summary shows only planned, naturally completed, ended early, and unavailable/integrity-unknown counts/statuses—no streaks, scores, rankings, or shame. Delivery cancellation/late delivery, retention/deletion, reinstall/clock limits, and recipient opt-out are specified in [accountability design](accountability-design.md). Do not expose this flow while only the in-memory core or a relay simulation exists.
+Notification previews are generic by default, and quiet hours defer presentation rather than bypassing them. The default payload includes no app selections, app/site usage, messages, raw schedules, or task details. An optional weekly summary shows only planned, naturally completed, ended early, and unavailable/integrity-unknown counts/statuses—no streaks, scores, rankings, or shame. Delivery cancellation/late delivery, retention/deletion, reinstall/clock limits, and recipient opt-out are specified in [accountability design](accountability-design.md). Do not expose this flow while only the in-memory core or a relay simulation exists.
 
-### 6. Authorization or enforcement problem
+### 6. Future local insights, schedules and quick actions
+
+These surfaces follow the [roadmap](roadmap.md) after R5/R6 and do not weaken the bedtime lifecycle:
+
+- **Screen Time insights:** first run a DeviceActivityReport feasibility spike. Today/7-day top apps and categories, inside/outside protected time, and a by-hour/day heatmap are shown only when supported. Keep data local; do not promise raw report export, pickups or notifications unless Apple's APIs provide them.
+- **Safety assistant:** offer an essentials checklist, strict allow-only warnings and a browser/system/critical-app test flow. It is a review aid, not an emergency guarantee.
+- **Weekend then named rules:** begin with bounded weekday/weekend rules. Each rule has days/time/policy; preview and reject overlaps, freeze active occurrences, and do not introduce vacation/skip exceptions. Later named times of day require a separate conflict contract.
+- **Personal weekly review:** keep it local and distinct from shared accountability. Show protected time/completion/ended-early/unknown counts and supported usage patterns without streaks, scores or shame.
+- **Shortcuts/App Intents:** expose only finite 30-minute, one-hour or named-rule starts, status and recovery entry. Validate confirmation, parameters and authorization truthfully; never offer indefinite locks or an instant recovery bypass.
+- **Task-based unlock experiments:** opt-in and disableable outside active commitments. Freeze task, policy, cutoff and session at start; use an immutable finite OS cutoff, delayed confirmation and optional exact-session friend approval. Never gate critical essentials or allow a task to extend a session. Initial candidates (steps, a private espresso photo ritual and bounded math) are feasibility experiments, not medical, anti-cheat or proof claims; provide accessible alternatives.
+
+### 7. Authorization or enforcement problem
 
 Examples:
 
@@ -138,14 +149,14 @@ Authorization restoration requires a clear explanation that an unexpired session
 
 ## Schedule and edit semantics
 
-- MVP: one repeating daily window in local civil time, usually crossing midnight.
+- MVP: one repeating daily window in local civil time, usually crossing midnight. The first approved expansion is a bounded weekday/weekend pair; general schedule exceptions are not part of the design.
 - Store actual start/end instants for each active occurrence. Routine settings edits do not recompute its end.
 - Reject equal start/end, unsupported intervals, and invalid selections with actionable messages. Derive technical bounds from current APIs during the spike.
 - Future occurrences follow the current local time zone. An already active session retains its resolved end instant; test whether OS callbacks can support this consistently.
 - For DST, the provisional rule is the next valid time for a skipped boundary and the first occurrence for a repeated boundary. Test and document actual scheduler behavior before promising parity.
 - Manual sessions use an explicit confirmed future end. Repeated “lock now” cannot shorten an active session. Overlaps must remain restricted until all applicable unreleased sessions end; the UI displays that effective end.
 - Relaxing essentials, shortening an active window, changing recovery friction, or disabling scheduling cannot provide an immediate in-app bypass.
-- Pending edits activate after the effective current lock ends, including deliberate recovery. Preview whether a newly configured window would be active then; do not silently start a replacement lock immediately after recovery.
+- Pending edits activate after the effective current lock ends, including deliberate recovery. Preview whether a newly configured window would be active then; do not silently start a replacement lock immediately after recovery. Weekend and later named-rule conflicts are rejected initially rather than resolved by undocumented precedence.
 - Preserve release identity for the recovered original occurrence even if the schedule is edited during it. Future schedule edits cannot resurrect that occurrence. The implementation must specify activation boundaries and test this case.
 
 These clock, overlap, and edit rules are desired semantics, not evidence of platform feasibility. Revise explicitly if device experiments reveal unsupported behavior.

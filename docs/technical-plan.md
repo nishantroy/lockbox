@@ -1,6 +1,6 @@
 # Phone Lockbox — technical plan
 
-Status: target architecture; a working device prototype now exists, but shared session/recovery integration and dependable automatic release remain unfinished. Paid-team development signing and immediate category shielding work on the owner's phone. Distribution entitlement approval is separate and has not been established. See [current evidence](status-and-qa.md), [execution roadmap](roadmap.md), and [Sol review](reviews/2026-09-10-sol.md) before implementing.
+Status: target architecture; shared session/recovery integration is present in the current source candidate, but dependable automatic release and broad device acceptance remain unfinished. Paid-team development signing and immediate category shielding work on the owner's phone. Distribution entitlement approval is separate and has not been established. See [current evidence](status-and-qa.md), [execution roadmap](roadmap.md), and [Sol review](reviews/2026-09-10-sol.md) before implementing.
 
 Related: [product plan](product-plan.md), [interaction design](interaction-design.md).
 

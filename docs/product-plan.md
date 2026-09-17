@@ -33,10 +33,10 @@ Focus, notification settings, and Home Screen simplification are optional guided
 | Capability | Intended behavior |
 | --- | --- |
 | Authorization | Explain and request individual Screen Time authorization; expose missing authorization clearly. |
-| Recurring schedule | One daily local-time window, including overnight windows. Reject ambiguous equal start/end times. Weekday variations are deferred. |
+| Recurring schedule | One daily local-time window, including overnight windows. Reject ambiguous equal start/end times. A bounded weekday/weekend slice is a later roadmap phase; general schedule exceptions remain out of scope. |
 | Restriction selection | Support Block selected and Allow only selected through system app/category/website selection. Category allowance currently expands to individual token exceptions; explain coverage limits and test critical access before commitment. |
 | Scheduled lock | Apply restrictions without needing the main app to stay open; release at the scheduled end. Reliability must be tested. |
-| Lock now | Start immediately with a clearly confirmed future end. Provisional default: the next configured morning end; never create an indefinite session. |
+| Lock now | Start immediately with a clearly confirmed finite end (30 minutes, 1 hour, or a validated custom end). Never create an indefinite session or silently use the bedtime end. |
 | Active-rule protection | Freeze the current session's baseline. Relaxations and schedule changes cannot shorten it through ordinary settings. |
 | Recovery | A deliberate, delayed request to end the current lock, subject to a feasibility gate. No instant temporary access. |
 | Status | Show configured end, pending changes, recovery state, and known authorization/enforcement problems without claiming live verification the app cannot perform. |
@@ -53,9 +53,9 @@ Recovery must suppress reapplication for that same occurrence across callbacks a
 ## Non-goals for the first release
 
 - Custom Home Screen launcher or widget.
-- Daytime denylist, usage quotas, weekday-specific schedules, or multiple profiles.
-- NFC, accountability partners, remote approval, or a backend in the first release; the separately gated future accountability capability is described below.
-- Usage dashboards, sleep tracking, HealthKit integration, and behavioral scoring.
+- Daytime denylist, usage quotas, general schedule exceptions, or multiple profiles in the first release. A bounded weekday/weekend slice and later named rules are future roadmap phases, not first-release scope.
+- NFC, accountability partners, remote approval, or a backend in the first release; the separately gated future trusted-person capability is described below.
+- Usage dashboards, sleep tracking, HealthKit/task providers, and behavioral scoring in the first release. A local DeviceActivityReport feasibility spike and opt-in task experiments are separately gated future work; they do not imply raw usage export or medical claims.
 - MDM, supervised-device setup, parental-control workflows, or private APIs.
 - Preventing uninstall, authorization revocation, or all owner-controlled bypasses.
 - Payments, App Store marketing, cross-device synchronization, and Android support.
@@ -89,12 +89,9 @@ If software bypass becomes routine, consider a physical timed lockbox rather tha
 
 ## Roadmap and decision gates
 
-1. **Feasibility:** prove Apple authorization, shielding, scheduling, essential access, and cleanup on a real device.
-2. **Bedtime MVP:** implement the interaction model, persistent policy, and deliberate recovery.
-3. **Hardening and trial:** test edge cases and use nightly; revise from observed behavior.
-4. **Production trusted-person relay (future prerequisite):** deploy the authenticated, durable relay and identity lifecycle; simulations do not qualify.
-5. **Opt-in accountability (future):** add the separately consented early-end notices and weekly summaries only after the relay gate passes.
-6. **Optional expansion:** NFC, daytime restrictions, launcher widget, and public distribution, after the accountability decision gate.
+The authoritative sequence is [roadmap](roadmap.md): R4 build-14 reliability, accessibility and seven-night evidence; R5 production trusted-person infrastructure plus exact-session friend unlock permissions; R6 opt-in accountability; then the ordered R7–R12 local insights, safety assistant, weekend scheduling, personal review, quick actions, task experiments, named rules and reliable Live Activity phases. A plan is not implementation evidence.
+
+The first release remains a dependable, finite bedtime lock with delayed recovery. Future insights are local and limited by Apple's report APIs; future task providers are opt-in, disableable outside active commitments and never gate critical essentials. General schedule exceptions, automatic adaptive blocking, task proof/sharing and arbitrary ML photo verification remain non-goals.
 
 Before public release, revisit entitlement approval, installation reliability, privacy disclosures, accessibility, support, and the tested device/OS matrix. Personal development signing is not an unattended long-term installation strategy without provisioning planning.
 
@@ -102,7 +99,7 @@ Before public release, revisit entitlement approval, installation reliability, p
 
 This is deliberately **after the bedtime MVP**. It may be enabled only after the production trusted-person relay has a real PostgreSQL adapter, authenticated transport, durable server inbox/fetch, and a tested identity/consent lifecycle. The current in-memory core, pairing demo, or relay simulation is not production-ready. See the [accountability design](accountability-design.md) for the protocol and acceptance gates.
 
-An owner may opt in and select accepted trusted people individually. For each person, the owner chooses whether to share a privacy-minimal notice when an active lock ends early and, separately, whether to share a plain weekly summary. Both sender and recipient give explicit consent; either can cancel or opt out. Multiple trusted people are independent, and a mutual pact is two independent one-way relationships: neither person controls, inspects, or extends the other's lock.
+An owner may opt in and select accepted trusted people individually. For each person, the owner independently chooses whether that person may approve an early end, receive exact-session requests, receive early-end notices, receive weekly shared summaries, or participate in a mutual pact. Sender and recipient consent are separate and revocable. Friend approval is one-use, signed and bound to the exact session; the initial release policy is one-of-N first valid approval. A friend cannot start or extend a lock, change rules, or see selections, usage or task steps. Network delivery never becomes a recovery or emergency prerequisite. Multiple trusted people are independent, and a mutual pact is two independent one-way relationships: neither person controls, inspects, or extends the other's lock.
 
 The event is durably recorded locally before ordinary recovery or trusted release clears policy and is queued for offline delivery. Emergency access never depends on network delivery. The authenticated server inbox/fetch is authoritative; APNs and text are wake/reminder hints only. Use supportive “ended early” language, never shame or failure language. Natural ends, recovery, trusted approval, authorization loss/integrity warnings, and developer/emergency cleanup remain distinct outcomes.
 
