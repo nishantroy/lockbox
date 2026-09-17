@@ -59,7 +59,7 @@ struct SafetyAssistantView: View {
                     Text("Only run a short, disposable check you can stop. These checks never place calls and never prove emergency access or universal enforcement.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
-                    ForEach(SafetyAssistantTestStep.allCases) { step in
+                    ForEach(audit.applicableTestSteps) { step in
                         testStepRow(step)
                     }
                 }

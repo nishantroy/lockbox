@@ -19,6 +19,23 @@ final class SafetyAssistantTests: XCTestCase {
         XCTAssertTrue(audit.findings.contains { $0.id == .categoryCoverage })
         XCTAssertTrue(audit.findings.contains { $0.id == .browserCoverage })
         XCTAssertTrue(audit.findings.contains { $0.id == .systemCoverage })
+        XCTAssertEqual(audit.applicableTestSteps, SafetyAssistantTestStep.allCases)
+    }
+
+    func testNoCategorySelectionOmitsCategoryFindingAndTestStepButKeepsBrowserAndSystemReview() {
+        let audit = SafetyAssistantAudit.evaluate(input: SafetyAssistantAuditInput(
+            mode: .blockSelected,
+            selection: RuntimeSelectionSummary(applicationCount: 1, categoryCount: 0, webDomainCount: 0),
+            authorization: .authorized,
+            registration: .matching
+        ))
+
+        XCTAssertFalse(audit.findings.contains { $0.id == .categoryCoverage })
+        XCTAssertTrue(audit.findings.contains { $0.id == .browserCoverage })
+        XCTAssertTrue(audit.findings.contains { $0.id == .systemCoverage })
+        XCTAssertEqual(audit.applicableTestSteps, [.selectedPath, .browserPath, .systemAndEmergencyPath])
+        XCTAssertFalse(audit.applicableTestSteps.contains(.categoryPath))
+        XCTAssertEqual(audit.outstandingTestSteps, audit.applicableTestSteps)
     }
 
     func testAuditRequiresSetupAndNeverCallsTheReviewACompletionGuarantee() {
@@ -54,10 +71,10 @@ final class SafetyAssistantTests: XCTestCase {
         }
     }
 
-    func testCompletedAcknowledgementsRemoveOnlyChecklistItemsAndTestSteps() {
+    func testNoCategoryAcknowledgementsAreReadyWithoutIrrelevantCategoryAcknowledgement() {
         var acknowledgements = SafetyAssistantAcknowledgements()
         acknowledgements.checklist = Set(SafetyAssistantChecklistItem.allCases)
-        acknowledgements.testSteps = Set(SafetyAssistantTestStep.allCases)
+        acknowledgements.testSteps = Set([.selectedPath, .browserPath, .systemAndEmergencyPath])
         let audit = SafetyAssistantAudit.evaluate(
             input: SafetyAssistantAuditInput(
                 mode: .blockSelected,
@@ -70,6 +87,30 @@ final class SafetyAssistantTests: XCTestCase {
 
         XCTAssertTrue(audit.outstandingChecklist.isEmpty)
         XCTAssertTrue(audit.outstandingTestSteps.isEmpty)
-        XCTAssertTrue(audit.isReadyForReview, "Cautions remain visible, but all required review actions are acknowledged.")
+        XCTAssertTrue(audit.isReadyForReview, "Cautions remain visible, but all applicable review actions are acknowledged.")
+    }
+
+    func testCategoryAcknowledgementIsRequiredOnlyWhenCategoryIsSelected() {
+        let input = SafetyAssistantAuditInput(
+            mode: .blockSelected,
+            selection: RuntimeSelectionSummary(applicationCount: 1, categoryCount: 1, webDomainCount: 0),
+            authorization: .authorized,
+            registration: .matching
+        )
+        var acknowledgements = SafetyAssistantAcknowledgements(
+            checklist: Set(SafetyAssistantChecklistItem.allCases),
+            testSteps: [.selectedPath, .browserPath, .systemAndEmergencyPath]
+        )
+
+        let incompleteAudit = SafetyAssistantAudit.evaluate(input: input, acknowledgements: acknowledgements)
+        XCTAssertTrue(incompleteAudit.findings.contains { $0.id == .categoryCoverage })
+        XCTAssertEqual(incompleteAudit.applicableTestSteps, SafetyAssistantTestStep.allCases)
+        XCTAssertEqual(incompleteAudit.outstandingTestSteps, [.categoryPath])
+        XCTAssertFalse(incompleteAudit.isReadyForReview)
+
+        acknowledgements.testSteps.insert(.categoryPath)
+        let completeAudit = SafetyAssistantAudit.evaluate(input: input, acknowledgements: acknowledgements)
+        XCTAssertTrue(completeAudit.outstandingTestSteps.isEmpty)
+        XCTAssertTrue(completeAudit.isReadyForReview)
     }
 }

@@ -175,6 +175,9 @@ public struct SafetyAssistantAudit: Equatable, Sendable {
     public let opaqueSelectionCount: Int
     public let findings: [SafetyAssistantFinding]
     public let outstandingChecklist: [SafetyAssistantChecklistItem]
+    /// The test steps applicable to the saved selection. Conditional steps
+    /// are omitted here so the UI and readiness check share one requirement set.
+    public let applicableTestSteps: [SafetyAssistantTestStep]
     public let outstandingTestSteps: [SafetyAssistantTestStep]
 
     public var isReadyForReview: Bool {
@@ -223,12 +226,19 @@ public struct SafetyAssistantAudit: Equatable, Sendable {
             ))
         }
 
-        findings.append(SafetyAssistantFinding(
-            id: .categoryCoverage,
-            severity: .caution,
-            title: "Category coverage needs a device check",
-            detail: "Category expansion is not a promise of universal coverage. Test a representative app and keep a needed alternative available."
-        ))
+        let hasSelectedCategory = (input.selection?.categoryCount ?? 0) > 0
+        let applicableTestSteps = SafetyAssistantTestStep.allCases.filter { step in
+            step != .categoryPath || hasSelectedCategory
+        }
+
+        if hasSelectedCategory {
+            findings.append(SafetyAssistantFinding(
+                id: .categoryCoverage,
+                severity: .caution,
+                title: "Category coverage needs a device check",
+                detail: "Category expansion is not a promise of universal coverage. Test a representative app and keep a needed alternative available."
+            ))
+        }
         findings.append(SafetyAssistantFinding(
             id: .browserCoverage,
             severity: .caution,
@@ -248,7 +258,8 @@ public struct SafetyAssistantAudit: Equatable, Sendable {
             opaqueSelectionCount: selectionCount,
             findings: findings,
             outstandingChecklist: SafetyAssistantChecklistItem.allCases.filter { !acknowledgements.checklist.contains($0) },
-            outstandingTestSteps: SafetyAssistantTestStep.allCases.filter { !acknowledgements.testSteps.contains($0) }
+            applicableTestSteps: applicableTestSteps,
+            outstandingTestSteps: applicableTestSteps.filter { !acknowledgements.testSteps.contains($0) }
         )
     }
 }
