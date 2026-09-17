@@ -4,16 +4,13 @@ struct ManualLockSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @State private var choice: ManualLockChoice = .thirtyMinutes
-    @State private var customEnd: Date
+    @State private var customSelection = RuntimeCustomEndSelectionState()
     @State private var attempted = false
     @State private var referenceDate: Date
 
     init(coordinator: ScreenTimeCoordinator) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
-        let capturedDate = Date()
-        let calendar = Calendar.current
-        _referenceDate = State(initialValue: capturedDate)
-        _customEnd = State(initialValue: RuntimeManualLockDecision.defaultCustomEnd(at: capturedDate, calendar: calendar) ?? capturedDate.addingTimeInterval(30 * 60))
+        _referenceDate = State(initialValue: Date())
     }
 
     var body: some View {
@@ -33,7 +30,7 @@ struct ManualLockSheet: View {
                             if let customRange {
                                 DatePicker(
                                     "End",
-                                    selection: $customEnd,
+                                    selection: customEndBinding,
                                     in: customRange,
                                     displayedComponents: [.date, .hourAndMinute]
                                 )
@@ -41,6 +38,7 @@ struct ManualLockSheet: View {
                                 Label("No finite end is available at the moment.", systemImage: "exclamationmark.triangle.fill")
                                     .foregroundStyle(LockboxTheme.destructive)
                             }
+                            customEndAvailabilityLabel
                         }
                         Text("The end is finite and is checked again when you confirm. A manual lock never silently uses the bedtime end.")
                             .font(.footnote)
@@ -88,15 +86,13 @@ struct ManualLockSheet: View {
                 }
             }
             .onChange(of: choice) { _, newChoice in
-                guard newChoice == .custom else { return }
-                // Rebase the minute picker when Custom is chosen. Its bounds
-                // must not retain seconds from sheet creation or an earlier
-                // choice; confirmation still validates the frozen Date again.
-                referenceDate = Date()
-                customEnd = RuntimeManualLockDecision.defaultCustomEnd(
+                referenceDate = newChoice == .custom ? Date() : referenceDate
+                customSelection = RuntimeCustomEndSelectionState.transition(
+                    customSelection,
+                    event: newChoice == .custom ? .enteredCustom : .selectedPreset,
                     at: referenceDate,
                     calendar: Calendar.current
-                ) ?? referenceDate.addingTimeInterval(30 * 60)
+                )
             }
             .onChange(of: coordinator.hasActiveLock) { _, isActive in
                 if attempted && isActive {
@@ -120,8 +116,49 @@ struct ManualLockSheet: View {
         case .oneHour:
             return coordinator.manualLockProposedEnd(after: 60 * 60, at: referenceDate)
         case .custom:
-            guard let customRange, customRange.contains(customEnd) else { return nil }
+            guard let customEnd = customSelection.customEnd,
+                  let customRange,
+                  customRange.contains(customEnd) else { return nil }
             return customEnd
+        }
+    }
+
+    private var customEndBinding: Binding<Date> {
+        Binding(
+            get: {
+                customSelection.customEnd
+                    ?? RuntimeManualLockDecision.defaultCustomEnd(at: referenceDate, calendar: Calendar.current)
+                    ?? referenceDate.addingTimeInterval(30 * 60)
+            },
+            set: { newEnd in
+                customSelection = RuntimeCustomEndSelectionState.transition(
+                    customSelection,
+                    event: .userSelected(newEnd),
+                    at: referenceDate,
+                    calendar: Calendar.current
+                )
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var customEndAvailabilityLabel: some View {
+        switch RuntimeCustomEndAvailability.evaluate(
+            customSelection.customEnd,
+            at: referenceDate,
+            calendar: Calendar.current
+        ) {
+        case .available:
+            EmptyView()
+        case .unavailable:
+            Label("Choose a finite custom end before confirming.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(LockboxTheme.destructive)
+        case .tooSoon:
+            Label("This end is too soon. Choose one at least 15 minutes from now.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(LockboxTheme.destructive)
+        case .tooLate:
+            Label("This end is too late. Choose one within seven days.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(LockboxTheme.destructive)
         }
     }
 }

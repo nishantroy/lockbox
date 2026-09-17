@@ -1,5 +1,71 @@
 import Foundation
 
+/// The draft state for the Custom Lock now end picker. The absolute end is
+/// deliberately retained while the user compares presets; entering Custom
+/// only initializes an empty draft once and never rebases an existing end.
+public struct RuntimeCustomEndSelectionState: Equatable, Sendable {
+    public enum Event: Equatable, Sendable {
+        case enteredCustom
+        case selectedPreset
+        case userSelected(Date)
+    }
+
+    public private(set) var customEnd: Date?
+    public private(set) var hasUserSelection: Bool
+
+    public init(customEnd: Date? = nil, hasUserSelection: Bool = false) {
+        self.customEnd = customEnd
+        self.hasUserSelection = hasUserSelection
+    }
+
+    /// Applies one picker event without consulting mutable UI state. A stale
+    /// end remains unchanged so the caller can show an actionable validation
+    /// state until the user explicitly chooses a replacement.
+    public static func transition(
+        _ state: Self,
+        event: Event,
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> Self {
+        var next = state
+        switch event {
+        case .enteredCustom:
+            guard next.customEnd == nil, !next.hasUserSelection else { return next }
+            next.customEnd = RuntimeManualLockDecision.defaultCustomEnd(at: date, calendar: calendar)
+        case .selectedPreset:
+            return next
+        case .userSelected(let end):
+            guard end.timeIntervalSinceReferenceDate.isFinite else { return next }
+            next.customEnd = end
+            next.hasUserSelection = true
+        }
+        return next
+    }
+}
+
+public enum RuntimeCustomEndAvailability: Equatable, Sendable {
+    case available
+    case unavailable
+    case tooSoon
+    case tooLate
+
+    public static func evaluate(
+        _ end: Date?,
+        at date: Date,
+        calendar: Calendar = .current
+    ) -> Self {
+        guard let end,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              date.timeIntervalSinceReferenceDate.isFinite,
+              let range = RuntimeManualLockDecision.customEndRange(at: date, calendar: calendar) else {
+            return .unavailable
+        }
+        if end < range.lowerBound { return .tooSoon }
+        if end > range.upperBound { return .tooLate }
+        return .available
+    }
+}
+
 /// Pure bounds and overlap decisions for the finite Lock now route. The
 /// coordinator uses these values before it persists or applies a policy so a
 /// UI preview can never turn into an indefinite restriction.

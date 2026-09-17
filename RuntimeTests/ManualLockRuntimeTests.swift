@@ -60,6 +60,58 @@ final class ManualLockRuntimeTests: XCTestCase {
         ))
     }
 
+    func testCustomSelectionInitializesOnceAndPreservesUserEndAcrossPresetRoundTrip() throws {
+        let openedAt = date(10, 12, 0, 17)
+        let initiallyEmpty = RuntimeCustomEndSelectionState()
+        let initialized = RuntimeCustomEndSelectionState.transition(
+            initiallyEmpty,
+            event: .enteredCustom,
+            at: openedAt,
+            calendar: utc
+        )
+        let defaultEnd = try XCTUnwrap(initialized.customEnd)
+        XCTAssertFalse(initialized.hasUserSelection)
+
+        let userEnd = date(11, 18, 42)
+        let userSelected = RuntimeCustomEndSelectionState.transition(
+            initialized,
+            event: .userSelected(userEnd),
+            at: openedAt,
+            calendar: utc
+        )
+        XCTAssertEqual(userSelected.customEnd, userEnd)
+        XCTAssertTrue(userSelected.hasUserSelection)
+
+        let afterPreset = RuntimeCustomEndSelectionState.transition(
+            userSelected,
+            event: .selectedPreset,
+            at: openedAt.addingTimeInterval(30 * 60),
+            calendar: utc
+        )
+        // Re-entering Custom therefore returns the exact absolute date the
+        // user chose, rather than rebasing it from the current clock.
+        let reenteredCustom = RuntimeCustomEndSelectionState.transition(
+            afterPreset,
+            event: .enteredCustom,
+            at: openedAt.addingTimeInterval(60 * 60),
+            calendar: utc
+        )
+        XCTAssertEqual(reenteredCustom.customEnd, userEnd)
+        XCTAssertNotEqual(reenteredCustom.customEnd, defaultEnd)
+    }
+
+    func testCustomEndAvailabilityKeepsStaleEndActionableWithoutReplacingIt() {
+        let reference = date(10, 12, 0)
+        let tooSoon = date(10, 12, 14)
+        let tooLate = date(18, 12)
+        let valid = date(10, 12, 30)
+
+        XCTAssertEqual(RuntimeCustomEndAvailability.evaluate(tooSoon, at: reference, calendar: utc), .tooSoon)
+        XCTAssertEqual(RuntimeCustomEndAvailability.evaluate(tooLate, at: reference, calendar: utc), .tooLate)
+        XCTAssertEqual(RuntimeCustomEndAvailability.evaluate(valid, at: reference, calendar: utc), .available)
+        XCTAssertEqual(RuntimeCustomEndAvailability.evaluate(nil, at: reference, calendar: utc), .unavailable)
+    }
+
     func testCustomRangeCeilsLowerAndFloorsUpperForSecondsBearingNow() {
         let start = date(10, 12, 0, 17)
         let range = try! XCTUnwrap(RuntimeManualLockDecision.customEndRange(at: start, calendar: utc))
