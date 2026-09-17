@@ -113,7 +113,7 @@ struct SettingsView: View {
                         set: { coordinator.setLiveActivityEnabled($0) }
                     ))
                     .tint(LockboxTheme.accent)
-                    Text("Live Activity is a best-effort status surface. It never enforces, releases, or proves that restrictions changed; scheduled sessions may appear only after a later foreground update.")
+                    Text("Local Live Activities are optional and best-effort. They never enforce, release, or prove that restrictions changed. If Phone Lockbox is force-closed, iOS may leave one stale until you reopen it; the monitor extension cannot dismiss the host-created activity. Reliable host-closed ending requires ActivityKit push infrastructure, which is not provisioned.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }

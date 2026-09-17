@@ -410,36 +410,4 @@ final class LiveActivityModelTests: XCTestCase {
         ))
     }
 
-    func testBoundedTerminationMapsPresentationCountsWithoutChangingIdentityRules() {
-        XCTAssertEqual(
-            AmbientLiveActivityTerminationResultMapper.result(forEndedCount: 0),
-            .noMatchingActivity
-        )
-        XCTAssertEqual(
-            AmbientLiveActivityTerminationResultMapper.result(forEndedCount: 2),
-            .ended(count: 2)
-        )
-    }
-
-    func testBoundedTerminationPolicyIsSmallAndDoesNotPretendToScheduleAnEnd() {
-        XCTAssertEqual(AmbientLiveActivityTerminationPolicy.callbackWaitMilliseconds, 750)
-        XCTAssertGreaterThan(AmbientLiveActivityTerminationPolicy.callbackWaitMilliseconds, 0)
-        XCTAssertLessThanOrEqual(AmbientLiveActivityTerminationPolicy.callbackWaitMilliseconds, 1_000)
-        XCTAssertEqual(
-            AmbientLiveActivityTerminationResultMapper.result(forEndedCount: -1),
-            .noMatchingActivity
-        )
-    }
-
-    func testTerminationDiagnosticsAreCodableAndPrivacyMinimal() throws {
-        let diagnostic = AmbientLiveActivityTerminationDiagnostic(
-            observedAt: Date(timeIntervalSince1970: 100),
-            result: .ended(count: 1)
-        )
-        let decoded = try JSONDecoder().decode(
-            AmbientLiveActivityTerminationDiagnostic.self,
-            from: JSONEncoder().encode(diagnostic)
-        )
-        XCTAssertEqual(decoded, diagnostic)
-    }
 }

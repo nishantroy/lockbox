@@ -28,6 +28,9 @@ final class ScreenTimeCoordinator: ObservableObject {
     private static let windDownEnabledKey = ambientDefaultsPrefix + "wind-down-enabled"
     private static let windDownLeadMinutesKey = ambientDefaultsPrefix + "wind-down-lead-minutes"
     private static let liveActivityEnabledKey = ambientDefaultsPrefix + "live-activity-enabled"
+    private static let liveActivityPreferenceVersionKey = ambientDefaultsPrefix + "live-activity-preference-version"
+    private static let legacyLiveActivityDiagnosticsKey = "phone-lockbox.ambient.live-activity-termination-diagnostics"
+    private static let legacyLiveActivityDiagnosticsLockFile = "phone-lockbox-ambient-diagnostics.lock"
 
     @Published private(set) var authorizationStatus: AuthorizationStatus = .notDetermined
     @Published private(set) var selection: FamilyActivitySelection
@@ -38,17 +41,15 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isConfigured: Bool
     @Published private(set) var recentDiagnostics: [RuntimeDiagnostic] = []
-    @Published private(set) var recentLiveActivityDiagnostics: [AmbientLiveActivityTerminationDiagnostic] = []
     /// Ambient state is deliberately separate from enforcement errors. A
     /// notification or Live Activity failure must never make a committed lock
     /// appear released or roll back a lifecycle transaction.
     @Published private(set) var windDownEnabled = false
     @Published private(set) var windDownLeadMinutes = 30
-    @Published private(set) var liveActivityEnabled = true
+    @Published private(set) var liveActivityEnabled = false
     @Published private(set) var ambientError: String?
     @Published private(set) var pendingWindDownNotificationCount = 0
     @Published private(set) var windDownAuthorizationStatus = "Not requested"
-    @Published private(set) var liveActivityStatus: String?
 
     private let activityCenter = DeviceActivityCenter()
     private let clock: () -> Date
@@ -633,7 +634,14 @@ final class ScreenTimeCoordinator: ObservableObject {
         windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
         let storedLead = defaults.object(forKey: Self.windDownLeadMinutesKey) as? Int ?? 30
         windDownLeadMinutes = min(max(storedLead, 1), 1_440)
-        liveActivityEnabled = defaults.object(forKey: Self.liveActivityEnabledKey) as? Bool ?? true
+        let liveActivityPreference = AmbientLiveActivityPreferenceMigration.migrate(
+            storedVersion: defaults.object(forKey: Self.liveActivityPreferenceVersionKey) as? Int,
+            storedEnabled: defaults.object(forKey: Self.liveActivityEnabledKey) as? Bool
+        )
+        liveActivityEnabled = liveActivityPreference.enabled
+        defaults.set(liveActivityPreference.version, forKey: Self.liveActivityPreferenceVersionKey)
+        defaults.set(liveActivityPreference.enabled, forKey: Self.liveActivityEnabledKey)
+        Self.removeLegacyLiveActivityDiagnostics()
         var loadedStore: SharedRuntimeStore?
         var loadedDocument = RuntimeStoreDocument()
         var loadError: String?
@@ -663,7 +671,6 @@ final class ScreenTimeCoordinator: ObservableObject {
         authorizationStatus = AuthorizationCenter.shared.authorizationStatus
         lastError = loadError ?? (loadedDocument.operationStatus.succeeded == false ? loadedDocument.operationStatus.detail : nil)
         recentDiagnostics = loadedDocument.diagnostics
-        recentLiveActivityDiagnostics = AmbientLiveActivityDiagnosticsStore.read()
         reconcileRegistration()
         reconcileManualRegistrationFromOS()
         retryInterruptedDailyRegistration()
@@ -676,6 +683,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     func refreshAuthorization() {
         authorizationStatus = AuthorizationCenter.shared.authorizationStatus
         refreshDocument()
+        Self.removeLegacyLiveActivityDiagnostics()
         reconcileRegistration()
         reconcileManualRegistrationFromOS()
         retryInterruptedDailyRegistration()
@@ -722,6 +730,7 @@ final class ScreenTimeCoordinator: ObservableObject {
 
     func setLiveActivityEnabled(_ enabled: Bool) {
         liveActivityEnabled = enabled
+        UserDefaults.standard.set(AmbientLiveActivityPreference.currentVersion, forKey: Self.liveActivityPreferenceVersionKey)
         UserDefaults.standard.set(enabled, forKey: Self.liveActivityEnabledKey)
         scheduleLiveActivityReconciliation()
     }
@@ -844,13 +853,12 @@ final class ScreenTimeCoordinator: ObservableObject {
     private func reconcileLiveActivities() async {
         if !liveActivityEnabled {
             _ = await liveActivity.endAllAppOwnedActivities()
-            liveActivityStatus = "Live Activities disabled"
             return
         }
 
         let now = currentDate()
-        // Terminal history can be pruned, and a monitor extension task can be
-        // interrupted with its process. Sweep only past immutable ends for
+        // Terminal history can be pruned, and the host may not have observed
+        // every enforcement callback. Sweep only past immutable ends for
         // real focus/bedtime activities; the helper marks them stale rather
         // than claiming that Managed Settings released.
         _ = await liveActivity.endPastFixedEndAppOwnedActivities(now: now)
@@ -861,25 +869,23 @@ final class ScreenTimeCoordinator: ObservableObject {
                 isBedtimePurpose: session.purpose == .bedtime,
                 isScheduledOrigin: session.origin == .scheduled
             )
-            let result = await liveActivity.reconcile(
+            _ = await liveActivity.reconcile(
                 sessionID: session.id.uuidString,
                 fixedEnd: session.end,
                 kind: kind,
                 status: status,
                 now: now
             )
-            recordLiveActivityResult(result)
         }
 
         // Only terminal states observed in the durable runtime may end the
         // corresponding activity. A missing callback or a merely past clock
         // does not get translated into "unlocked" copy here.
         for session in document.sessions where session.state == .released || session.state == .expired {
-            let result: AmbientLiveActivityOutcome
             if session.state == .released {
-                result = await liveActivity.endAfterObservedRelease(sessionID: session.id.uuidString)
+                _ = await liveActivity.endAfterObservedRelease(sessionID: session.id.uuidString)
             } else {
-                result = await liveActivity.endAfterObservedExpiry(
+                _ = await liveActivity.endAfterObservedExpiry(
                     sessionID: session.id.uuidString,
                     fixedEnd: session.end,
                     kind: AmbientLiveActivityTermination.kind(
@@ -888,19 +894,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                     )
                 )
             }
-            recordLiveActivityResult(result)
         }
     }
 
-    private func recordLiveActivityResult(_ result: AmbientLiveActivityOutcome) {
-        switch result {
-        case .started: liveActivityStatus = "Live Activity started"
-        case .updated: liveActivityStatus = "Live Activity updated"
-        case .ended: liveActivityStatus = "Live Activity ended after runtime reconciliation"
-        case .unavailable(let reason): liveActivityStatus = "Live Activity unavailable: \(reason.rawValue)"
-        case .failed(let message): liveActivityStatus = "Live Activity failed: \(message)"
-        }
-    }
 #else
     private func scheduleLiveActivityReconciliation() {}
 #endif
@@ -1652,8 +1648,7 @@ final class ScreenTimeCoordinator: ObservableObject {
                 if let storedMode { mode = RestrictionMode(rawValue: storedMode.rawValue) ?? mode }
             }
             recentDiagnostics = document.diagnostics
-            recentLiveActivityDiagnostics = AmbientLiveActivityDiagnosticsStore.read()
-            isConfigured = document.configuration != nil
+                isConfigured = document.configuration != nil
             testScheduleActive = document.testLockActive
             storageError = nil
             if document.operationStatus.succeeded == false { lastError = document.operationStatus.detail }
@@ -1703,6 +1698,17 @@ final class ScreenTimeCoordinator: ObservableObject {
         if !migrationSafe { document.legacyRegistrationNeedsReview = true }
         document.record(RuntimeDiagnostic(operation: .legacyMigration, detail: migrationSafe ? (document.legacyRegistrationNeedsReview ? "Legacy settings migrated; registration owner requires explicit cleanup." : "Legacy draft settings migrated.") : "Legacy settings retained for explicit cleanup; invalid values were not used for enforcement."), succeeded: migrationSafe)
         return document
+    }
+
+    private static func removeLegacyLiveActivityDiagnostics() {
+        guard let defaults = UserDefaults(suiteName: appGroupIdentifier) else { return }
+        defaults.removeObject(forKey: legacyLiveActivityDiagnosticsKey)
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupIdentifier
+        ) else { return }
+        try? FileManager.default.removeItem(
+            at: container.appendingPathComponent(legacyLiveActivityDiagnosticsLockFile)
+        )
     }
 
     private static func removeLegacyDefaults() {

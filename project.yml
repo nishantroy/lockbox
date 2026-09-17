@@ -74,8 +74,6 @@ targets:
     sources:
       - path: Extensions/DeviceActivityMonitor
       - path: Shared
-    dependencies:
-      - package: AmbientKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.app.monitor

@@ -1,6 +1,6 @@
 # Ambient prototypes
 
-Status: linked into the source-only [build-12 candidate](build12-candidate.md) behind a developer prototype screen. The Live Activity remains best-effort presentation and is not enforcement. Build-12 device QA found that a naturally ended activity stayed visible/stale with the host closed; no automatic-dismissal success is claimed.
+Status: linked into the source-only build-13 candidate behind a developer prototype screen. The Live Activity remains best-effort presentation and is not enforcement. Build-13 device QA passed natural enforcement end and recurrence, but the monitor reported no matching activity and a host-created activity stayed stale (“Might be stale”) until the app reopened; foreground cleanup then succeeded. The extension cannot enumerate that host-created activity in this architecture, so no automatic-dismissal success is claimed.
 
 ## Wind-down notifications
 
@@ -31,17 +31,18 @@ The host should plan and call `replace` on explicit enable/configuration save, a
 
 `AmbientLiveActivityAttributes` and `AmbientActivityContentState` live in `AmbientKit`. ActivityKit conformance is conditional on `#if canImport(ActivityKit)` and is available to an iOS 17+ host. Content state contains a fixed end and explicit status. It intentionally distinguishes `plannedSession`, `recoveryPending`, `releaseObserved`, `expired`, and `stale`; it has no success/unlocked claim for an unobserved Managed Settings transition.
 
-`PhoneLockbox/Ambient/LiveActivityAdapter.swift` is best-effort presentation only:
+`PhoneLockbox/Ambient/LiveActivityAdapter.swift` is best-effort presentation only and is used only by the host app:
 
 - it checks `ActivityAuthorizationInfo.areActivitiesEnabled`;
 - it uses `pushType: nil`, so v1 has no APNs dependency;
 - `start`, `update`, and `end` are explicit calls and are never policy or timer dependencies;
+- foreground/relaunch cleanup ends app-owned past-end activities with stale state, never an unlock claim;
 - at/after a fixed end, a planned or recovery state becomes `stale` rather than implying verified release;
 - fixed end is immutable after start: ordinary updates must match the activity attributes and cannot use `releaseObserved`;
 - only the specifically named `endAfterObservedRelease(sessionID:)` API can use release-observed copy, and it takes the fixed end from the activity rather than from the caller;
 - it reports unavailable, stale/lifetime, and request errors to the host.
 
-There is no supported local OS-scheduled dismissal that preserves an active Dynamic Island until a future fixed end: `ActivityUIDismissalPolicy.after(_:)` is supplied to `Activity.end`, so calling `end` terminalizes the Activity immediately rather than scheduling that call. The monitor therefore launches one detached batch operation over deduplicated exact fences only after enforcement reconciliation returns, and performs one configured/nominal semaphore wait against an absolute 750 ms deadline for the entire batch. This is a bounded best effort, not a guaranteed wall-clock callback bound under preemption, scheduling, or an extension watchdog; extension termination, ActivityKit enumeration/ownership, and device timing can still leave stale presentation. It records only the aggregate no-match, ended-count, timeout, or error in an isolated App Group UserDefaults diagnostic namespace. A separate App Group `flock` is mechanically reviewed for cross-process read/modify/write serialization, but acquisition is one nonblocking best-effort attempt: contention drops the entry and adds no material synchronous wait after the single 750 ms presentation deadline. Entries are normalized to the final 16. The package tests cover in-process concurrency and deterministic held-lock dropping, not behavioral multi-process proof. Foreground/relaunch stale cleanup remains the fallback, and requires device validation.
+There is no supported local OS-scheduled dismissal that preserves an active Dynamic Island until a future fixed end: `ActivityUIDismissalPolicy.after(_:)` is supplied to `Activity.end`, so calling `end` terminalizes the Activity immediately rather than scheduling that call. The DeviceActivity monitor no longer attempts ActivityKit cleanup: device evidence showed it cannot enumerate the host-created activity in this architecture. App-side helpers retain exact matching for explicit release/expiry and a foreground/relaunch sweep that marks past activities stale rather than claiming release. Live Activities are optional and default off through an explicit versioned migration of pre-build-14 local preferences; an explicit opt-in is persisted. Reliable host-closed ending requires ActivityKit push infrastructure, which is not provisioned.
 
 `Extensions/LockboxLiveActivity/LockboxLiveActivity.swift` is a deliberately small WidgetKit presentation. It shows a fixed end and status, has no ticking countdown, and includes accessibility labels and Dynamic Type-friendly system text. `Info.plist` uses `NSExtensionPointIdentifier = com.apple.widgetkit-extension`. The planned extension bundle identifier is `com.phone-lockbox.app.live-activity`.
 

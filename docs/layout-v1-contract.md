@@ -30,7 +30,7 @@ Explain trusted-person recovery and permit only honest currently available setup
 - Bedtime schedule and restriction selection.
 - Recovery and ambient preferences.
 - Wind-down derives from the real saved bedtime start; configure only enabled/lead time, not a second bedtime clock.
-- Live Activity default on after explanation. Lock-now activity can begin while the app is foregrounded; scheduled activity is best-effort on later foreground because DeviceActivity extension delivery cannot be represented as guaranteed ActivityKit startup.
+- Live Activity default off after the build-14 correction. It remains an optional best-effort presentation that users can explicitly enable; Lock-now activity can begin while the app is foregrounded, while scheduled activity is best-effort on later foreground because DeviceActivity extension delivery cannot be represented as guaranteed ActivityKit startup. Reliable host-closed ending requires unprovisioned ActivityKit push infrastructure.
 - Visible bottom Developer section containing diagnostics, immediate prototype tools, ambient simulation, developer unlock and emergency reset.
 
 ## Presentation boundary

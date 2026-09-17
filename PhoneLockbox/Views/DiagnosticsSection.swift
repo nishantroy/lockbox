@@ -1,5 +1,4 @@
 import SwiftUI
-import AmbientKit
 
 struct DiagnosticsSection: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
@@ -27,13 +26,6 @@ struct DiagnosticsSection: View {
                         .textSelection(.enabled)
                         .accessibilityElement(children: .combine)
                 }
-                ForEach(Array(coordinator.recentLiveActivityDiagnostics.enumerated()), id: \.offset) { _, diagnostic in
-                    Text(liveActivityDiagnosticLine(diagnostic))
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
-                        .textSelection(.enabled)
-                        .accessibilityElement(children: .combine)
-                }
                 Text("Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown")")
                     .font(.caption)
                     .foregroundStyle(LockboxTheme.secondary)
@@ -50,11 +42,6 @@ struct DiagnosticsSection: View {
     private func diagnosticLine(_ diagnostic: RuntimeDiagnostic) -> String {
         let timestamp = diagnostic.observedAt.formatted(date: .abbreviated, time: .standard)
         return "\(timestamp): \(diagnosticLabel(diagnostic.operation))\n\(diagnostic.detail ?? "")"
-    }
-
-    private func liveActivityDiagnosticLine(_ diagnostic: AmbientLiveActivityTerminationDiagnostic) -> String {
-        let timestamp = diagnostic.observedAt.formatted(date: .abbreviated, time: .standard)
-        return "\(timestamp): Live Activity cleanup — \(diagnostic.result.diagnosticLabel)"
     }
 
     // Keep these human-readable labels stable: they are also used in QA notes.

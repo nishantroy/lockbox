@@ -1,6 +1,6 @@
 # Execution roadmap — Luna handoff
 
-Updated: 2026-09-11. **Current milestone: R2/R3 implementation is integrated and passed an initial focused build-3 device QA pass.** Automated tests, signed build, Lock now persistence, pending edits, delayed recovery and overnight natural expiry all have evidence. Broader lifecycle/reboot/accessibility coverage remains. See the [swarm work contract](r2-r3-work-contract.md) and [acceptance checklist](r2-r3-qa.md). Not yet a dependable bedtime MVP. See [R1 implementation/QA handoff](r1-progress.md).
+Updated: 2026-09-16. **Current milestone: R2/R3 implementation remains integrated; the post-build-13 Live Activity correction is source-only.** Build-13 device evidence passes natural enforcement end and recurrence, while the monitor reported `no matching activity` for the host-created Live Activity; it stayed stale until foreground/relaunch cleanup succeeded. This proves the extension cannot enumerate that activity in this architecture. Live Activities are now default-off via versioned migration and remain optional/best-effort; reliable host-closed ending requires unprovisioned ActivityKit push infrastructure. Broader lifecycle/reboot/accessibility coverage remains. See the [swarm work contract](r2-r3-work-contract.md) and [acceptance checklist](r2-r3-qa.md). Not yet a dependable bedtime MVP. See [R1 implementation/QA handoff](r1-progress.md).
 
 ## Start here
 
