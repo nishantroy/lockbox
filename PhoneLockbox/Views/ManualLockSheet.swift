@@ -7,11 +7,17 @@ struct ManualLockSheet: View {
     @State private var customSelection = RuntimeCustomEndSelectionState()
     @State private var attempted = false
     @State private var referenceDate: Date
+    private let onPresented: (ScreenTimeCoordinator.PendingQuickAction?) -> Void
 
-    init(coordinator: ScreenTimeCoordinator, requestedPreset: QuickActionRoute.FocusPreset? = nil) {
+    init(
+        coordinator: ScreenTimeCoordinator,
+        requestedPreset: QuickActionRoute.FocusPreset? = nil,
+        onPresented: @escaping (ScreenTimeCoordinator.PendingQuickAction?) -> Void = { _ in }
+    ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
         _choice = State(initialValue: requestedPreset.map(Self.choice) ?? .thirtyMinutes)
         _referenceDate = State(initialValue: Date())
+        self.onPresented = onPresented
     }
 
     private static func choice(for preset: QuickActionRoute.FocusPreset) -> ManualLockChoice {
@@ -111,6 +117,12 @@ struct ManualLockSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .lockboxScreen()
+        .onAppear {
+            // A sheet onAppear is the explicit presentation callback. A crash
+            // or failed presentation before this point leaves the durable
+            // claim leased rather than acknowledged.
+            onPresented(coordinator.pendingQuickAction)
+        }
     }
 
     private var customRange: ClosedRange<Date>? {

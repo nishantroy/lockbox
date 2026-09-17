@@ -89,7 +89,29 @@ struct QuickActionRoute: Equatable, Sendable {
            queryValue(query, named: "duration") != preset.rawValue {
             return nil
         }
+
+        // URLComponents intentionally gives us decoded query values so the
+        // semantic checks above remain straightforward.  It is not a
+        // canonical-wire-format check, though: encoded names/values and query
+        // reordering would otherwise parse to the same values.  Rebuild the
+        // one spelling emitted by `url(for:)` and require an exact raw match.
+        guard let canonical = canonicalURL(
+            action: action,
+            issued: issued,
+            expires: expires,
+            nonce: nonce
+        ), url.absoluteString == canonical.absoluteString else { return nil }
         return Self(action: action, id: nonce, expiresAt: Date(timeIntervalSinceReferenceDate: Double(expires)))
+    }
+
+    private static func canonicalURL(action: Action, issued: Int64, expires: Int64, nonce: String) -> URL? {
+        // Keep this order in lockstep with `url(for:)`; constructing the raw
+        // query avoids URLComponents silently choosing another wire spelling.
+        var query = "issued=\(issued)&expires=\(expires)&nonce=\(nonce)"
+        if case .focus(let preset) = action {
+            query += "&duration=\(preset.rawValue)"
+        }
+        return URL(string: "\(scheme)://\(host)/v\(version)/\(path(for: action))?\(query)")
     }
 
     private static func path(for action: Action) -> String {

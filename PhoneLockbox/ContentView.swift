@@ -12,7 +12,11 @@ struct ContentView: View {
                     .navigationDestination(for: QuickActionRoute.Destination.self) { destination in
                         switch destination {
                         case .recovery:
-                            RecoveryView(coordinator: coordinator)
+                            RecoveryView(coordinator: coordinator) { pending in
+                                guard let pending,
+                                      case .recovery = pending.action else { return }
+                                coordinator.acknowledgePresentedQuickAction(pending)
+                            }
                         }
                     }
             }
@@ -48,14 +52,23 @@ struct ContentView: View {
         }
         .task {
             coordinator.refreshAuthorization()
-            coordinator.processPendingQuickActionRoute()
+            routePendingQuickActionIfNeeded()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 coordinator.refreshAuthorization()
-                coordinator.processPendingQuickActionRoute()
+                routePendingQuickActionIfNeeded()
             }
         }
+    }
+
+    private func routePendingQuickActionIfNeeded() {
+        // Every queued route is navigation-only. Selecting the Lockbox tab and
+        // clearing an old recovery path happen before claiming presentation;
+        // enforcement and recovery state remain untouched.
+        selectedTab = 0
+        lockboxPath = []
+        coordinator.processPendingQuickActionRoute()
     }
 
     @Environment(\.scenePhase) private var scenePhase

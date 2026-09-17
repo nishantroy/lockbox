@@ -6,6 +6,7 @@ struct LockboxTabView: View {
     @Binding var navigationPath: [QuickActionRoute.Destination]
     @State private var showingManualLock = false
     @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
+    @State private var presentedFocusAction: ScreenTimeCoordinator.PendingQuickAction?
 
     init(coordinator: ScreenTimeCoordinator, navigationPath: Binding<[QuickActionRoute.Destination]> = .constant([])) {
         self.coordinator = coordinator
@@ -25,8 +26,18 @@ struct LockboxTabView: View {
         .lockboxScreen()
         .sheet(isPresented: $showingManualLock, onDismiss: {
             requestedManualPreset = nil
+            presentedFocusAction = nil
         }) {
-            ManualLockSheet(coordinator: coordinator, requestedPreset: requestedManualPreset)
+            ManualLockSheet(
+                coordinator: coordinator,
+                requestedPreset: requestedManualPreset,
+                onPresented: { pending in
+                    guard let presentedFocusAction,
+                          presentedFocusAction == pending else { return }
+                    coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
+                    self.presentedFocusAction = nil
+                }
+            )
         }
         .onAppear {
             consumeQuickAction()
@@ -37,17 +48,26 @@ struct LockboxTabView: View {
     }
 
     private func consumeQuickAction() {
-        guard let action = coordinator.consumePendingQuickAction() else { return }
-        switch action {
+        guard let pending = coordinator.pendingQuickAction else { return }
+        switch pending.action {
         case .focus(let preset):
+            // The sheet's onAppear is the presentation callback. Until then,
+            // the claim (including its ID/token) remains durable and retryable.
+            presentedFocusAction = pending
             requestedManualPreset = preset
             showingManualLock = true
         case .status:
-            // The selected Lockbox tab already renders the truthful status.
-            break
+            // Status has no second screen: this visible Lockbox tab is its
+            // destination, and this explicit consumption handler is the ack
+            // point after the tab has been selected by ContentView.
+            coordinator.acknowledgePresentedQuickAction(pending)
         case .recovery:
             if !navigationPath.contains(.recovery) {
                 navigationPath.append(.recovery)
+            } else {
+                // Recovery is already the visible destination, so its
+                // presentation has already occurred and this is idempotent.
+                coordinator.acknowledgePresentedQuickAction(pending)
             }
         }
     }

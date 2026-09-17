@@ -3,6 +3,15 @@ import SwiftUI
 struct RecoveryView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @State private var showingConfirmation = false
+    private let onPresented: (ScreenTimeCoordinator.PendingQuickAction?) -> Void
+
+    init(
+        coordinator: ScreenTimeCoordinator,
+        onPresented: @escaping (ScreenTimeCoordinator.PendingQuickAction?) -> Void = { _ in }
+    ) {
+        _coordinator = ObservedObject(wrappedValue: coordinator)
+        self.onPresented = onPresented
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -69,6 +78,11 @@ struct RecoveryView: View {
             }
         }
         .lockboxScreen()
+        .onAppear {
+            // Recovery is acknowledged only once this destination is actually
+            // presented, not when NavigationStack state is merely appended.
+            onPresented(coordinator.pendingQuickAction)
+        }
         .alert("End this lock?", isPresented: $showingConfirmation) {
             Button("End this lock", role: .destructive) {
                 coordinator.confirmRecovery()

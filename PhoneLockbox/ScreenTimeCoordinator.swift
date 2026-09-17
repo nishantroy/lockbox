@@ -54,7 +54,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var ambientError: String?
     /// A parsed quick action is only a request to present existing UI. It is
     /// consumed by the Lockbox tab and never represents an applied policy.
-    @Published private(set) var pendingQuickAction: QuickActionRoute.Action?
+    @Published private(set) var pendingQuickAction: PendingQuickAction?
     @Published private(set) var pendingWindDownNotificationCount = 0
     @Published private(set) var windDownAuthorizationStatus = "Not requested"
 
@@ -73,6 +73,15 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// A reconciliation failure remains visible until a later reconciliation
     /// succeeds; an unrelated successful UI action must not erase it.
     private var reconciliationError: String?
+
+    /// The claim identity stays attached to the request until a destination's
+    /// explicit presentation callback acknowledges it. Keeping the token in
+    /// this value prevents a stale callback from acknowledging a re-leased
+    /// route after a crash or scene teardown.
+    struct PendingQuickAction: Equatable, Sendable {
+        let action: QuickActionRoute.Action
+        let claim: QuickActionPendingRouteStore.Claim?
+    }
 
     var selectedItemCount: Int { selection.applicationTokens.count + selection.categoryTokens.count + selection.webDomainTokens.count }
     var canApplySelection: Bool { (try? policyPlan(for: selection, mode: mode)) != nil }
@@ -705,31 +714,50 @@ final class ScreenTimeCoordinator: ObservableObject {
             lastError = "This Phone Lockbox shortcut link is invalid or expired. No lock was changed."
             return
         }
-        switch route.action {
-        case .focus:
-            guard !hasActiveLock else {
-                lastError = "A lock is already active. The shortcut cannot change the active lock."
-                return
-            }
-        case .status, .recovery:
-            break
-        }
-        pendingQuickAction = route.action
+        guard canPresentQuickAction(route.action) else { return }
+        pendingQuickAction = PendingQuickAction(action: route.action, claim: nil)
     }
 
-    func consumePendingQuickAction() -> QuickActionRoute.Action? {
-        let action = pendingQuickAction
+    /// A destination calls this only after it has consumed and presented the
+    /// requested UI. The durable queue is not acknowledged when state is
+    /// merely published: if presentation fails or the host dies first, the
+    /// lease expires and the same claim can be retried after relaunch.
+    func acknowledgePresentedQuickAction(_ pending: PendingQuickAction) {
+        guard pendingQuickAction == pending else { return }
+        if let claim = pending.claim {
+            _ = QuickActionPendingRouteStore.acknowledge(claim)
+        }
         pendingQuickAction = nil
-        return action
     }
 
     /// Imports one App Intent handoff only at the app boundary. Claiming and
     /// acknowledging are separate durable operations so a host crash retries
     /// navigation; neither operation invokes an enforcement action.
     func processPendingQuickActionRoute() {
-        guard let claim = QuickActionPendingRouteStore.claim() else { return }
-        handleQuickActionURL(claim.url)
-        _ = QuickActionPendingRouteStore.acknowledge(claim)
+        guard pendingQuickAction == nil,
+              let claim = QuickActionPendingRouteStore.claim() else { return }
+        let now = Date()
+        guard let route = QuickActionRoute.parse(claim.url, now: now) else {
+            // Leave the claim unacknowledged. It will be retried until the
+            // bounded route/queue age removes it; no invalid input can mutate
+            // enforcement or recovery state.
+            return
+        }
+        guard canPresentQuickAction(route.action) else { return }
+        pendingQuickAction = PendingQuickAction(action: route.action, claim: claim)
+    }
+
+    private func canPresentQuickAction(_ action: QuickActionRoute.Action) -> Bool {
+        switch action {
+        case .focus:
+            guard !hasActiveLock else {
+                lastError = "A lock is already active. The shortcut cannot change the active lock."
+                return false
+            }
+        case .status, .recovery:
+            break
+        }
+        return true
     }
 
     func refreshAuthorization() {

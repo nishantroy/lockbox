@@ -77,6 +77,18 @@ final class QuickActionRouteTests: XCTestCase {
         }
     }
 
+    func testEncodedNamesValuesAndQueryOrderAreNotCanonical() {
+        let variants = [
+            "phonelockbox://quick-action/v1/status?%69ssued=1000000&expires=1000300&nonce=\(nonce)",
+            "phonelockbox://quick-action/v1/status?issued=%31%30%30%30%30%30%30&expires=1000300&nonce=\(nonce)",
+            "phonelockbox://quick-action/v1/status?issued=1000000&expires=1000300&nonce=123e4567%2De89b%2D12d3%2Da456%2D426614174000",
+            "phonelockbox://quick-action/v1/status?expires=1000300&issued=1000000&nonce=\(nonce)"
+        ]
+        for value in variants {
+            XCTAssertNil(QuickActionRoute.parse(URL(string: value)!, now: now), value)
+        }
+    }
+
     func testWrongSchemeHostAndMalformedTimestampFailClosed() {
         let urls = [
             URL(string: "https://quick-action/v1/status?issued=1000000&expires=1000300&nonce=\(nonce)")!,
@@ -116,16 +128,53 @@ final class QuickActionPendingRouteStoreTests: XCTestCase {
         XCTAssertEqual(try store.claim(now: now)?.url, second)
     }
 
-    func testExpiredClaimLeaseCanRetryAfterHostCrash() throws {
+    func testClaimRemainsRetryableAcrossCrashBeforePresentationAck() throws {
         let store = try makeStore()
         let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
         XCTAssertTrue(store.enqueue(url, now: now))
         let first = try XCTUnwrap(store.claim(now: now))
+        // Simulate a failed presentation or process death: no UI callback
+        // invokes acknowledge for this claim.
         XCTAssertNil(try store.claim(now: now.addingTimeInterval(59)))
         let retry = try XCTUnwrap(store.claim(now: now.addingTimeInterval(60)))
         XCTAssertEqual(retry.url, first.url)
         XCTAssertFalse(try store.acknowledge(first))
         XCTAssertTrue(try store.acknowledge(retry))
+    }
+
+    func testOversizedQueueFileIsRejectedBeforeDecode() throws {
+        let directory = try temporaryDirectory()
+        let queueURL = directory.appendingPathComponent("phone-lockbox.quick-action-queue.json")
+        let oversized = Data(repeating: 0x20, count: QuickActionPendingRouteStore.maximumQueueBytes + 1)
+        try oversized.write(to: queueURL)
+        let store = try QuickActionPendingRouteStore(directoryURL: directory)
+        XCTAssertThrowsError(try store.claim(now: now))
+        XCTAssertEqual(try Data(contentsOf: queueURL), oversized)
+    }
+
+    func testHugeEntryCountAndStringAreRejected() throws {
+        let directory = try temporaryDirectory()
+        let queueURL = directory.appendingPathComponent("phone-lockbox.quick-action-queue.json")
+        let entry: [String: Any] = [
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "url": "phonelockbox://quick-action/v1/status?issued=1000000&expires=1000300&nonce=123e4567-e89b-12d3-a456-426614174000",
+            "enqueuedAt": 1_000_000,
+            "claimToken": NSNull(),
+            "claimUntil": NSNull()
+        ]
+        let tooMany = ["schemaVersion": 1, "entries": Array(repeating: entry, count: QuickActionPendingRouteStore.maximumEntries + 1)] as [String: Any]
+        try JSONSerialization.data(withJSONObject: tooMany).write(to: queueURL)
+        let countStore = try QuickActionPendingRouteStore(directoryURL: directory)
+        XCTAssertThrowsError(try countStore.claim(now: now))
+
+        let stringDirectory = try temporaryDirectory()
+        let stringURL = stringDirectory.appendingPathComponent("phone-lockbox.quick-action-queue.json")
+        var hugeEntry = entry
+        hugeEntry["url"] = String(repeating: "x", count: QuickActionPendingRouteStore.maximumURLBytes + 1)
+        let tooLong = ["schemaVersion": 1, "entries": [hugeEntry]] as [String: Any]
+        try JSONSerialization.data(withJSONObject: tooLong).write(to: stringURL)
+        let stringStore = try QuickActionPendingRouteStore(directoryURL: stringDirectory)
+        XCTAssertThrowsError(try stringStore.claim(now: now))
     }
 
     func testCorruptQueueFailsClosedWithoutOverwritingBytes() throws {
@@ -147,6 +196,52 @@ final class QuickActionPendingRouteStoreTests: XCTestCase {
         XCTAssertTrue(store.enqueue(old, now: now))
         XCTAssertTrue(store.enqueue(current, now: now.addingTimeInterval(601)))
         XCTAssertEqual(try store.claim(now: now.addingTimeInterval(601))?.url, current)
+    }
+
+    func testWallClockRollbackDropsFutureLeasesAndUnwedgesCapacity() throws {
+        let store = try makeStore()
+        let original = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        XCTAssertTrue(store.enqueue(original, now: now))
+        XCTAssertNotNil(try store.claim(now: now))
+
+        let rolledBack = now.addingTimeInterval(-3_600)
+        XCTAssertNil(try store.claim(now: rolledBack))
+        let replacement = try XCTUnwrap(QuickActionRoute.url(for: .recovery, now: rolledBack))
+        XCTAssertTrue(store.enqueue(replacement, now: rolledBack))
+        XCTAssertEqual(try store.claim(now: rolledBack)?.url, replacement)
+    }
+
+    func testStrictFIFODoesNotOvertakeLeasedHead() throws {
+        let store = try makeStore()
+        let firstURL = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let secondURL = try XCTUnwrap(QuickActionRoute.url(for: .recovery, now: now))
+        XCTAssertTrue(store.enqueue(firstURL, now: now))
+        XCTAssertTrue(store.enqueue(secondURL, now: now))
+        let first = try XCTUnwrap(store.claim(now: now))
+        XCTAssertNil(try store.claim(now: now.addingTimeInterval(30)))
+        let retry = try XCTUnwrap(store.claim(now: now.addingTimeInterval(60)))
+        XCTAssertEqual(retry.url, firstURL)
+        XCTAssertFalse(try store.acknowledge(first))
+        XCTAssertTrue(try store.acknowledge(retry))
+        XCTAssertEqual(try store.claim(now: now.addingTimeInterval(60))?.url, secondURL)
+    }
+
+    func testQueueAndLockFilesUseTheDocumentedProtectionContract() throws {
+        let directory = try temporaryDirectory()
+        _ = try QuickActionPendingRouteStore(directoryURL: directory)
+        let fileManager = FileManager.default
+        let lockURL = directory.appendingPathComponent("phone-lockbox.quick-action-queue.lock")
+        XCTAssertTrue(fileManager.fileExists(atPath: lockURL.path))
+#if os(iOS)
+        let protection = try fileManager.attributesOfItem(atPath: lockURL.path)[.protectionKey] as? FileProtectionType
+        if let protection {
+            XCTAssertEqual(protection, .completeUntilFirstUserAuthentication)
+        } else {
+            // The simulator does not expose Data Protection metadata; the
+            // signed-device gate must inspect this attribute on real storage.
+            throw XCTSkip("Simulator does not expose NSFileProtection metadata")
+        }
+#endif
     }
 
     func testConcurrentEnqueueAndClaimUseOneOrderedFileQueue() throws {
