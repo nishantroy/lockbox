@@ -17,8 +17,8 @@ public struct DurableAuthorizationPolicy: Sendable {
     private let requiredScopes: [String: CompanionScope]
     private let scopedAuthorization: ScopedAuthorization?
 
-    /// Closed protocol boundary. `ack` is an owner-only inert receipt hook;
-    /// every stateful friend-permission operation is reduced below.
+    /// Closed protocol boundary. `ack` is an owner-only, payload-free receipt
+    /// reduced below; every stateful friend-permission operation is fixed there.
     fileprivate static let modeledKinds: Set<String> = [
         "ack", "invite", "accept", "confirm", "consent", "session", "request",
         "approval", "cancel", "use", "natural_end", "revoke", "replace_pairing"
@@ -175,24 +175,14 @@ public final class DurableRelayService: @unchecked Sendable {
         self.now = now
     }
 
-    /// Applies one signed mutation and records its response in the same store
-    /// transaction. A retry of an already committed operation returns the
-    /// recorded response without invoking `mutation` again.
-    ///
-    /// The owner argument is deliberately explicit. It prevents a revision or
-    /// operation ID in one owner's partition from authorizing a mutation in a
-    /// different partition.
+    /// Applies one signed protocol operation and records its response in the
+    /// same store transaction. There is intentionally no public mutation
+    /// closure: remotely submitted commands can only enter the fixed reducer.
+    /// The owner argument is deliberately explicit so one partition cannot
+    /// authorize a revision or operation ID in another.
     public func submit(
         _ operation: SignedOperation,
         owner: DeviceIdentity
-    ) throws -> DurableSubmitResult {
-        try submit(operation, owner: owner) { _, _ in .acknowledgement }
-    }
-
-    public func submit(
-        _ operation: SignedOperation,
-        owner: DeviceIdentity,
-        mutation: (inout DurableOwnerLedger, DurableOperationEnvelope) throws -> RelayResult
     ) throws -> DurableSubmitResult {
         try operation.validateSignature()
         guard owner.role == .owner else { throw DurableRelayError.unknownOwner }
@@ -214,7 +204,7 @@ public final class DurableRelayService: @unchecked Sendable {
         }
 
         let bodyDigest = CompanionCanonical.digest(operation.body)
-        return try store.transaction { database in
+        let committed = try store.transaction { database in
             var ledger = try ledger(for: owner, in: &database)
 
             // Replay is resolved from the committed receipt before current
@@ -232,13 +222,17 @@ public final class DurableRelayService: @unchecked Sendable {
                 guard prior.responseDigest == CompanionCanonical.digest(prior.responseBody) else {
                     throw DurableRelayError.responseCorrupt
                 }
+                if prior.disposition == .rejectedExpiredRequest {
+                    throw CompanionError.expired
+                }
                 let result = try DurableResultCodec.decode(kind: prior.responseKind,
                                                             body: prior.responseBody)
                 let receipt = DurableOperationReceipt(operationID: prior.operationID,
                                                       ownerID: prior.ownerID,
                                                       revision: prior.committedRevision,
                                                       responseDigest: prior.responseDigest)
-                return DurableSubmitResult(result: result, receipt: receipt)
+                return (DurableSubmitResult(result: result, receipt: receipt),
+                        DurableOperationDisposition.accepted)
             }
 
             try authorization.authorize(operation: operation, envelope: envelope, owner: owner, ledger: ledger)
@@ -250,28 +244,25 @@ public final class DurableRelayService: @unchecked Sendable {
             let baseRevision = ledger.revision
             guard baseRevision < Int64.max else { throw DurableRelayError.revisionOverflow }
 
+            let commandTime = now()
             let result: RelayResult
-            if DurableAuthorizationPolicy.modeledKinds.contains(operation.kind), operation.kind != "ack" {
-                // Stateful protocol kinds are never delegated to an arbitrary
-                // closure. The owner-locked reducer validates the complete
-                // graph and performs the mutation before the receipt row.
+            let disposition: DurableOperationDisposition
+            do {
                 result = try DurableProtocolReducer.apply(kind: operation.kind,
                                                           envelope: envelope,
                                                           signer: operation.signer,
                                                           owner: owner,
                                                           ledger: &ledger,
-                                                          now: now())
-            } else {
-                // Only inert, owner-authorized integration hooks may use the
-                // generic seam; they cannot substitute for protocol state.
-                result = try mutation(&ledger, envelope)
-            }
-            guard ledger.revision == baseRevision else {
-                throw DurableRelayError.mutationChangedRevision(expected: baseRevision,
-                                                                 actual: ledger.revision)
+                                                          now: commandTime)
+                disposition = .accepted
+            } catch DurableProtocolTransitionError.requestExpired {
+                // Expiry is a terminal state transition. Commit it with a
+                // durable rejected receipt, then surface the terminal error.
+                result = .acknowledgement
+                disposition = .rejectedExpiredRequest
             }
             let encoded = try DurableResultCodec.encode(result)
-            let committedRevision = baseRevision + 1
+            let committedRevision = try checkedIncrement(baseRevision, name: "ledger revision")
             let record = DurableOperationRecord(
                 operationID: envelope.operationID,
                 ownerID: owner.identityID,
@@ -282,7 +273,8 @@ public final class DurableRelayService: @unchecked Sendable {
                 responseBody: encoded.body,
                 responseDigest: CompanionCanonical.digest(encoded.body),
                 committedRevision: committedRevision,
-                committedAt: Date()
+                committedAt: commandTime,
+                disposition: disposition
             )
             ledger.revision = committedRevision
             ledger.operations[record.operationID] = record
@@ -295,8 +287,11 @@ public final class DurableRelayService: @unchecked Sendable {
                                                   ownerID: record.ownerID,
                                                   revision: record.committedRevision,
                                                   responseDigest: record.responseDigest)
-            return DurableSubmitResult(result: result, receipt: receipt)
+            let submitResult = DurableSubmitResult(result: result, receipt: receipt)
+            return (submitResult, disposition)
         }
+        if committed.1 == .rejectedExpiredRequest { throw CompanionError.expired }
+        return committed.0
     }
 
     private func ledger(for owner: DeviceIdentity,
@@ -309,7 +304,7 @@ public final class DurableRelayService: @unchecked Sendable {
     }
 }
 
-private enum DurableResultCodec {
+enum DurableResultCodec {
     struct Encoded {
         let kind: String
         let body: Data

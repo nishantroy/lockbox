@@ -149,8 +149,7 @@ public struct RelationshipConsent: Codable, Hashable, Sendable {
     /// atomically invalidate requests and approvals before acknowledging the
     /// enclosing consent transaction.
     public mutating func advanceGeneration() throws {
-        guard generation < UInt64.max else { throw CompanionError.malformed("consent generation exhausted") }
-        generation += 1
+        generation = try checkedIncrement(generation, name: "consent generation")
     }
 
     public func activeScopes() -> Set<CompanionScope> {

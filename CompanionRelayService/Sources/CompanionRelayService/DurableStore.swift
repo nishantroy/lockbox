@@ -106,6 +106,14 @@ public struct DurableOwnerLedger: Codable, Sendable {
     }
 }
 
+public enum DurableOperationDisposition: String, Codable, Hashable, Sendable {
+    case accepted
+    /// The signed command arrived at/after its request expiry. The request
+    /// was terminally expired in the same transaction, but the command itself
+    /// was rejected and can only replay this terminal outcome.
+    case rejectedExpiredRequest
+}
+
 public struct DurableOperationRecord: Codable, Hashable, Sendable {
     public let operationID: String
     public let ownerID: String
@@ -117,14 +125,38 @@ public struct DurableOperationRecord: Codable, Hashable, Sendable {
     public let responseDigest: Data
     public let committedRevision: Int64
     public let committedAt: Date
+    public let disposition: DurableOperationDisposition
 
     public init(operationID: String, ownerID: String, signer: DeviceIdentity, kind: String,
                 bodyDigest: Data, responseKind: String, responseBody: Data,
-                responseDigest: Data, committedRevision: Int64, committedAt: Date) {
+                responseDigest: Data, committedRevision: Int64, committedAt: Date,
+                disposition: DurableOperationDisposition = .accepted) {
         self.operationID = operationID; self.ownerID = ownerID; self.signer = signer
         self.kind = kind; self.bodyDigest = bodyDigest; self.responseKind = responseKind
         self.responseBody = responseBody; self.responseDigest = responseDigest
         self.committedRevision = committedRevision; self.committedAt = committedAt
+        self.disposition = disposition
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case operationID, ownerID, signer, kind, bodyDigest, responseKind, responseBody,
+             responseDigest, committedRevision, committedAt, disposition
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.operationID = try c.decode(String.self, forKey: .operationID)
+        self.ownerID = try c.decode(String.self, forKey: .ownerID)
+        self.signer = try c.decode(DeviceIdentity.self, forKey: .signer)
+        self.kind = try c.decode(String.self, forKey: .kind)
+        self.bodyDigest = try c.decode(Data.self, forKey: .bodyDigest)
+        self.responseKind = try c.decode(String.self, forKey: .responseKind)
+        self.responseBody = try c.decode(Data.self, forKey: .responseBody)
+        self.responseDigest = try c.decode(Data.self, forKey: .responseDigest)
+        self.committedRevision = try c.decode(Int64.self, forKey: .committedRevision)
+        self.committedAt = try c.decode(Date.self, forKey: .committedAt)
+        self.disposition = try c.decodeIfPresent(DurableOperationDisposition.self,
+                                                  forKey: .disposition) ?? .accepted
     }
 }
 
@@ -324,7 +356,9 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
         guard database.owners.count <= 10_000 else { throw DurableStoreError.oversizedState }
         for (ownerID, ledger) in database.owners {
             guard ownerID == ledger.owner.identityID, ledger.owner.role == .owner,
-                  ledger.revision >= 0, ledger.operations.count <= DurableRelayLimits.maxOperationRecords,
+                  ledger.revision >= 0,
+                  ledger.revision <= Int64(DurableRelayLimits.maxOperationRecords),
+                  ledger.operations.count <= DurableRelayLimits.maxOperationRecords,
                   ledger.audit.count <= DurableRelayLimits.maxAuditEvents,
                   ledger.invitations.count <= CompanionLimits.maxSnapshotRecords,
                   ledger.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
@@ -342,16 +376,61 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
             try ledger.owner.validate()
 
             var operationRevisions = Set<Int64>()
+            let ownerSignedKinds: Set<String> = ["ack", "invite", "confirm", "consent", "session",
+                                                   "request", "use", "cancel", "natural_end", "revoke",
+                                                   "replace_pairing"]
+            let approverSignedKinds: Set<String> = ["accept", "approval"]
+            let responseKinds: [String: String] = [
+                "ack": "acknowledgement", "invite": "invitation", "accept": "acceptance",
+                "confirm": "pairing", "consent": "consent", "session": "session",
+                "request": "request", "approval": "approval", "use": "verification",
+                "cancel": "acknowledgement", "natural_end": "acknowledgement",
+                "revoke": "acknowledgement", "replace_pairing": "pairing"
+            ]
             for (key, record) in ledger.operations {
-                guard key == record.operationID, record.ownerID == ownerID,
+                guard key == record.operationID, isValidIdentifier(record.operationID),
+                      record.ownerID == ownerID,
+                      responseKinds[record.kind] != nil,
                       record.committedRevision > 0, record.committedRevision <= ledger.revision,
                       operationRevisions.insert(record.committedRevision).inserted,
                       record.bodyDigest.count == 32, record.responseDigest.count == 32,
-                      record.responseDigest == Data(SHA256.hash(data: record.responseBody)) else {
+                      record.responseDigest == Data(SHA256.hash(data: record.responseBody)),
+                      record.responseKind == (record.disposition == .rejectedExpiredRequest
+                                              ? "acknowledgement" : responseKinds[record.kind]) else {
                     throw DurableStoreError.invalidSnapshot
                 }
                 try record.signer.validate()
+                guard (ownerSignedKinds.contains(record.kind) && record.signer == ledger.owner)
+                    || (approverSignedKinds.contains(record.kind) && record.signer.role == .trustedApprover)
+                    || (record.kind == "consent" && record.signer.role == .trustedApprover) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                if record.disposition == .rejectedExpiredRequest {
+                    guard record.responseBody == Data("{}".utf8),
+                          record.kind == "approval" || record.kind == "use" || record.kind == "cancel" else {
+                        throw DurableStoreError.invalidSnapshot
+                    }
+                } else {
+                    do {
+                        let result = try DurableResultCodec.decode(kind: record.responseKind,
+                                                                    body: record.responseBody)
+                        guard resultMatchesLedger(result, record: record, ledger: ledger) else {
+                            throw DurableStoreError.invalidSnapshot
+                        }
+                    } catch let error as DurableStoreError {
+                        throw error
+                    } catch {
+                        throw DurableStoreError.invalidSnapshot
+                    }
+                }
                 try requireValidDate(record.committedAt)
+            }
+            if ledger.revision == 0 {
+                guard operationRevisions.isEmpty else { throw DurableStoreError.invalidSnapshot }
+            } else {
+                guard operationRevisions == Set((1...Int(ledger.revision)).map(Int64.init)) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
             }
             for (key, invitation) in ledger.invitations {
                 guard key == invitation.invitation.payload.inviteID,
@@ -375,7 +454,9 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                 if let revokedAt = pairing.revokedAt { try requireValidDate(revokedAt) }
             }
             for (key, epoch) in ledger.pairingEpochs {
-                guard isValidIdentifier(key), epoch > 0 else { throw DurableStoreError.invalidSnapshot }
+                guard isValidIdentifier(key), epoch > 0, epoch < UInt64.max,
+                      let pairing = ledger.pairings[key]?.pairing,
+                      pairing.epoch == epoch else { throw DurableStoreError.invalidSnapshot }
             }
             for (key, session) in ledger.sessions {
                 guard key == session.session.sessionID, session.session.owner == ledger.owner else {
@@ -401,10 +482,23 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                 }
                 guard request.request.targetBindings.allSatisfy({ binding in
                     guard let pairing = ledger.pairings[binding.pairingID]?.pairing else { return false }
+                    let stateIsCompatible = request.request.status == .pending || request.request.status == .approved
+                        ? pairing.state == .active : true
                     return pairing.owner == ledger.owner
                         && pairing.approver.identityID == binding.approverIdentityID
                         && pairing.epoch == binding.pairEpoch
+                        && stateIsCompatible
                 }) else { throw DurableStoreError.invalidSnapshot }
+                switch request.request.status {
+                case .expired:
+                    guard request.expiredAt != nil else { throw DurableStoreError.invalidSnapshot }
+                case .cancelled:
+                    guard request.cancelledAt != nil else { throw DurableStoreError.invalidSnapshot }
+                default:
+                    guard request.cancelledAt == nil, request.expiredAt == nil else {
+                        throw DurableStoreError.invalidSnapshot
+                    }
+                }
                 guard ledger.sessions[request.request.sessionID] != nil,
                       ledger.sessions[request.request.sessionID]?.session.activeSetID == request.request.activeSetID else {
                     throw DurableStoreError.invalidSnapshot
@@ -482,6 +576,47 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                 try requireValidDate(event.occurredAt)
             }
         }
+    }
+}
+
+private func resultMatchesLedger(_ result: RelayResult,
+                                 record: DurableOperationRecord,
+                                 ledger: DurableOwnerLedger) -> Bool {
+    switch result {
+    case .invitation(let invitation):
+        return ledger.invitations[invitation.payload.inviteID]?.invitation.payload.owner == ledger.owner
+    case .consent(let consent):
+        return ledger.relationshipConsents[consent.relationshipID]?.pairingID == consent.pairingID
+            && ledger.relationshipConsents[consent.relationshipID]?.owner == ledger.owner
+    case .acceptance(let acceptance):
+        if let stored = ledger.pendingAcceptances[acceptance.acceptanceID] {
+            return stored == acceptance && stored.owner == ledger.owner
+        }
+        let pairingID = durableBase64URL(Data(SHA256.hash(data: CompanionCanonical.bytes(
+            domain: "\(CompanionCanonical.version).pairing",
+            fields: [acceptance.inviteID, acceptance.approver.identityID])))).prefix(32).description
+        return ledger.pairings[pairingID]?.pairing.owner == ledger.owner
+            && ledger.pairings[pairingID]?.pairing.approver == acceptance.approver
+    case .pairing(let pairing):
+        return ledger.pairings[pairing.pairingID]?.pairing.epoch == pairing.epoch
+            && ledger.pairings[pairing.pairingID]?.pairing.owner == ledger.owner
+    case .session(let session):
+        return ledger.sessions[session.sessionID]?.session.activeSetID == session.activeSetID
+            && ledger.sessions[session.sessionID]?.session.owner == ledger.owner
+    case .request(let request):
+        return ledger.requests[request.requestID]?.request.sessionID == request.sessionID
+            && ledger.requests[request.requestID]?.request.owner == ledger.owner
+    case .approval(let approval):
+        return ledger.approvals[approval.approvalID]?.approval.requestID == approval.requestID
+            && ledger.approvals[approval.approvalID]?.approval.consentGeneration == approval.consentGeneration
+    case .verification(let verification):
+        guard let use = ledger.approvalUses[verification.useID],
+              use.approvalID == verification.approval.approvalID,
+              use.requestID == verification.approval.requestID else { return false }
+        return ledger.usedApprovalIDs.contains(verification.useID)
+            && ledger.usedApprovalIDs.contains(verification.approval.approvalID)
+    case .acknowledgement:
+        return true
     }
 }
 

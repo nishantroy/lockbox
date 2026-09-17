@@ -96,6 +96,14 @@ func requireTimestamp(_ value: Date, name: String) throws {
     }
 }
 
+/// Checked counters are used for every durable epoch/revision transition.
+/// Never rely on Swift's trapping integer operators for protocol state.
+func checkedIncrement(_ value: UInt64, name: String) throws -> UInt64 {
+    let (next, overflowed) = value.addingReportingOverflow(1)
+    guard !overflowed else { throw CompanionError.malformed("\(name) exhausted") }
+    return next
+}
+
 func milliseconds(_ date: Date) -> Int64 {
     Int64((date.timeIntervalSince1970 * 1_000).rounded())
 }

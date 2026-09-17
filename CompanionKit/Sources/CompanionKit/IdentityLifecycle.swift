@@ -50,10 +50,10 @@ public struct IdentityReplacement: Codable, Hashable, Sendable {
         try requireIdentifier(replacementID, name: "replacement ID")
         try previous.validate(); try replacement.validate()
         try requireTimestamp(issuedAt, name: "replacement time")
+        let expectedEpoch = try checkedIncrement(previousEpoch, name: "identity epoch")
         guard previous.role == replacement.role,
               previous != replacement,
-              previousEpoch > 0,
-              replacementEpoch == previousEpoch + 1,
+              replacementEpoch == expectedEpoch,
               signature.isEmpty || signature.count == 64 else {
             throw CompanionError.malformed("invalid identity replacement")
         }
@@ -89,16 +89,17 @@ public struct IdentityReplacement: Codable, Hashable, Sendable {
         guard signer.identity.role == previous.role, signer.identity != previous else {
             throw CompanionError.unauthorized
         }
+        let replacementEpoch = try checkedIncrement(previousEpoch, name: "identity epoch")
         let replacement = try IdentityReplacement(
             replacementID: replacementID, previous: previous, replacement: signer.identity,
-            previousEpoch: previousEpoch, replacementEpoch: previousEpoch + 1,
+            previousEpoch: previousEpoch, replacementEpoch: replacementEpoch,
             issuedAt: issuedAt, signature: Data())
         let signature = try signer.sign(
             domain: "\(CompanionCanonical.version).identity-replacement",
             fields: replacement.signingFields())
         return try IdentityReplacement(
             replacementID: replacementID, previous: previous, replacement: signer.identity,
-            previousEpoch: previousEpoch, replacementEpoch: previousEpoch + 1,
+            previousEpoch: previousEpoch, replacementEpoch: replacementEpoch,
             issuedAt: issuedAt, signature: signature)
     }
 }
@@ -123,10 +124,11 @@ public struct PairingReplacement: Codable, Hashable, Sendable {
         try requireIdentifier(replacementPairingID, name: "replacement pairing ID")
         try previousPairing.validate(); try replacement.validate()
         try requireTimestamp(issuedAt, name: "replacement time")
+        let expectedEpoch = try checkedIncrement(previousPairing.epoch, name: "pairing epoch")
         guard previousPairing.state == .active,
               replacement.role == .trustedApprover,
               replacement != previousPairing.approver,
-              replacementEpoch == previousPairing.epoch + 1,
+              replacementEpoch == expectedEpoch,
               signature.isEmpty || signature.count == 64 else {
             throw CompanionError.malformed("invalid pairing replacement")
         }
@@ -162,17 +164,18 @@ public struct PairingReplacement: Codable, Hashable, Sendable {
                                issuedAt: Date) throws -> PairingReplacement {
         guard signer.identity.role == .trustedApprover,
               signer.identity != previousPairing.approver else { throw CompanionError.unauthorized }
+        let replacementEpoch = try checkedIncrement(previousPairing.epoch, name: "pairing epoch")
         let unsigned = try PairingReplacement(
             replacementID: replacementID, previousPairing: previousPairing,
             replacementPairingID: replacementPairingID, replacement: signer.identity,
-            replacementEpoch: previousPairing.epoch + 1, issuedAt: issuedAt, signature: Data())
+            replacementEpoch: replacementEpoch, issuedAt: issuedAt, signature: Data())
         let signature = try signer.sign(
             domain: "\(CompanionCanonical.version).pairing-replacement",
             fields: unsigned.signingFields())
         return try PairingReplacement(
             replacementID: replacementID, previousPairing: previousPairing,
             replacementPairingID: replacementPairingID, replacement: signer.identity,
-            replacementEpoch: previousPairing.epoch + 1, issuedAt: issuedAt, signature: signature)
+            replacementEpoch: replacementEpoch, issuedAt: issuedAt, signature: signature)
     }
 }
 

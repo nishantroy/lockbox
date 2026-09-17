@@ -10,6 +10,7 @@ public enum DurableRelayError: Error, Equatable, Sendable {
     case ambiguousOwner
     case responseCorrupt
     case revisionOverflow
+    case epochOverflow
     case unsupportedOperation(String)
     case unauthorized
     case mutationChangedRevision(expected: Int64, actual: Int64)
@@ -74,6 +75,30 @@ public enum DurableOperationFactory {
                                    body: envelopeData, signature: signature)
     }
 
+    public static func makeAck(operationID: String, expectedRevision: Int64,
+                               signer: DeviceSigner) throws -> SignedOperation {
+        try makeRaw(kind: "ack", operationID: operationID, expectedRevision: expectedRevision,
+                    payload: Data("{}".utf8), signer: signer)
+    }
+
+    private static func makeRaw(kind: String, operationID: String, expectedRevision: Int64,
+                                payload: Data, signer: DeviceSigner) throws -> SignedOperation {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let envelope = try DurableOperationEnvelope(operationID: operationID,
+                                                     expectedRevision: expectedRevision,
+                                                     payload: payload)
+        let envelopeData = try encoder.encode(envelope)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: kind, signer: signer.identity,
+                                           body: envelopeData,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        return try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                   kind: kind, signer: signer.identity,
+                                   body: envelopeData, signature: signature)
+    }
+
     public static func makeInbox(signer: DeviceSigner) throws -> SignedOperation {
         let query = InboxQuery(identityID: signer.identity.identityID)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
@@ -108,6 +133,18 @@ func durableDataFromBase64URL(_ value: String) -> Data? {
 func durableBase64URL(_ data: Data) -> String {
     data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+}
+
+func checkedIncrement(_ value: Int64, name: String) throws -> Int64 {
+    let (next, overflowed) = value.addingReportingOverflow(1)
+    guard !overflowed else { throw DurableRelayError.revisionOverflow }
+    return next
+}
+
+func checkedPairingEpoch(_ value: UInt64) throws -> UInt64 {
+    let (next, overflowed) = value.addingReportingOverflow(1)
+    guard !overflowed else { throw DurableRelayError.epochOverflow }
+    return next
 }
 
 func validateTimestamp(_ date: Date) throws {

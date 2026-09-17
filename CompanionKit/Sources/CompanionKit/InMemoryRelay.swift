@@ -42,9 +42,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.owner = owner; self.currentTime = now
     }
 
-    /// Restores the relay for package persistence tests without claiming
-    /// rollback protection. Production callers must use the anchored overload.
-    public convenience init(testSnapshot data: Data) throws {
+    /// Test-only restore without an external monotonic anchor. This cannot
+    /// establish rollback protection and is intentionally inaccessible to
+    /// production callers; use the anchored overload for persistence tests.
+    convenience init(testSnapshot data: Data) throws {
         let snapshot: RelaySnapshot
         do { snapshot = try JSONDecoder().decode(RelaySnapshot.self, from: data) }
         catch { throw CompanionError.malformed("invalid relay snapshot") }
@@ -118,7 +119,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                 throw CompanionError.malformed("invalid operation record")
             }
         }
-        guard UInt64(recordRevisions.count) == snapshot.revision else {
+        guard UInt64(recordRevisions.count) == snapshot.revision,
+              recordRevisions == Set((1...Int(snapshot.revision)).map(UInt64.init)) else {
             throw CompanionError.malformed("incomplete operation records")
         }
 
@@ -320,6 +322,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         lock.lock(); defer { lock.unlock() }
         guard var request = requests[id] else { throw CompanionError.notFound }
         updateExpiry(&request)
+        requests[id] = request
         return request
     }
 
@@ -343,7 +346,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         guard revision < UInt64.max else { throw CompanionError.malformed("revision exhausted") }
         try charge(operation.signer.identityID)
         let result = try apply(operation)
-        revision += 1
+        revision = try checkedIncrement(revision, name: "relay revision")
         let record = try RelayOperationRecord(operationID: operation.operationID,
                                               signerIdentityID: operation.signer.identityID,
                                               kind: operation.kind, bodyDigest: digest,
@@ -500,13 +503,20 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   !usedApprovalNonces.contains(base64URL(approval.nonce)) else { throw CompanionError.replay }
             guard let request = requests[approval.requestID] else { throw CompanionError.notFound }
             var currentRequest = request; updateExpiry(&currentRequest)
-            guard currentRequest.effectiveStatus(at: currentTime) == .pending,
-                  currentRequest.sessionID == approval.sessionID, currentRequest.activeSetID == approval.activeSetID,
+            requests[request.requestID] = currentRequest
+            guard currentRequest.effectiveStatus(at: currentTime) == .pending else {
+                if currentRequest.status == .expired { throw CompanionError.expired }
+                throw CompanionError.wrongTarget
+            }
+            guard currentRequest.sessionID == approval.sessionID, currentRequest.activeSetID == approval.activeSetID,
                   let target = currentRequest.binding(for: approval.approver.identityID),
-                  target.pairingID == approval.pairingID, target.pairEpoch == approval.pairEpoch,
+                  target.pairingID == approval.pairingID,
+                  target.pairEpoch == approval.pairEpoch,
+                  target.consentGeneration == approval.consentGeneration,
                   let pairing = pairings[approval.pairingID], pairing.owner == owner,
                   pairing.approver == approval.approver, pairing.epoch == approval.pairEpoch,
-                  pairing.state == .active else { throw CompanionError.wrongTarget }
+                  pairing.state == .active,
+                  relationshipConsents[approval.pairingID]?.generation == approval.consentGeneration else { throw CompanionError.wrongTarget }
             guard request.purpose == .approveEarlyEnd,
                   relationshipConsents[approval.pairingID]?.authorizes(.receiveRequests) == true,
                   relationshipConsents[approval.pairingID]?.authorizes(.approveEarlyEnd) == true else {
@@ -536,7 +546,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                 throw CompanionError.revokedPairing
             }
             var currentRequest = request; updateExpiry(&currentRequest)
+            requests[request.requestID] = currentRequest
             let currentSession = sessions[owner.identityID]
+            if currentRequest.status == .expired { throw CompanionError.expired }
             guard currentRequest.effectiveStatus(at: currentTime) == .approved,
                   currentSession?.isActive(at: currentTime) == true,
                   currentRequest.sessionID == currentSession?.sessionID,
@@ -567,7 +579,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             let reference = try decode(RequestReference.self, operation.body)
             guard operation.signer == owner, var request = requests[reference.requestID], request.owner == owner else { throw CompanionError.unauthorized }
             updateExpiry(&request)
+            requests[reference.requestID] = request
             guard request.effectiveStatus(at: currentTime) == .pending || request.effectiveStatus(at: currentTime) == .approved else {
+                if request.status == .expired { throw CompanionError.expired }
                 throw CompanionError.invalidTransition
             }
             if request.effectiveStatus(at: currentTime) == .approved {
@@ -631,6 +645,12 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             invalidateOutstandingAuthority(pairingID: reference.pairingID)
             return .acknowledgement
 
+        case "ack":
+            guard operation.signer == owner, operation.body == Data("{}".utf8) else {
+                throw CompanionError.malformed("ack must have an empty payload")
+            }
+            return .acknowledgement
+
         default:
             throw CompanionError.malformed("unknown operation")
         }
@@ -690,8 +710,10 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     }
 
     private func updateExpiry(_ request: inout TrustedRequest) {
-        if request.status != .cancelled && request.status != .declined,
-           (currentTime >= request.expiresAt || sessions[owner.identityID].map({ currentTime >= $0.endsAt }) == true) {
+        guard request.status != .cancelled && request.status != .declined,
+              request.status != .expired else { return }
+        let sessionEnded = sessionHistory[request.sessionID].map { currentTime >= $0.endsAt } ?? false
+        if currentTime >= request.expiresAt || sessionEnded {
             request.status = .expired
         }
     }

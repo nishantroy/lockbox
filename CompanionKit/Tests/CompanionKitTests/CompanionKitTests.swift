@@ -270,6 +270,25 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertNoThrow(try owner.useApproval(firstApproval, request: firstRequest, useID: "collision-use"))
     }
 
+    func testSnapshotRejectsOperationHistoryGap() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let fixedNow = t
+        _ = try CompanionClient(signer: signer, transport: relay, now: { fixedNow })
+            .createInvite(inviteID: "history-one", validFor: 600, now: t,
+                          nonce: Data(repeating: 41, count: 24))
+        _ = try CompanionClient(signer: signer, transport: relay, now: { fixedNow })
+            .createInvite(inviteID: "history-two", validFor: 600, now: t,
+                          nonce: Data(repeating: 42, count: 24))
+        let gap = try alteredSnapshot(relay) { snapshot in
+            var records = snapshot["operationRecords"] as! [[String: Any]]
+            records.removeFirst()
+            snapshot["operationRecords"] = records
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: gap))
+    }
+
     func testSnapshotRejectsTamperedInviteSignatureAndCrossOwnerGraph() throws {
         let (relay, owner, _, _, _) = try harness()
         let tamperedInvite = try alteredSnapshot(relay) { snapshot in
@@ -584,7 +603,7 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertEqual(relay.currentRevision, beforeFailure)
         let persisted = try JSONSerialization.jsonObject(with: relay.snapshot()) as! [String: Any]
         let persistedRequest = (persisted["requests"] as! [[String: Any]])[0]
-        XCTAssertEqual(persistedRequest["status"] as? String, "pending")
+        XCTAssertEqual(persistedRequest["status"] as? String, "expired")
 
         let (secondRelay, secondOwner, secondApprover, secondPairing, secondSession) = try harness()
         let secondRequest = try secondOwner.requestUnlock(requestID: "failed-use-expiry",
@@ -600,7 +619,7 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertEqual(secondRelay.currentRevision, beforeUseFailure)
         let secondPersisted = try JSONSerialization.jsonObject(with: secondRelay.snapshot()) as! [String: Any]
         let secondPersistedRequest = (secondPersisted["requests"] as! [[String: Any]])[0]
-        XCTAssertEqual(secondPersistedRequest["status"] as? String, "approved")
+        XCTAssertEqual(secondPersistedRequest["status"] as? String, "expired")
     }
 
     func testPairingReplacementRevokesExactOldEpoch() throws {
@@ -622,7 +641,7 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertEqual(newPairing.approver, replacementSigner.identity)
         XCTAssertThrowsError(try approver.submitApproval(request: oldRequest,
                                                           pairing: oldPairing, decision: .approved)) {
-            XCTAssertEqual($0 as? CompanionError, .wrongTarget)
+            XCTAssertEqual($0 as? CompanionError, .expired)
         }
 
         let replacement = CompanionClient(signer: replacementSigner, transport: relay,
@@ -760,6 +779,53 @@ final class CompanionKitTests: XCTestCase {
         }
     }
 
+    func testMismatchedApprovalGenerationLeavesRequestPending() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "generation-mismatch-request", pairing: pairing,
+                                              session: session, target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 600)
+        let generation = request.consentGeneration + 1
+        let unsigned = Approval(approvalID: "generation-mismatch-approval", requestID: request.requestID,
+                                pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                sessionID: request.sessionID, activeSetID: request.activeSetID,
+                                approver: approver.signer.identity, decision: .approved, issuedAt: t,
+                                consentGeneration: generation, nonce: Data(repeating: 21, count: 24),
+                                signature: Data())
+        let signature = try approver.signer.sign(domain: "\(CompanionCanonical.version).approval",
+                                                  fields: unsigned.signingFields())
+        let mismatched = Approval(approvalID: unsigned.approvalID, requestID: unsigned.requestID,
+                                 pairingID: unsigned.pairingID, pairEpoch: unsigned.pairEpoch,
+                                 sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
+                                 approver: unsigned.approver, decision: unsigned.decision,
+                                 issuedAt: unsigned.issuedAt, consentGeneration: generation,
+                                 nonce: unsigned.nonce, signature: signature)
+        XCTAssertThrowsError(try approver.transport.submit(
+            try signedOperation(kind: "approval", signer: approver.signer,
+                                body: mismatched, operationID: "generation-mismatch-op")))
+        XCTAssertEqual(try relay.request(id: request.requestID).status, .pending)
+    }
+
+    func testEpochOverflowIsRejectedWithoutArithmeticTrap() throws {
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        XCTAssertThrowsError(try IdentityReplacement(replacementID: "identity-overflow",
+                                                      previous: ownerSigner.identity,
+                                                      replacement: approverSigner.identity,
+                                                      previousEpoch: UInt64.max,
+                                                      replacementEpoch: UInt64.max,
+                                                      issuedAt: t, signature: Data()))
+        let pairing = try Pairing(pairingID: "pairing-overflow", owner: ownerSigner.identity,
+                                  approver: approverSigner.identity, epoch: UInt64.max,
+                                  createdAt: t, state: .active)
+        XCTAssertThrowsError(try PairingReplacement.propose(replacementID: "pairing-overflow-replacement",
+                                                            previousPairing: pairing,
+                                                            replacementPairingID: "replacement",
+                                                            signer: try DeviceSigner.create(
+                                                                role: .trustedApprover,
+                                                                keyStore: InMemoryDeviceKeyStore()),
+                                                            issuedAt: t))
+    }
+
     func testQuietHoursArePrivateLocalNotificationPolicy() throws {
         let policy = try QuietHoursPolicy(startMinute: 22 * 60, endMinute: 7 * 60, suppressApproverNotifications: true)
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -768,6 +834,19 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertTrue(policy.suppressesNotifications(at: night, calendar: calendar))
         XCTAssertFalse(policy.suppressesNotifications(at: day, calendar: calendar))
         XCTAssertNil(policy.score)
+    }
+
+    private func signedOperation<T: Encodable>(kind: String, signer: DeviceSigner,
+                                               body: T, operationID: String) throws -> SignedOperation {
+        let data = try JSONEncoder().encode(body)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: kind, signer: signer.identity, body: data,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        return try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                   kind: kind, signer: signer.identity, body: data,
+                                   signature: signature)
     }
 
     private func signedApproval(signer: DeviceSigner, approvalID: String, request: TrustedRequest,

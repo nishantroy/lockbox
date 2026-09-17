@@ -2,6 +2,13 @@ import Foundation
 import CryptoKit
 import CompanionKit
 
+/// A late request command terminalizes the request and is recorded as a
+/// rejected operation by the enclosing transaction. It is deliberately not a
+/// normal reducer result, so no approval/use can be mistaken for success.
+enum DurableProtocolTransitionError: Error {
+    case requestExpired
+}
+
 /// The only stateful durable protocol implementation. Every case runs while
 /// the caller holds the owner ledger transaction lock; no generic closure is
 /// allowed to authorize or mutate these records.
@@ -11,6 +18,12 @@ enum DurableProtocolReducer {
                       ledger: inout DurableOwnerLedger, now: Date) throws -> RelayResult {
         try validateTimestamp(now)
         switch kind {
+        case "ack":
+            guard signer == owner, envelope.payload == Data("{}".utf8) else {
+                throw CompanionError.malformed("ack must have an empty payload")
+            }
+            return .acknowledgement
+
         case "invite":
             let invitation = try decode(Invitation.self, envelope.payload)
             guard signer == owner, invitation.payload.owner == owner else { throw CompanionError.unauthorized }
@@ -59,8 +72,7 @@ enum DurableProtocolReducer {
                 domain: "\(CompanionCanonical.version).pairing",
                 fields: [acceptance.inviteID, acceptance.approver.identityID])))).prefix(32).description
             guard ledger.pairings[pairingID] == nil else { throw CompanionError.replay }
-            let epoch = (ledger.pairingEpochs[pairingID] ?? 0) + 1
-            guard epoch > 0 else { throw CompanionError.malformed("pairing epoch exhausted") }
+            let epoch = try checkedPairingEpoch(ledger.pairingEpochs[pairingID] ?? 0)
             let pairing = try Pairing(pairingID: pairingID, owner: owner,
                                       approver: acceptance.approver, epoch: epoch,
                                       createdAt: now, state: .active)
@@ -166,6 +178,7 @@ enum DurableProtocolReducer {
                 throw CompanionError.unauthorized
             }
             try approval.validateSignature()
+            try expireIfDue(requestID: approval.requestID, now: now, ledger: &ledger)
             guard approval.consentGeneration > 0, approval.nonce.count >= 16,
                   ledger.approvals[approval.approvalID] == nil,
                   !ledger.usedApprovalIDs.contains(approval.approvalID),
@@ -206,8 +219,11 @@ enum DurableProtocolReducer {
             let use = try decode(ApprovalUse.self, envelope.payload)
             guard isValidIdentifier(use.useID) else { throw CompanionError.malformed("invalid use ID") }
             guard signer == owner,
-                  let requestRecord = ledger.requests[use.requestID], requestRecord.request.owner == owner,
-                  let accepted = ledger.approvals[use.approval.approvalID]?.approval,
+                  let requestRecord = ledger.requests[use.requestID], requestRecord.request.owner == owner else {
+                throw CompanionError.unauthorized
+            }
+            try expireIfDue(requestID: use.requestID, now: now, ledger: &ledger)
+            guard let accepted = ledger.approvals[use.approval.approvalID]?.approval,
                   accepted == use.approval,
                   use.requestID == accepted.requestID,
                   use.consentGeneration > 0,
@@ -237,8 +253,7 @@ enum DurableProtocolReducer {
                 throw CompanionError.replay
             }
             try accepted.validateSignature()
-            let committedRevision = ledger.revision + 1
-            guard committedRevision > ledger.revision else { throw DurableRelayError.revisionOverflow }
+            let committedRevision = try checkedIncrement(ledger.revision, name: "ledger revision")
             ledger.usedApprovalIDs.insert(accepted.approvalID)
             ledger.usedApprovalIDs.insert(use.useID)
             ledger.approvalUses[use.useID] = DurableApprovalUseRecord(
@@ -251,6 +266,11 @@ enum DurableProtocolReducer {
             guard signer == owner, var record = ledger.requests[reference.requestID], record.request.owner == owner else {
                 throw CompanionError.unauthorized
             }
+            try expireIfDue(requestID: reference.requestID, now: now, ledger: &ledger)
+            guard let freshRecord = ledger.requests[reference.requestID] else {
+                throw CompanionError.notFound
+            }
+            record = freshRecord
             guard record.request.status == .pending || record.request.status == .approved else {
                 throw CompanionError.invalidTransition
             }
@@ -346,6 +366,21 @@ enum DurableProtocolReducer {
         record.request.status = .expired
         record.expiredAt = now
         ledger.requests[requestID] = record
+    }
+
+    /// Checks the request's own frozen expiry and its session end before every
+    /// approval/use/cancellation transition. The caller's transaction commits
+    /// this terminal state together with the rejected operation receipt.
+    private static func expireIfDue(requestID: String, now: Date,
+                                    ledger: inout DurableOwnerLedger) throws {
+        guard let record = ledger.requests[requestID],
+              record.request.status != .cancelled,
+              record.request.status != .declined,
+              record.request.status != .expired else { return }
+        let sessionEnded = ledger.sessions[record.request.sessionID].map { $0.session.endsAt <= now } ?? false
+        guard now >= record.request.expiresAt || sessionEnded else { return }
+        expire(requestID: requestID, now: now, ledger: &ledger)
+        throw DurableProtocolTransitionError.requestExpired
     }
 
     private static func invalidate(pairingID: String, now: Date,
