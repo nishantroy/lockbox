@@ -18,6 +18,8 @@
 		3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */; };
 		3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */; };
 		3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261660DEBCA6E1C2FF8E9AC /* LiveActivityAdapter.swift */; };
+		418D431200AFC6DF44F8C009 /* SafetyAssistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */; };
+		41DB07862A1BCD257453E327 /* SafetyAssistantView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */; };
 		510B03F537735BC5AEE4AC36 /* ShieldActionExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */; };
 		51A9820C991E42AD46629222 /* LockboxLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */; };
 		59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */; };
@@ -44,6 +46,7 @@
 		AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */; };
 		B3CC6F984D164E57CF206DA4 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21D938BBE7A7D516BD85A479 /* PeopleView.swift */; };
 		B55944F134064144A9BB1053 /* ConfigurationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */; };
+		B8E5C2B192EDAF29362FF438 /* SafetyAssistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */; };
 		BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */; };
 		C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		CC7FACFAFEEBA8A8C4901727 /* GalleryTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84197D5D974050762C5DC97 /* GalleryTheme.swift */; };
@@ -120,11 +123,13 @@
 		21D938BBE7A7D516BD85A479 /* PeopleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleView.swift; sourceTree = "<group>"; };
 		2A5D95C14D31DEE7B354AE57 /* PhoneLockboxShieldConfiguration.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockboxShieldConfiguration.entitlements; sourceTree = "<group>"; };
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
+		30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistant.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4937C609973AA395FE5785C2 /* LockboxPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicy.swift; sourceTree = "<group>"; };
 		4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeStore.swift; sourceTree = "<group>"; };
 		4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOccurrence.swift; sourceTree = "<group>"; };
 		4FC89584D6D8DB677376C818 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistantView.swift; sourceTree = "<group>"; };
 		58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldActionExtension.swift; sourceTree = "<group>"; };
 		5A49845AEC0FC73B3304327A /* GalleryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryViews.swift; sourceTree = "<group>"; };
 		63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeLifecycle.swift; sourceTree = "<group>"; };
@@ -272,6 +277,7 @@
 				4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */,
 				D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */,
 				4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */,
+				30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -293,6 +299,7 @@
 				0D9DB33B46E0F54F4E879C95 /* LockboxTabView.swift */,
 				78CED1BE0B8B3D280E2024D3 /* ManualLockSheet.swift */,
 				21D938BBE7A7D516BD85A479 /* PeopleView.swift */,
+				55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */,
 				09BBFF1E0F3CD2FA9C05F7B1 /* SettingsView.swift */,
 			);
 			path = Views;
@@ -536,6 +543,7 @@
 				5FE2806A4ED9CC173077DCBD /* RuntimeOccurrence.swift in Sources */,
 				23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */,
 				677800E8B1F6C2E0FE49B285 /* RuntimeStore.swift in Sources */,
+				B8E5C2B192EDAF29362FF438 /* SafetyAssistant.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -567,6 +575,8 @@
 				833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */,
 				17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */,
 				59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */,
+				418D431200AFC6DF44F8C009 /* SafetyAssistant.swift in Sources */,
+				41DB07862A1BCD257453E327 /* SafetyAssistantView.swift in Sources */,
 				AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */,
 				809D1DF12F48C38A7E2A739F /* SettingsView.swift in Sources */,
 				5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */,
