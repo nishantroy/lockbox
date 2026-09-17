@@ -8,9 +8,17 @@ struct ManualLockSheet: View {
     @State private var attempted = false
     @State private var referenceDate: Date
 
-    init(coordinator: ScreenTimeCoordinator) {
+    init(coordinator: ScreenTimeCoordinator, requestedPreset: QuickActionRoute.FocusPreset? = nil) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
+        _choice = State(initialValue: requestedPreset.map(Self.choice) ?? .thirtyMinutes)
         _referenceDate = State(initialValue: Date())
+    }
+
+    private static func choice(for preset: QuickActionRoute.FocusPreset) -> ManualLockChoice {
+        switch preset {
+        case .thirtyMinutes: return .thirtyMinutes
+        case .oneHour: return .oneHour
+        }
     }
 
     var body: some View {

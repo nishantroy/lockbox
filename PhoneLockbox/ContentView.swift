@@ -2,15 +2,24 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var coordinator = ScreenTimeCoordinator()
+    @State private var selectedTab = 0
+    @State private var lockboxPath: [QuickActionRoute.Destination] = []
 
     var body: some View {
-        TabView {
-            NavigationStack {
-                LockboxTabView(coordinator: coordinator)
+        TabView(selection: $selectedTab) {
+            NavigationStack(path: $lockboxPath) {
+                LockboxTabView(coordinator: coordinator, navigationPath: $lockboxPath)
+                    .navigationDestination(for: QuickActionRoute.Destination.self) { destination in
+                        switch destination {
+                        case .recovery:
+                            RecoveryView(coordinator: coordinator)
+                        }
+                    }
             }
             .tabItem {
                 Label("Lockbox", systemImage: "lock.shield")
             }
+            .tag(0)
 
             // This tab intentionally has no authorization gate. A companion
             // user can read the recovery explanation without Screen Time.
@@ -20,6 +29,7 @@ struct ContentView: View {
             .tabItem {
                 Label("People", systemImage: "person.2")
             }
+            .tag(1)
 
             NavigationStack {
                 SettingsView(coordinator: coordinator)
@@ -27,13 +37,23 @@ struct ContentView: View {
             .tabItem {
                 Label("Settings", systemImage: "gearshape")
             }
+            .tag(2)
         }
         .tint(LockboxTheme.accent)
         .lockboxScreen()
-        .task { coordinator.refreshAuthorization() }
+        .onOpenURL { url in
+            selectedTab = 0
+            lockboxPath = []
+            coordinator.handleQuickActionURL(url)
+        }
+        .task {
+            coordinator.refreshAuthorization()
+            coordinator.processPendingQuickActionRoute()
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 coordinator.refreshAuthorization()
+                coordinator.processPendingQuickActionRoute()
             }
         }
     }

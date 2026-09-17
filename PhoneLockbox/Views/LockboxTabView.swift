@@ -3,7 +3,14 @@ import FamilyControls
 
 struct LockboxTabView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @Binding var navigationPath: [QuickActionRoute.Destination]
     @State private var showingManualLock = false
+    @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
+
+    init(coordinator: ScreenTimeCoordinator, navigationPath: Binding<[QuickActionRoute.Destination]> = .constant([])) {
+        self.coordinator = coordinator
+        _navigationPath = navigationPath
+    }
 
     var body: some View {
         Group {
@@ -16,8 +23,32 @@ struct LockboxTabView: View {
             }
         }
         .lockboxScreen()
-        .sheet(isPresented: $showingManualLock) {
-            ManualLockSheet(coordinator: coordinator)
+        .sheet(isPresented: $showingManualLock, onDismiss: {
+            requestedManualPreset = nil
+        }) {
+            ManualLockSheet(coordinator: coordinator, requestedPreset: requestedManualPreset)
+        }
+        .onAppear {
+            consumeQuickAction()
+        }
+        .onChange(of: coordinator.pendingQuickAction) { _, _ in
+            consumeQuickAction()
+        }
+    }
+
+    private func consumeQuickAction() {
+        guard let action = coordinator.consumePendingQuickAction() else { return }
+        switch action {
+        case .focus(let preset):
+            requestedManualPreset = preset
+            showingManualLock = true
+        case .status:
+            // The selected Lockbox tab already renders the truthful status.
+            break
+        case .recovery:
+            if !navigationPath.contains(.recovery) {
+                navigationPath.append(.recovery)
+            }
         }
     }
 }

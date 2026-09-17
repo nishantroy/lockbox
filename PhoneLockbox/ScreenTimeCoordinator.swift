@@ -52,6 +52,9 @@ final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var windDownLeadMinutes = 30
     @Published private(set) var liveActivityEnabled = false
     @Published private(set) var ambientError: String?
+    /// A parsed quick action is only a request to present existing UI. It is
+    /// consumed by the Lockbox tab and never represents an applied policy.
+    @Published private(set) var pendingQuickAction: QuickActionRoute.Action?
     @Published private(set) var pendingWindDownNotificationCount = 0
     @Published private(set) var windDownAuthorizationStatus = "Not requested"
 
@@ -635,6 +638,7 @@ final class ScreenTimeCoordinator: ObservableObject {
     init(clock: @escaping () -> Date = { Date() }) {
         self.clock = clock
         let defaults = UserDefaults.standard
+        pendingQuickAction = nil
         windDownEnabled = defaults.object(forKey: Self.windDownEnabledKey) as? Bool ?? false
         let storedLead = defaults.object(forKey: Self.windDownLeadMinutesKey) as? Int ?? 30
         windDownLeadMinutes = min(max(storedLead, 1), 1_440)
@@ -691,6 +695,39 @@ final class ScreenTimeCoordinator: ObservableObject {
         reconcileRuntime()
         scheduleAmbientReconciliation()
         scheduleLiveActivityReconciliation()
+    }
+
+    /// Handles only the versioned, short-lived routes produced by this app's
+    /// App Intents. An invalid or expired route is rejected without any
+    /// Managed Settings or lifecycle mutation.
+    func handleQuickActionURL(_ url: URL, now: Date = Date()) {
+        guard let route = QuickActionRoute.parse(url, now: now) else {
+            lastError = "This Phone Lockbox shortcut link is invalid or expired. No lock was changed."
+            return
+        }
+        switch route.action {
+        case .focus:
+            guard !hasActiveLock else {
+                lastError = "A lock is already active. The shortcut cannot change the active lock."
+                return
+            }
+        case .status, .recovery:
+            break
+        }
+        pendingQuickAction = route.action
+    }
+
+    func consumePendingQuickAction() -> QuickActionRoute.Action? {
+        let action = pendingQuickAction
+        pendingQuickAction = nil
+        return action
+    }
+
+    /// Imports the App Intent handoff only at the app boundary. Parsing remains
+    /// fail-closed, and consuming this URL does not invoke any runtime action.
+    func processPendingQuickActionRoute() {
+        guard let url = QuickActionPendingRouteStore.take() else { return }
+        handleQuickActionURL(url)
     }
 
     func refreshAuthorization() {
