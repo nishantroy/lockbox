@@ -15,6 +15,27 @@ public struct DurableRelayDatabase: Codable, Sendable {
     }
 }
 
+/// The durable snapshot's checkpoint covers every owner partition. The
+/// revision map is the exact monotonic revision for each owner; it is retained
+/// outside the mutable snapshot by the embedding.
+public struct DurableCheckpoint: Codable, Hashable, Sendable {
+    public let ownerRevisions: [String: Int64]
+    public let stateRoot: Data
+
+    public init(ownerRevisions: [String: Int64], stateRoot: Data) throws {
+        guard stateRoot.count == 32,
+              ownerRevisions.allSatisfy({ isValidIdentifier($0.key) && $0.value >= 0 }) else {
+            throw DurableStoreError.invalidSnapshot
+        }
+        self.ownerRevisions = ownerRevisions
+        self.stateRoot = stateRoot
+    }
+
+    public func validate() throws {
+        _ = try DurableCheckpoint(ownerRevisions: ownerRevisions, stateRoot: stateRoot)
+    }
+}
+
 public struct DurableOwnerLedger: Codable, Sendable {
     public let owner: DeviceIdentity
     public var revision: Int64
@@ -123,6 +144,8 @@ public struct DurableOperationRecord: Codable, Hashable, Sendable {
     public let responseKind: String
     public let responseBody: Data
     public let responseDigest: Data
+    /// Exact signed envelope retained for restore graph validation.
+    public let signedOperation: Data
     public let committedRevision: Int64
     public let committedAt: Date
     public let disposition: DurableOperationDisposition
@@ -130,17 +153,19 @@ public struct DurableOperationRecord: Codable, Hashable, Sendable {
     public init(operationID: String, ownerID: String, signer: DeviceIdentity, kind: String,
                 bodyDigest: Data, responseKind: String, responseBody: Data,
                 responseDigest: Data, committedRevision: Int64, committedAt: Date,
-                disposition: DurableOperationDisposition = .accepted) {
+                disposition: DurableOperationDisposition = .accepted,
+                signedOperation: Data = Data()) {
         self.operationID = operationID; self.ownerID = ownerID; self.signer = signer
         self.kind = kind; self.bodyDigest = bodyDigest; self.responseKind = responseKind
         self.responseBody = responseBody; self.responseDigest = responseDigest
+        self.signedOperation = signedOperation
         self.committedRevision = committedRevision; self.committedAt = committedAt
         self.disposition = disposition
     }
 
     private enum CodingKeys: String, CodingKey {
         case operationID, ownerID, signer, kind, bodyDigest, responseKind, responseBody,
-             responseDigest, committedRevision, committedAt, disposition
+             responseDigest, signedOperation, committedRevision, committedAt, disposition
     }
 
     public init(from decoder: Decoder) throws {
@@ -153,6 +178,7 @@ public struct DurableOperationRecord: Codable, Hashable, Sendable {
         self.responseKind = try c.decode(String.self, forKey: .responseKind)
         self.responseBody = try c.decode(Data.self, forKey: .responseBody)
         self.responseDigest = try c.decode(Data.self, forKey: .responseDigest)
+        self.signedOperation = try c.decodeIfPresent(Data.self, forKey: .signedOperation) ?? Data()
         self.committedRevision = try c.decode(Int64.self, forKey: .committedRevision)
         self.committedAt = try c.decode(Date.self, forKey: .committedAt)
         self.disposition = try c.decodeIfPresent(DurableOperationDisposition.self,
@@ -303,17 +329,34 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
         self.database = DurableRelayDatabase()
     }
 
-    public init(database: DurableRelayDatabase) throws {
+    init(database: DurableRelayDatabase) throws {
         try Self.validate(database)
         self.database = database
     }
 
-    public convenience init(snapshot data: Data) throws {
+    /// Unanchored snapshot decoding is test-only. Production callers must use
+    /// the checkpoint overload below with an independently retained root.
+    convenience init(snapshot data: Data) throws {
         let decoder = JSONDecoder()
         guard let database = try? decoder.decode(DurableRelayDatabase.self, from: data) else {
             throw DurableStoreError.invalidSnapshot
         }
         try Self.validate(database)
+        try self.init(database: database)
+    }
+
+    public convenience init(snapshot data: Data, checkpoint: DurableCheckpoint) throws {
+        let decoder = JSONDecoder()
+        guard let database = try? decoder.decode(DurableRelayDatabase.self, from: data) else {
+            throw DurableStoreError.invalidSnapshot
+        }
+        try Self.validate(database)
+        try checkpoint.validate()
+        let revisions = database.owners.mapValues(\.revision)
+        guard revisions == checkpoint.ownerRevisions,
+              try database.canonicalStateRoot() == checkpoint.stateRoot else {
+            throw DurableStoreError.invalidSnapshot
+        }
         try self.init(database: database)
     }
 
@@ -326,6 +369,14 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
         lock.lock(); defer { lock.unlock() }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(database)
+    }
+
+    /// Checkpoints are observational outputs and must be persisted by the
+    /// embedding only after the transaction that produced this state commits.
+    public func checkpoint() throws -> DurableCheckpoint {
+        lock.lock(); defer { lock.unlock() }
+        return try DurableCheckpoint(ownerRevisions: database.owners.mapValues(\.revision),
+                                     stateRoot: database.canonicalStateRoot())
     }
 
     public func injectFailure(_ point: DurableStoreFailurePoint?) {
@@ -394,11 +445,20 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                       record.committedRevision > 0, record.committedRevision <= ledger.revision,
                       operationRevisions.insert(record.committedRevision).inserted,
                       record.bodyDigest.count == 32, record.responseDigest.count == 32,
+                      record.signedOperation.count > 0,
                       record.responseDigest == Data(SHA256.hash(data: record.responseBody)),
                       record.responseKind == (record.disposition == .rejectedExpiredRequest
                                               ? "acknowledgement" : responseKinds[record.kind]) else {
                     throw DurableStoreError.invalidSnapshot
                 }
+                let signed = try decodeDurableSignedOperation(record.signedOperation)
+                guard signed.operationID == record.operationID,
+                      signed.kind == record.kind,
+                      signed.signer == record.signer,
+                      record.bodyDigest == CompanionCanonical.digest(signed.body) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
+                try signed.validateSignature()
                 try record.signer.validate()
                 guard (ownerSignedKinds.contains(record.kind) && record.signer == ledger.owner)
                     || (approverSignedKinds.contains(record.kind) && record.signer.role == .trustedApprover)
@@ -506,6 +566,26 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
                 if let date = request.cancelledAt { try requireValidDate(date) }
                 if let date = request.expiredAt { try requireValidDate(date) }
                 if let date = request.supersededAt { try requireValidDate(date) }
+            }
+            for request in ledger.requests.values {
+                let records = ledger.operations.values.filter { record in
+                    guard record.kind == "request",
+                          let signed = try? decodeDurableSignedOperation(record.signedOperation),
+                          signed.signer == ledger.owner,
+                          let envelope = try? JSONDecoder().decode(DurableOperationEnvelope.self, from: signed.body),
+                          let initial = try? JSONDecoder().decode(TrustedRequest.self, from: envelope.payload) else { return false }
+                    return initial.requestID == request.request.requestID
+                }
+                guard records.count == 1,
+                      let record = records.first,
+                      let signed = try? decodeDurableSignedOperation(record.signedOperation),
+                      let envelope = try? JSONDecoder().decode(DurableOperationEnvelope.self, from: signed.body),
+                      let initial = try? JSONDecoder().decode(TrustedRequest.self, from: envelope.payload),
+                      requestImmutableFieldsMatch(request.request, initial),
+                      initial.status == .pending,
+                      initial.decisions.values.allSatisfy({ $0 == .pending }) else {
+                    throw DurableStoreError.invalidSnapshot
+                }
             }
             var approvalTargets: [String: Set<String>] = [:]
             var approvalNonces = Set<String>()
@@ -667,5 +747,75 @@ private func requireValidDate(_ date: Date) throws {
     guard date.timeIntervalSince1970.isFinite, date >= Date(timeIntervalSince1970: 0),
           date <= Date(timeIntervalSince1970: 4_102_444_800) else {
         throw CompanionError.malformed("invalid durable date")
+    }
+}
+
+private func decodeDurableSignedOperation(_ data: Data) throws -> SignedOperation {
+    do { return try JSONDecoder().decode(SignedOperation.self, from: data) }
+    catch { throw DurableStoreError.invalidSnapshot }
+}
+
+private func requestImmutableFieldsMatch(_ current: TrustedRequest, _ initial: TrustedRequest) -> Bool {
+    current.requestID == initial.requestID && current.owner == initial.owner &&
+    current.pairingID == initial.pairingID && current.pairEpoch == initial.pairEpoch &&
+    current.consentGeneration == initial.consentGeneration && current.sessionID == initial.sessionID &&
+    current.activeSetID == initial.activeSetID && current.purpose == initial.purpose &&
+    current.targetedApproverIDs == initial.targetedApproverIDs &&
+    current.targetBindings == initial.targetBindings && current.message == initial.message &&
+    current.createdAt == initial.createdAt && current.expiresAt == initial.expiresAt
+}
+
+public extension DurableRelayDatabase {
+    /// Canonical root for all owner partitions and all ledger fields. Set and
+    /// dictionary members are explicitly sorted; no authority-bearing field
+    /// is omitted from the root.
+    func canonicalStateRoot() throws -> Data {
+        func optional<T: Encodable>(_ value: T?) throws -> Data {
+            guard let value else { return Data("null".utf8) }
+            return try CompanionCanonical.encoded(value)
+        }
+        func dictionary<T: Encodable>(_ value: [String: T]) throws -> Data {
+            var fields: [Data] = []
+            for key in value.keys.sorted() {
+                fields.append(try CompanionCanonical.encoded(key))
+                fields.append(try CompanionCanonical.encoded(value[key]!))
+            }
+            return CompanionCanonical.framed(domain: "\(CompanionCanonical.version).state-dictionary", fields: fields)
+        }
+        func strings(_ value: Set<String>) throws -> Data {
+            try CompanionCanonical.framed(domain: "\(CompanionCanonical.version).state-set",
+                                          fields: value.sorted().map { try CompanionCanonical.encoded($0) })
+        }
+        func ledger(_ value: DurableOwnerLedger) throws -> Data {
+            let fields: [Data] = [
+                try CompanionCanonical.encoded(value.owner),
+                try CompanionCanonical.encoded(value.revision),
+                try dictionary(value.operations),
+                try dictionary(value.invitations),
+                try dictionary(value.pendingAcceptances),
+                try dictionary(value.pairings),
+                try dictionary(value.pairingEpochs),
+                try dictionary(value.sessions),
+                try optional(value.currentSessionID),
+                try dictionary(value.requests),
+                try dictionary(value.approvals),
+                try dictionary(value.approvalUses),
+                try dictionary(value.relationshipConsents),
+                try strings(value.usedConsentNonces),
+                try strings(value.usedApprovalIDs),
+                try strings(value.usedApprovalNonces),
+                try dictionary(value.rateLimits),
+                try CompanionCanonical.framed(domain: "\(CompanionCanonical.version).state-audit",
+                                              fields: value.audit.map { try CompanionCanonical.encoded($0) })
+            ]
+            return CompanionCanonical.framed(domain: "\(CompanionCanonical.version).owner-ledger", fields: fields)
+        }
+        var ownerFields: [Data] = []
+        for ownerID in owners.keys.sorted() {
+            ownerFields.append(try CompanionCanonical.encoded(ownerID))
+            ownerFields.append(try ledger(owners[ownerID]!))
+        }
+        return CompanionCanonical.digest(CompanionCanonical.framed(
+            domain: "\(CompanionCanonical.version).durable-state-root", fields: ownerFields))
     }
 }

@@ -581,7 +581,7 @@ public struct SignedOperation: Codable, Hashable, Sendable {
 }
 
 public struct RelaySnapshot: Codable, Sendable {
-    static let currentSchemaVersion: UInt16 = 2
+    static let currentSchemaVersion: UInt16 = 3
     let schemaVersion: UInt16
     let owner: DeviceIdentity
     let currentTime: Date
@@ -928,4 +928,47 @@ public struct PairingReference: Codable, Sendable {
     public let pairingID: String
     public let epoch: UInt64
     public init(pairingID: String, epoch: UInt64) { self.pairingID = pairingID; self.epoch = epoch }
+}
+
+public extension RelaySnapshot {
+    /// Hashes every authoritative snapshot field in a stable representation.
+    /// Arrays whose order is not protocol meaning are sorted by their encoded
+    /// bytes; request/decision dictionaries are included in their leaf JSON.
+    func canonicalStateRoot() throws -> Data {
+        func encodedList<T: Encodable>(_ values: [T]) throws -> Data {
+            let encoded = try values.map { try CompanionCanonical.encoded($0) }
+                .sorted { base64URL($0) < base64URL($1) }
+            return CompanionCanonical.framed(domain: "\(CompanionCanonical.version).state-list", fields: encoded)
+        }
+        func encodedSet(_ values: Set<String>) throws -> Data {
+            try encodedList(values.sorted())
+        }
+        let currentSession: Data
+        if let currentSessionID {
+            currentSession = try CompanionCanonical.encoded(currentSessionID)
+        } else {
+            currentSession = Data("null".utf8)
+        }
+        let fields: [Data] = [
+            try CompanionCanonical.encoded(schemaVersion),
+            try CompanionCanonical.encoded(owner),
+            try CompanionCanonical.encoded(currentTime),
+            try CompanionCanonical.encoded(revision),
+            currentSession,
+            try encodedList(invitations),
+            try encodedSet(usedInviteIDs),
+            try encodedList(pendingAcceptances),
+            try encodedList(pairings),
+            try encodedList(sessions),
+            try encodedList(requests),
+            try encodedList(approvals),
+            try encodedSet(usedApprovalIDs),
+            try encodedSet(usedApprovalNonces),
+            try encodedSet(usedConsentNonces),
+            try encodedList(relationshipConsents),
+            try encodedList(operationRecords)
+        ]
+        return CompanionCanonical.digest(CompanionCanonical.framed(
+            domain: "\(CompanionCanonical.version).relay-state-root", fields: fields))
+    }
 }

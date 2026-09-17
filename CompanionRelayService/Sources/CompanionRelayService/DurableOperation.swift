@@ -111,9 +111,9 @@ public enum DurableOperationFactory {
     }
 }
 
-public extension InMemoryDurableRelayStore {
-    /// A restart operation intentionally goes through the serialized snapshot
-    /// boundary rather than sharing the old in-memory object.
+extension InMemoryDurableRelayStore {
+    /// Test-only restart through an unanchored serialized snapshot. Production
+    /// callers cannot use this path; use the public checkpoint overload.
     func restarted() throws -> InMemoryDurableRelayStore {
         try InMemoryDurableRelayStore(snapshot: snapshot())
     }

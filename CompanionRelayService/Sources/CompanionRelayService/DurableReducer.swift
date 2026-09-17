@@ -163,8 +163,9 @@ enum DurableProtocolReducer {
                   ledger.currentSessionID == request.sessionID,
                   let session = ledger.sessions[request.sessionID]?.session,
                   session.activeSetID == request.activeSetID,
-                  session.isActive(at: now), request.createdAt <= now.addingTimeInterval(60) else {
-                throw CompanionError.staleSession
+                  session.isActive(at: now), request.createdAt <= now.addingTimeInterval(60),
+                  now < request.expiresAt else {
+                throw CompanionError.expired
             }
             try request.validateShape()
             try validateRequest(request, session: session, owner: owner, ledger: ledger)

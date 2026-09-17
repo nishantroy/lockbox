@@ -52,7 +52,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         // Validate the complete graph before installing any decoded value.
         // This keeps restore fail-closed and prevents a partially trusted
         // snapshot from becoming relay state.
-        try Self.validateSnapshot(snapshot)
+        try Self.validateSnapshot(snapshot, requireRetainedRequestBinding: false)
         try self.init(owner: snapshot.owner, now: snapshot.currentTime)
         self.invitations = Dictionary(uniqueKeysWithValues: snapshot.invitations.map { ($0.payload.inviteID, $0) })
         self.usedInviteIDs = snapshot.usedInviteIDs
@@ -73,21 +73,37 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         self.revision = snapshot.revision
     }
 
-    /// Restores only a snapshot at or ahead of the caller's monotonic
-    /// persistence anchor. An older valid snapshot is rejected before state is
-    /// installed, so consumed operation receipts cannot be resurrected.
-    public convenience init(snapshot data: Data, revisionAnchor: UInt64) throws {
+    /// Restores only with a checkpoint retained outside the mutable snapshot.
+    /// The checkpoint binds both the exact revision and the complete canonical
+    /// state root; a revision number alone does not authenticate state.
+    public convenience init(snapshot data: Data, checkpoint: CompanionCheckpoint) throws {
         let snapshot: RelaySnapshot
         do { snapshot = try JSONDecoder().decode(RelaySnapshot.self, from: data) }
         catch { throw CompanionError.malformed("invalid relay snapshot") }
-        guard snapshot.revision >= revisionAnchor else {
-            throw CompanionError.staleRevision(expected: revisionAnchor, actual: snapshot.revision)
+        try checkpoint.validate()
+        guard snapshot.owner.identityID == checkpoint.ownerIdentityID,
+              snapshot.revision == checkpoint.revision else {
+            throw CompanionError.staleRevision(expected: checkpoint.revision, actual: snapshot.revision)
         }
-        try Self.validateSnapshot(snapshot)
+        try Self.validateSnapshot(snapshot, requireRetainedRequestBinding: true)
+        guard try snapshot.canonicalStateRoot() == checkpoint.stateRoot else {
+            throw CompanionError.malformed("relay checkpoint root mismatch")
+        }
         try self.init(testSnapshot: data)
     }
 
-    private static func validateSnapshot(_ snapshot: RelaySnapshot) throws {
+    /// The caller must retain this checkpoint independently and rotate it only
+    /// after the corresponding committed transaction has completed.
+    public func checkpoint() throws -> CompanionCheckpoint {
+        lock.lock(); defer { lock.unlock() }
+        let snapshot = try makeSnapshot()
+        return try CompanionCheckpoint(ownerIdentityID: owner.identityID,
+                                       revision: revision,
+                                       stateRoot: snapshot.canonicalStateRoot())
+    }
+
+    private static func validateSnapshot(_ snapshot: RelaySnapshot,
+                                         requireRetainedRequestBinding: Bool = false) throws {
         guard snapshot.revision <= UInt64(CompanionLimits.maxSnapshotRecords),
               snapshot.invitations.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
@@ -103,8 +119,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
               snapshot.operationRecords.count <= CompanionLimits.maxSnapshotRecords else {
             throw CompanionError.malformed("relay snapshot too large")
         }
-        guard snapshot.schemaVersion == 0 || snapshot.schemaVersion == 1 ||
-              snapshot.schemaVersion == RelaySnapshot.currentSchemaVersion else {
+        guard snapshot.schemaVersion == RelaySnapshot.currentSchemaVersion else {
             throw CompanionError.malformed("unsupported relay snapshot schema")
         }
         guard snapshot.owner.role == .owner else { throw CompanionError.unauthorized }
@@ -113,14 +128,44 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         var recordRevisions = Set<UInt64>()
         for record in snapshot.operationRecords {
             try record.validate()
+            let signed = try decodeSignedOperation(record.signedOperation)
             guard record.revision <= snapshot.revision,
+                  signed.operationID == record.operationID,
+                  signed.kind == record.kind,
+                  signed.signer.identityID == record.signerIdentityID,
+                  signed.expectedRevision == record.expectedRevision,
+                  record.bodyDigest == CompanionCanonical.digest(signed.body),
                   recordIDs.insert(record.operationID).inserted,
                   recordRevisions.insert(record.revision).inserted else {
                 throw CompanionError.malformed("invalid operation record")
             }
+            try signed.validateSignature()
         }
+        if requireRetainedRequestBinding {
+            for request in snapshot.requests {
+                let records = snapshot.operationRecords.filter { record in
+                    guard record.kind == "request",
+                          let signed = try? decodeSignedOperation(record.signedOperation),
+                          signed.signer == snapshot.owner,
+                          let initial = try? JSONDecoder().decode(TrustedRequest.self, from: signed.body) else { return false }
+                    return initial.requestID == request.requestID
+                }
+                guard records.count == 1,
+                      let record = records.first,
+                      let signed = try? decodeSignedOperation(record.signedOperation),
+                      let initial = try? JSONDecoder().decode(TrustedRequest.self, from: signed.body),
+                      requestImmutableFieldsMatch(request, initial),
+                      initial.status == .pending,
+                      initial.decisions.values.allSatisfy({ $0 == .pending }) else {
+                    throw CompanionError.malformed("request is not bound to retained operation")
+                }
+            }
+        }
+        let expectedRecordRevisions: Set<UInt64> = snapshot.revision == 0
+            ? []
+            : Set((1...Int(snapshot.revision)).map(UInt64.init))
         guard UInt64(recordRevisions.count) == snapshot.revision,
-              recordRevisions == Set((1...Int(snapshot.revision)).map(UInt64.init)) else {
+              recordRevisions == expectedRecordRevisions else {
             throw CompanionError.malformed("incomplete operation records")
         }
 
@@ -273,22 +318,25 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
 
     public func snapshot() throws -> Data {
         lock.lock(); defer { lock.unlock() }
-        let value = RelaySnapshot(owner: owner, currentTime: currentTime, revision: revision,
-                                  currentSessionID: sessions[owner.identityID]?.sessionID,
-                                  invitations: invitations.values.sorted { $0.payload.inviteID < $1.payload.inviteID },
-                                  usedInviteIDs: usedInviteIDs,
-                                  pendingAcceptances: pendingAcceptances.values.sorted { $0.acceptanceID < $1.acceptanceID },
-                                  pairings: pairings.values.sorted { $0.pairingID < $1.pairingID },
-                                  sessions: sessionHistory.values.sorted { $0.sessionID < $1.sessionID },
-                                  requests: requests.values.sorted { $0.requestID < $1.requestID },
-                                  approvals: approvals.values.sorted { $0.approvalID < $1.approvalID },
-                                  usedApprovalIDs: usedApprovalIDs,
-                                  usedApprovalNonces: usedApprovalNonces,
-                                  usedConsentNonces: usedConsentNonces,
-                                  relationshipConsents: relationshipConsents.values.sorted { $0.relationshipID < $1.relationshipID },
-                                  operationRecords: operationRecords.values.sorted { $0.operationID < $1.operationID })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(value)
+        return try encoder.encode(makeSnapshot())
+    }
+
+    private func makeSnapshot() throws -> RelaySnapshot {
+        RelaySnapshot(owner: owner, currentTime: currentTime, revision: revision,
+                      currentSessionID: sessions[owner.identityID]?.sessionID,
+                      invitations: invitations.values.sorted { $0.payload.inviteID < $1.payload.inviteID },
+                      usedInviteIDs: usedInviteIDs,
+                      pendingAcceptances: pendingAcceptances.values.sorted { $0.acceptanceID < $1.acceptanceID },
+                      pairings: pairings.values.sorted { $0.pairingID < $1.pairingID },
+                      sessions: sessionHistory.values.sorted { $0.sessionID < $1.sessionID },
+                      requests: requests.values.sorted { $0.requestID < $1.requestID },
+                      approvals: approvals.values.sorted { $0.approvalID < $1.approvalID },
+                      usedApprovalIDs: usedApprovalIDs,
+                      usedApprovalNonces: usedApprovalNonces,
+                      usedConsentNonces: usedConsentNonces,
+                      relationshipConsents: relationshipConsents.values.sorted { $0.relationshipID < $1.relationshipID },
+                      operationRecords: operationRecords.values.sorted { $0.operationID < $1.operationID })
     }
 
     public func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
@@ -351,7 +399,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                                               signerIdentityID: operation.signer.identityID,
                                               kind: operation.kind, bodyDigest: digest,
                                               revision: revision, response: result,
-                                              expectedRevision: operation.expectedRevision)
+                                              expectedRevision: operation.expectedRevision,
+                                              signedOperation: try CompanionCanonical.encoded(operation))
         operationRecords[operation.operationID] = record
         return try RelayResponse(operationID: operation.operationID, revision: revision, result: result)
     }
@@ -482,7 +531,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard operation.signer == owner, request.owner == owner,
                   let session = sessions[owner.identityID], session.sessionID == request.sessionID,
                   session.activeSetID == request.activeSetID, session.isActive(at: currentTime),
-                  request.createdAt <= currentTime.addingTimeInterval(60) else { throw CompanionError.staleSession }
+                  request.createdAt <= currentTime.addingTimeInterval(60),
+                  currentTime < request.expiresAt else { throw CompanionError.expired }
             try request.validateShape()
             try validateRequestPairing(request, session: session)
             for binding in request.targetBindings {
@@ -733,4 +783,19 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         guard let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: key) else { return false }
         return publicKey.isValidSignature(signature, for: CompanionCanonical.bytes(domain: domain, fields: fields))
     }
+}
+
+private func decodeSignedOperation(_ data: Data) throws -> SignedOperation {
+    do { return try JSONDecoder().decode(SignedOperation.self, from: data) }
+    catch { throw CompanionError.malformed("invalid retained signed operation") }
+}
+
+private func requestImmutableFieldsMatch(_ current: TrustedRequest, _ initial: TrustedRequest) -> Bool {
+    current.requestID == initial.requestID && current.owner == initial.owner &&
+    current.pairingID == initial.pairingID && current.pairEpoch == initial.pairEpoch &&
+    current.consentGeneration == initial.consentGeneration && current.sessionID == initial.sessionID &&
+    current.activeSetID == initial.activeSetID && current.purpose == initial.purpose &&
+    current.targetedApproverIDs == initial.targetedApproverIDs &&
+    current.targetBindings == initial.targetBindings && current.message == initial.message &&
+    current.createdAt == initial.createdAt && current.expiresAt == initial.expiresAt
 }

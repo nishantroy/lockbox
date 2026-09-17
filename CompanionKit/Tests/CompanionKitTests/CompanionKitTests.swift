@@ -117,6 +117,61 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertThrowsError(try owner.accept(invite, acceptanceID: "wrong-receiver", now: t))
     }
 
+    func testAnchoredRestoreRejectsSameRevisionRequestExpiryAndReceiptForks() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "checkpoint-request", pairing: pairing,
+                                              session: session, target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 600)
+        _ = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                         approvalID: "checkpoint-approval")
+        let snapshot = try relay.snapshot()
+        let checkpoint = try relay.checkpoint()
+
+        let expiryFork = try alteredSnapshot(relay) { value in
+            var requests = value["requests"] as! [[String: Any]]
+            requests[0]["expiresAt"] = t.addingTimeInterval(3_600).timeIntervalSince1970
+            value["requests"] = requests
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: expiryFork, checkpoint: checkpoint))
+
+        let receiptFork = try alteredSnapshot(relay) { value in
+            var records = value["operationRecords"] as! [[String: Any]]
+            records[0]["response"] = ["acknowledgement": [:]]
+            value["operationRecords"] = records
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: receiptFork, checkpoint: checkpoint))
+
+        try owner.revoke(pairing)
+        let revokedCheckpoint = try relay.checkpoint()
+        let resurrection = try alteredSnapshot(relay) { value in
+            var pairings = value["pairings"] as! [[String: Any]]
+            pairings[0]["state"] = "active"
+            value["pairings"] = pairings
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: resurrection,
+                                                        checkpoint: revokedCheckpoint))
+
+        let lower = try CompanionCheckpoint(ownerIdentityID: checkpoint.ownerIdentityID,
+                                            revision: checkpoint.revision - 1,
+                                            stateRoot: checkpoint.stateRoot)
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: snapshot, checkpoint: lower))
+        let higher = try CompanionCheckpoint(ownerIdentityID: checkpoint.ownerIdentityID,
+                                             revision: checkpoint.revision + 1,
+                                             stateRoot: checkpoint.stateRoot)
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: snapshot, checkpoint: higher))
+    }
+
+    func testRequestCreationAtExactExpiryIsRejected() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        try relay.advance(to: t.addingTimeInterval(10))
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "exact-expiry", pairing: pairing,
+                                                     session: session,
+                                                     target: approver.signer.identity.identityID,
+                                                     message: nil, validFor: 10)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+    }
+
     func testApprovalBindsPairingSessionAndRequestAndIsSingleUse() throws {
         let (relay, owner, approver, pairing, session) = try harness()
         let request = try owner.requestUnlock(requestID: "request-1", pairing: pairing, session: session,
@@ -142,7 +197,8 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertEqual(try relay.request(id: request.requestID).status, .cancelled)
         XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "cancel-use"))
 
-        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), revisionAnchor: relay.currentRevision)
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), checkpoint: checkpoint)
         let fixedNow = t
         let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted, now: { fixedNow })
         XCTAssertEqual(try restarted.request(id: request.requestID).status, .cancelled)
@@ -394,7 +450,8 @@ final class CompanionKitTests: XCTestCase {
     func testRestartPersistenceAndMissingKeyRequiresRepair() throws {
         let (relay, owner, _, pairing, _) = try harness()
         let data = try relay.snapshot()
-        let restarted = try InMemoryCompanionRelay(snapshot: data, revisionAnchor: relay.currentRevision)
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: data, checkpoint: checkpoint)
         XCTAssertEqual(try restarted.pairing(id: pairing.pairingID), pairing)
         let store = InMemoryDeviceKeyStore()
         let identity = owner.signer.identity
@@ -561,8 +618,8 @@ final class CompanionKitTests: XCTestCase {
                                          endsAt: t.addingTimeInterval(3_600))
         _ = try owner.publishSession(sessionB)
         let data = try relay.snapshot()
-        let restarted = try InMemoryCompanionRelay(snapshot: data,
-                                                    revisionAnchor: relay.currentRevision)
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: data, checkpoint: checkpoint)
         XCTAssertEqual(try restarted.request(id: requestA.requestID).status, .expired)
         let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted,
                                              now: { Date(timeIntervalSince1970: 1_700_000_000) })
@@ -579,12 +636,15 @@ final class CompanionKitTests: XCTestCase {
         _ = try owner.createInvite(inviteID: "anchor-first", validFor: 600, now: t,
                                    nonce: Data(repeating: 1, count: 24))
         let olderSnapshot = try relay.snapshot()
+        let olderCheckpoint = try relay.checkpoint()
         _ = try owner.createInvite(inviteID: "anchor-second", validFor: 600, now: t,
                                    nonce: Data(repeating: 2, count: 24))
+        let newerCheckpoint = try relay.checkpoint()
         XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: olderSnapshot,
-                                                        revisionAnchor: relay.currentRevision)) {
+                                                        checkpoint: newerCheckpoint)) {
             XCTAssertEqual($0 as? CompanionError,
-                           .staleRevision(expected: relay.currentRevision, actual: relay.currentRevision - 1))
+                           .staleRevision(expected: newerCheckpoint.revision,
+                                          actual: olderCheckpoint.revision))
         }
     }
 
@@ -754,7 +814,8 @@ final class CompanionKitTests: XCTestCase {
         _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
         XCTAssertEqual(try relay.request(id: request.requestID).status, .expired)
         XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "generation-use"))
-        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), revisionAnchor: relay.currentRevision)
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), checkpoint: checkpoint)
         let fixedNow = t
         let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted, now: { fixedNow })
         XCTAssertThrowsError(try restartedOwner.useApproval(approval, request: request, useID: "generation-restart-use"))

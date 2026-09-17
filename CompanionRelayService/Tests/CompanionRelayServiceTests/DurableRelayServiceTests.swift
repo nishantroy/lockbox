@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import CompanionRelayService
 import CompanionKit
 
@@ -486,6 +487,153 @@ final class DurableRelayServiceTests: XCTestCase {
         XCTAssertEqual(try useRestart.read().owners[ownerSigner.identity.identityID]?.revision, 5)
     }
 
+    func testCheckpointRestoreRejectsSameRevisionForkAndSupportsNormalRestart() throws {
+        let ownerSigner = try owner()
+        let approver = try DeviceSigner.create(role: .trustedApprover,
+                                               keyStore: InMemoryDeviceKeyStore())
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let pairing = try Pairing(pairingID: "checkpoint-pairing", owner: ownerSigner.identity,
+                                  approver: approver.identity, epoch: 1, createdAt: now, state: .active)
+        let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "checkpoint-session",
+                                        activeSetID: "checkpoint-set", startsAt: now.addingTimeInterval(-1),
+                                        endsAt: now.addingTimeInterval(600))
+        let consent = try RelationshipConsent(relationshipID: pairing.pairingID,
+                                               pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                               owner: ownerSigner.identity, approver: approver.identity,
+                                               ownerScopes: [.approveEarlyEnd, .receiveRequests],
+                                               approverScopes: [.approveEarlyEnd, .receiveRequests],
+                                               ownerState: .active, approverState: .active,
+                                               updatedAt: now, generation: 1)
+        let ledger = DurableOwnerLedger(owner: ownerSigner.identity,
+                                        pairings: [pairing.pairingID: DurablePairingRecord(pairing: pairing)],
+                                        sessions: [session.sessionID: DurableSessionRecord(session: session, publishedAt: now)],
+                                        currentSessionID: session.sessionID,
+                                        relationshipConsents: [pairing.pairingID: consent])
+        let store = try InMemoryDurableRelayStore(database: DurableRelayDatabase(
+            owners: [ownerSigner.identity.identityID: ledger]))
+        let policy = DurableAuthorizationPolicy.ownerAndActivePairing(
+            ownerOnlyKinds: ["request", "revoke"], approverKinds: [])
+        let service = DurableRelayService(store: store, authorization: policy, now: { now })
+        let request = try TrustedRequest(requestID: "checkpoint-request", owner: ownerSigner.identity,
+                                         targetBindings: [try RequestTargetBinding(pairing: pairing,
+                                                                                    consentGeneration: 1)],
+                                         session: session, message: nil, createdAt: now,
+                                         expiresAt: now.addingTimeInterval(300))
+        let operation = try DurableOperationFactory.make(kind: "request", operationID: "checkpoint-op",
+                                                         expectedRevision: 0, payload: request,
+                                                         signer: ownerSigner)
+        _ = try service.submit(operation, owner: ownerSigner.identity)
+        let snapshot = try store.snapshot()
+        let checkpoint = try store.checkpoint()
+        let restarted = try InMemoryDurableRelayStore(snapshot: snapshot, checkpoint: checkpoint)
+        XCTAssertEqual(try restarted.read().owners[ownerSigner.identity.identityID]?.revision, 1)
+
+        let expiryFork = try alteredDurableSnapshot(snapshot) { database in
+            var owners = database["owners"] as! [String: Any]
+            var ownerValue = owners[ownerSigner.identity.identityID] as! [String: Any]
+            var requests = ownerValue["requests"] as! [String: Any]
+            var requestValue = requests[request.requestID] as! [String: Any]
+            var requestBody = requestValue["request"] as! [String: Any]
+            requestBody["expiresAt"] = now.addingTimeInterval(3_600).timeIntervalSince1970
+            requestValue["request"] = requestBody
+            requests[request.requestID] = requestValue
+            ownerValue["requests"] = requests
+            owners[ownerSigner.identity.identityID] = ownerValue
+            database["owners"] = owners
+        }
+        XCTAssertThrowsError(try InMemoryDurableRelayStore(snapshot: expiryFork, checkpoint: checkpoint))
+
+        let receiptFork = try alteredDurableSnapshot(snapshot) { database in
+            var owners = database["owners"] as! [String: Any]
+            var ownerValue = owners[ownerSigner.identity.identityID] as! [String: Any]
+            var operations = ownerValue["operations"] as! [String: Any]
+            var operationValue = operations["checkpoint-op"] as! [String: Any]
+            let replacement = Data("{\"tampered\":true}".utf8)
+            operationValue["responseBody"] = replacement.base64EncodedString()
+            operationValue["responseDigest"] = Data(SHA256.hash(data: replacement)).base64EncodedString()
+            operations["checkpoint-op"] = operationValue
+            ownerValue["operations"] = operations
+            owners[ownerSigner.identity.identityID] = ownerValue
+            database["owners"] = owners
+        }
+        XCTAssertThrowsError(try InMemoryDurableRelayStore(snapshot: receiptFork, checkpoint: checkpoint))
+
+        var lowerRevisions = checkpoint.ownerRevisions
+        lowerRevisions[ownerSigner.identity.identityID] = 0
+        let lower = try DurableCheckpoint(ownerRevisions: lowerRevisions, stateRoot: checkpoint.stateRoot)
+        XCTAssertThrowsError(try InMemoryDurableRelayStore(snapshot: snapshot, checkpoint: lower))
+        var higherRevisions = checkpoint.ownerRevisions
+        higherRevisions[ownerSigner.identity.identityID] = 2
+        let higher = try DurableCheckpoint(ownerRevisions: higherRevisions, stateRoot: checkpoint.stateRoot)
+        XCTAssertThrowsError(try InMemoryDurableRelayStore(snapshot: snapshot, checkpoint: higher))
+
+        let revoke = try DurableOperationFactory.make(kind: "revoke", operationID: "checkpoint-revoke",
+                                                      expectedRevision: 1,
+                                                      payload: PairingReference(pairingID: pairing.pairingID,
+                                                                                 epoch: pairing.epoch),
+                                                      signer: ownerSigner)
+        _ = try service.submit(revoke, owner: ownerSigner.identity)
+        let revokedSnapshot = try store.snapshot()
+        let revokedCheckpoint = try store.checkpoint()
+        let resurrection = try alteredDurableSnapshot(revokedSnapshot) { database in
+            var owners = database["owners"] as! [String: Any]
+            var ownerValue = owners[ownerSigner.identity.identityID] as! [String: Any]
+            var pairings = ownerValue["pairings"] as! [String: Any]
+            var pairingValue = pairings[pairing.pairingID] as! [String: Any]
+            var pairingBody = pairingValue["pairing"] as! [String: Any]
+            pairingBody["state"] = "active"
+            pairingValue["pairing"] = pairingBody
+            pairings[pairing.pairingID] = pairingValue
+            ownerValue["pairings"] = pairings
+            owners[ownerSigner.identity.identityID] = ownerValue
+            database["owners"] = owners
+        }
+        XCTAssertThrowsError(try InMemoryDurableRelayStore(snapshot: resurrection,
+                                                            checkpoint: revokedCheckpoint))
+    }
+
+    func testDurableRequestCreationAtExactExpiryIsRejected() throws {
+        let ownerSigner = try owner()
+        let approver = try DeviceSigner.create(role: .trustedApprover,
+                                               keyStore: InMemoryDeviceKeyStore())
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let pairing = try Pairing(pairingID: "exact-pairing", owner: ownerSigner.identity,
+                                  approver: approver.identity, epoch: 1, createdAt: now, state: .active)
+        let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "exact-session",
+                                        activeSetID: "exact-set", startsAt: now.addingTimeInterval(-1),
+                                        endsAt: now.addingTimeInterval(600))
+        let consent = try RelationshipConsent(relationshipID: pairing.pairingID,
+                                               pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                               owner: ownerSigner.identity, approver: approver.identity,
+                                               ownerScopes: [.approveEarlyEnd, .receiveRequests],
+                                               approverScopes: [.approveEarlyEnd, .receiveRequests],
+                                               ownerState: .active, approverState: .active,
+                                               updatedAt: now, generation: 1)
+        let ledger = DurableOwnerLedger(owner: ownerSigner.identity,
+                                        pairings: [pairing.pairingID: DurablePairingRecord(pairing: pairing)],
+                                        sessions: [session.sessionID: DurableSessionRecord(session: session, publishedAt: now)],
+                                        currentSessionID: session.sessionID,
+                                        relationshipConsents: [pairing.pairingID: consent])
+        let store = try InMemoryDurableRelayStore(database: DurableRelayDatabase(
+            owners: [ownerSigner.identity.identityID: ledger]))
+        let policy = DurableAuthorizationPolicy.ownerAndActivePairing(
+            ownerOnlyKinds: ["request"], approverKinds: [])
+        let service = DurableRelayService(store: store, authorization: policy,
+                                          now: { now.addingTimeInterval(10) })
+        let request = try TrustedRequest(requestID: "exact-request", owner: ownerSigner.identity,
+                                         targetBindings: [try RequestTargetBinding(pairing: pairing,
+                                                                                    consentGeneration: 1)],
+                                         session: session, message: nil, createdAt: now,
+                                         expiresAt: now.addingTimeInterval(10))
+        let operation = try DurableOperationFactory.make(kind: "request", operationID: "exact-request-op",
+                                                         expectedRevision: 0, payload: request,
+                                                         signer: ownerSigner)
+        XCTAssertThrowsError(try service.submit(operation, owner: ownerSigner.identity)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+        XCTAssertEqual(try store.read().owners[ownerSigner.identity.identityID]?.requests.count, 0)
+    }
+
     func testSnapshotRejectsHistoryGapAndOrphanPairingEpoch() throws {
         let signer = try owner()
         let response = Data("{}".utf8)
@@ -516,5 +664,12 @@ final class DurableRelayServiceTests: XCTestCase {
         XCTAssertThrowsError(try checkedPairingEpoch(UInt64.max)) {
             XCTAssertEqual($0 as? DurableRelayError, .epochOverflow)
         }
+    }
+
+    private func alteredDurableSnapshot(_ data: Data,
+                                       mutate: (inout [String: Any]) -> Void) throws -> Data {
+        var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        mutate(&object)
+        return try JSONSerialization.data(withJSONObject: object)
     }
 }

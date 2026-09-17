@@ -9,32 +9,55 @@ public struct RelayOperationRecord: Codable, Hashable, Sendable {
     public let signerIdentityID: String
     public let kind: String
     public let bodyDigest: Data
+    /// The exact signed operation is retained for restore graph validation.
+    /// Empty is accepted only by legacy decoding and is rejected by anchored
+    /// restore for snapshots that contain request state.
+    public let signedOperation: Data
     public let expectedRevision: UInt64?
     public let revision: UInt64
     public let response: RelayResult
 
     public init(operationID: String, signerIdentityID: String, kind: String,
                 bodyDigest: Data, revision: UInt64, response: RelayResult,
-                expectedRevision: UInt64? = nil) throws {
+                expectedRevision: UInt64? = nil, signedOperation: Data = Data()) throws {
         try requireIdentifier(operationID, name: "operation ID")
         try requireIdentifier(signerIdentityID, name: "signer identity ID")
         try requireIdentifier(kind, name: "operation kind")
-        guard bodyDigest.count == 32, revision > 0 else {
+        guard bodyDigest.count == 32, signedOperation.count <= 32_768, revision > 0 else {
             throw CompanionError.malformed("invalid operation record")
         }
         self.operationID = operationID
         self.signerIdentityID = signerIdentityID
         self.kind = kind
         self.bodyDigest = bodyDigest
+        self.signedOperation = signedOperation
         self.expectedRevision = expectedRevision
         self.revision = revision
         self.response = response
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case operationID, signerIdentityID, kind, bodyDigest, signedOperation,
+             expectedRevision, revision, response
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(operationID: c.decode(String.self, forKey: .operationID),
+                      signerIdentityID: c.decode(String.self, forKey: .signerIdentityID),
+                      kind: c.decode(String.self, forKey: .kind),
+                      bodyDigest: c.decode(Data.self, forKey: .bodyDigest),
+                      revision: c.decode(UInt64.self, forKey: .revision),
+                      response: c.decode(RelayResult.self, forKey: .response),
+                      expectedRevision: c.decodeIfPresent(UInt64.self, forKey: .expectedRevision),
+                      signedOperation: c.decodeIfPresent(Data.self, forKey: .signedOperation) ?? Data())
+    }
+
     public func validate() throws {
         _ = try RelayOperationRecord(operationID: operationID, signerIdentityID: signerIdentityID,
                                      kind: kind, bodyDigest: bodyDigest, revision: revision,
-                                     response: response, expectedRevision: expectedRevision)
+                                     response: response, expectedRevision: expectedRevision,
+                                     signedOperation: signedOperation)
     }
 }
 

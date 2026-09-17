@@ -127,15 +127,57 @@ public enum CompanionCanonical {
         return result
     }
 
+    /// Framing for state roots. Callers sort semantically unordered members
+    /// before passing them here; lengths make concatenation unambiguous.
+    public static func framed(domain: String, fields: [Data]) -> Data {
+        var result = Data()
+        append(domain, to: &result)
+        for field in fields { append(field, to: &result) }
+        return result
+    }
+
+    /// JSON is used only as a leaf encoding. Sorted keys plus explicit sorting
+    /// of set/dictionary members at the state-root call site makes this stable
+    /// across snapshot serialization and does not omit any stored field.
+    public static func encoded<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value)
+    }
+
     public static func digest(_ data: Data) -> Data {
         Data(SHA256.hash(data: data))
     }
 
     private static func append(_ value: String, to data: inout Data) {
-        let bytes = Array(value.utf8)
-        var length = UInt64(bytes.count).bigEndian
+        append(Data(value.utf8), to: &data)
+    }
+
+    private static func append(_ value: Data, to data: inout Data) {
+        var length = UInt64(value.count).bigEndian
         withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
-        data.append(contentsOf: bytes)
+        data.append(value)
+    }
+}
+
+/// A checkpoint is intentionally separate from a mutable snapshot. The
+/// embedding must retain this exact revision/root in independent trusted
+/// monotonic storage; a digest copied beside the snapshot is not an anchor.
+public struct CompanionCheckpoint: Codable, Hashable, Sendable {
+    public let ownerIdentityID: String
+    public let revision: UInt64
+    public let stateRoot: Data
+
+    public init(ownerIdentityID: String, revision: UInt64, stateRoot: Data) throws {
+        try requireIdentifier(ownerIdentityID, name: "checkpoint owner ID")
+        guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid checkpoint root") }
+        self.ownerIdentityID = ownerIdentityID
+        self.revision = revision
+        self.stateRoot = stateRoot
+    }
+
+    public func validate() throws {
+        _ = try CompanionCheckpoint(ownerIdentityID: ownerIdentityID, revision: revision, stateRoot: stateRoot)
     }
 }
 

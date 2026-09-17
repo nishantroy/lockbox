@@ -274,7 +274,8 @@ public final class DurableRelayService: @unchecked Sendable {
                 responseDigest: CompanionCanonical.digest(encoded.body),
                 committedRevision: committedRevision,
                 committedAt: commandTime,
-                disposition: disposition
+                disposition: disposition,
+                signedOperation: try CompanionCanonical.encoded(operation)
             )
             ledger.revision = committedRevision
             ledger.operations[record.operationID] = record
@@ -372,9 +373,11 @@ public enum PostgreSQLDurableStoreContract {
         kind TEXT NOT NULL,
         signer_identity JSONB NOT NULL,
         request_digest BYTEA NOT NULL CHECK (octet_length(request_digest) = 32),
+        signed_operation BYTEA NOT NULL CHECK (octet_length(signed_operation) <= 32768),
         response_kind TEXT NOT NULL,
         response_body BYTEA NOT NULL CHECK (octet_length(response_body) <= 32768),
         response_digest BYTEA NOT NULL CHECK (octet_length(response_digest) = 32),
+        disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'rejectedExpiredRequest')),
         committed_revision BIGINT NOT NULL CHECK (committed_revision > 0),
         committed_at TIMESTAMPTZ NOT NULL,
         PRIMARY KEY (owner_id, operation_id),
@@ -399,27 +402,29 @@ public enum PostgreSQLDurableStoreContract {
      FOR UPDATE;
 
     SELECT operation_id, kind, signer_identity, request_digest,
-           response_kind, response_body, response_digest, committed_revision,
-           committed_at
+           signed_operation, response_kind, response_body, response_digest,
+           disposition, committed_revision, committed_at
       FROM companion_operation
      WHERE owner_id = $1 AND operation_id = $4;
 
     -- If the operation row exists, compare kind, signer_identity, and
-    -- request_digest. Return its response after COMMIT without mutating state.
+    -- request_digest. Return its response after COMMIT without mutating state;
+    -- a rejectedExpiredRequest row replays the terminal expired error.
     -- For a new operation, the service checks expected_revision against the
     -- locked revision and binds the following values:
     -- $5 new JSON state, $6 response kind, $7 response body, $8 response
-    -- digest, $9 request digest, $10 kind, $11 signer JSON, $12 timestamp,
-    -- $13 committed revision (locked revision + 1).
+    -- digest, $9 request digest, $10 signed operation, $11 kind, $12 signer
+    -- JSON, $13 disposition, $14 timestamp, $15 committed revision (locked
+    -- revision + 1).
     UPDATE companion_owner
-       SET state = $5::jsonb, revision = $13
-     WHERE owner_id = $1 AND revision = $13 - 1;
+       SET state = $5::jsonb, revision = $15
+     WHERE owner_id = $1 AND revision = $15 - 1;
 
     INSERT INTO companion_operation (
         owner_id, operation_id, kind, signer_identity, request_digest,
-        response_kind, response_body, response_digest, committed_revision,
-        committed_at
-    ) VALUES ($1, $4, $10, $11::jsonb, $9, $6, $7, $8, $13, $12::timestamptz);
+        signed_operation, response_kind, response_body, response_digest,
+        disposition, committed_revision, committed_at
+    ) VALUES ($1, $4, $11, $12::jsonb, $9, $10, $6, $7, $8, $13, $15, $14::timestamptz);
 
     COMMIT;
     -- Acknowledgement is emitted only after COMMIT succeeds. On SQLSTATE
@@ -427,7 +432,10 @@ public enum PostgreSQLDurableStoreContract {
     -- transaction with the same operation ID and expected revision.
     """
 
-    public static let parameterContract = "owner, ownerIdentityJSON, initialStateJSON, operationID, newStateJSON, responseKind, responseBody, responseDigest, requestDigest, kind, signerIdentityJSON, committedAt, committedRevision"
+    public static let parameterContract = "owner, ownerIdentityJSON, initialStateJSON, operationID, newStateJSON, responseKind, responseBody, responseDigest, requestDigest, signedOperation, kind, signerIdentityJSON, disposition, committedAt, committedRevision"
+    /// The SQL contract deliberately has no checkpoint table: the embedding
+    /// must retain the exact revision/root in independent trusted monotonic
+    /// storage. This declaration is not a production adapter.
     public static let serializationRetrySQLState = "40001"
     public static let isolationLevel = "SERIALIZABLE with complete-transaction retry on SQLSTATE 40001"
 }
