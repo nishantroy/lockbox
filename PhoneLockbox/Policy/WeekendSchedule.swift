@@ -1,8 +1,10 @@
 import Foundation
+import CryptoKit
 
 /// The seven local civil days understood by the bounded weekend scheduler.
 /// Raw values intentionally match Foundation's Gregorian `Calendar.Component.weekday`
-/// values, where Sunday is 1 and Saturday is 7.
+/// values, where Sunday is 1 and Saturday is 7. The v1 wire format is the
+/// stable lowercase `wireName`, never the numeric raw value.
 public enum WeekendScheduleDay: Int, CaseIterable, Codable, Hashable, Comparable, Sendable {
     case sunday = 1
     case monday = 2
@@ -12,8 +14,50 @@ public enum WeekendScheduleDay: Int, CaseIterable, Codable, Hashable, Comparable
     case friday = 6
     case saturday = 7
 
+    public var wireName: String {
+        switch self {
+        case .sunday: return "sunday"
+        case .monday: return "monday"
+        case .tuesday: return "tuesday"
+        case .wednesday: return "wednesday"
+        case .thursday: return "thursday"
+        case .friday: return "friday"
+        case .saturday: return "saturday"
+        }
+    }
+
+    private init?(wireName: String) {
+        switch wireName {
+        case "sunday": self = .sunday
+        case "monday": self = .monday
+        case "tuesday": self = .tuesday
+        case "wednesday": self = .wednesday
+        case "thursday": self = .thursday
+        case "friday": self = .friday
+        case "saturday": self = .saturday
+        default: return nil
+        }
+    }
+
     public static func < (lhs: WeekendScheduleDay, rhs: WeekendScheduleDay) -> Bool {
         lhs.rawValue < rhs.rawValue
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wireName)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let name = try container.decode(String.self)
+        guard let day = Self(wireName: name) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Enabled day must be one of the lowercase v1 names"
+            )
+        }
+        self = day
     }
 }
 
@@ -42,9 +86,28 @@ public enum WeekendRuleID: String, CaseIterable, Codable, Hashable, Sendable {
 public struct WeekendPolicyReference: Codable, Equatable, Hashable, Sendable {
     public let rawValue: String
 
+    /// Builds the only v1 reference form: a privacy-preserving SHA-256 digest
+    /// of the opaque snapshot bytes. The digest binds the reference to exactly
+    /// the bytes that will later be applied without interpreting or exposing them.
+    public static func forSnapshot(_ snapshotData: Data) throws -> WeekendPolicyReference {
+        guard !snapshotData.isEmpty, snapshotData.count <= WeekendPolicySnapshot.maxSnapshotBytes else {
+            throw WeekendScheduleValidationError.invalidPolicySnapshotSize
+        }
+        let digest = SHA256.hash(data: snapshotData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return try WeekendPolicyReference(rawValue: "sha256:\(digest)")
+    }
+
     public init(rawValue: String) throws {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed == rawValue else {
+        let digest = rawValue.dropFirst("sha256:".count)
+        let lowercaseHex = Set("0123456789abcdef")
+        let isHexDigest = digest.count == 64 && digest.allSatisfy { lowercaseHex.contains($0) }
+        guard trimmed == rawValue,
+              rawValue.utf8.count <= WeekendPolicySnapshot.maxReferenceBytes,
+              rawValue.hasPrefix("sha256:"),
+              isHexDigest else {
             throw WeekendScheduleValidationError.invalidPolicyReference
         }
         self.rawValue = rawValue
@@ -67,7 +130,7 @@ public struct WeekendPolicyReference: Codable, Equatable, Hashable, Sendable {
         } catch {
             throw DecodingError.dataCorruptedError(
                 in: container,
-                debugDescription: "A policy reference must be non-empty and have no surrounding whitespace"
+                debugDescription: "A policy reference must be sha256:<64 lowercase hexadecimal digits>"
             )
         }
     }
@@ -80,13 +143,23 @@ public struct WeekendPolicyReference: Codable, Equatable, Hashable, Sendable {
 /// stable reference and the captured bytes here prevents a later policy edit
 /// from changing an already-resolved occurrence.
 public struct WeekendPolicySnapshot: Codable, Equatable, Hashable, Sendable {
+    public static let maxReferenceBytes = 128
+    public static let maxSnapshotBytes = 64 * 1_024
+    public static let maxRevision = 999_999_999
+
     public let reference: WeekendPolicyReference
     public let revision: Int
     public let snapshotData: Data
 
     public init(reference: WeekendPolicyReference, revision: Int, snapshotData: Data) throws {
-        guard revision >= 0 else {
+        guard (0...Self.maxRevision).contains(revision) else {
             throw WeekendScheduleValidationError.invalidPolicyRevision
+        }
+        guard !snapshotData.isEmpty, snapshotData.count <= Self.maxSnapshotBytes else {
+            throw WeekendScheduleValidationError.invalidPolicySnapshotSize
+        }
+        guard reference == (try? WeekendPolicyReference.forSnapshot(snapshotData)) else {
+            throw WeekendScheduleValidationError.invalidPolicyReferenceBinding
         }
         self.reference = reference
         self.revision = revision
@@ -105,14 +178,28 @@ public struct WeekendPolicySnapshot: Codable, Equatable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let reference = try container.decode(WeekendPolicyReference.self, forKey: .reference)
         let revision = try container.decode(Int.self, forKey: .revision)
-        let snapshotData = try container.decode(Data.self, forKey: .snapshotData)
+        let encodedSnapshot = try container.decode(String.self, forKey: .snapshotData)
+        guard encodedSnapshot.utf8.count <= Self.maxSnapshotBytes * 2 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .snapshotData,
+                in: container,
+                debugDescription: "A policy snapshot exceeds the encoded size bound"
+            )
+        }
+        guard let snapshotData = Data(base64Encoded: encodedSnapshot) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .snapshotData,
+                in: container,
+                debugDescription: "A policy snapshot must be valid base64"
+            )
+        }
         do {
             try self.init(reference: reference, revision: revision, snapshotData: snapshotData)
         } catch {
             throw DecodingError.dataCorruptedError(
-                forKey: .revision,
+                forKey: .snapshotData,
                 in: container,
-                debugDescription: "A policy snapshot revision must be non-negative"
+                debugDescription: "The policy snapshot is out of bounds or its reference does not match its bytes"
             )
         }
     }
@@ -120,8 +207,12 @@ public struct WeekendPolicySnapshot: Codable, Equatable, Hashable, Sendable {
 
 public enum WeekendScheduleValidationError: Error, Equatable, Sendable {
     case invalidPolicyReference
+    case invalidPolicyReferenceBinding
     case invalidPolicyRevision
+    case invalidPolicySnapshotSize
     case invalidRuleRevision
+    case invalidCivilDate
+    case invalidOccurrence
     case profileHasNoEnabledDays(WeekendRuleID)
     case dayNotAllowed(rule: WeekendRuleID, day: WeekendScheduleDay)
     case equalBoundaries(WeekendRuleID)
@@ -187,12 +278,34 @@ public struct WeekendRule: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let id = try container.decode(WeekendRuleID.self, forKey: .id)
-        let enabledDays = Set(try container.decode([WeekendScheduleDay].self, forKey: .enabledDays))
+        var dayContainer = try container.nestedUnkeyedContainer(forKey: .enabledDays)
+        guard let count = dayContainer.count, count <= WeekendSchedule.maxEnabledDays else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .enabledDays,
+                in: container,
+                debugDescription: "A rule may contain at most seven enabled days"
+            )
+        }
+        var decodedDays: [WeekendScheduleDay] = []
+        decodedDays.reserveCapacity(count)
+        var previousDay: WeekendScheduleDay?
+        while !dayContainer.isAtEnd {
+            let day = try dayContainer.decode(WeekendScheduleDay.self)
+            guard previousDay.map({ $0 < day }) ?? true else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .enabledDays,
+                    in: container,
+                    debugDescription: "Enabled days must be unique and sorted in Sunday-to-Saturday order"
+                )
+            }
+            decodedDays.append(day)
+            previousDay = day
+        }
         let start = try container.decode(LocalTime.self, forKey: .start)
         let end = try container.decode(LocalTime.self, forKey: .end)
         let policy = try container.decode(WeekendPolicySnapshot.self, forKey: .policy)
         do {
-            try self.init(id: id, enabledDays: enabledDays, start: start, end: end, policy: policy)
+            try self.init(id: id, enabledDays: Set(decodedDays), start: start, end: end, policy: policy)
         } catch let error as WeekendScheduleValidationError {
             throw DecodingError.dataCorruptedError(
                 forKey: .enabledDays,
@@ -208,7 +321,17 @@ public struct WeekendCivilDate: Codable, Equatable, Hashable, Comparable, Sendab
     public let month: Int
     public let day: Int
 
-    public init(year: Int, month: Int, day: Int) {
+    public init(year: Int, month: Int, day: Int) throws {
+        guard (1...9_999).contains(year), (1...12).contains(month), (1...31).contains(day) else {
+            throw WeekendScheduleValidationError.invalidCivilDate
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = DateComponents(year: year, month: month, day: day)
+        guard let date = calendar.date(from: components),
+              calendar.dateComponents([.year, .month, .day], from: date) == components else {
+            throw WeekendScheduleValidationError.invalidCivilDate
+        }
         self.year = year
         self.month = month
         self.day = day
@@ -218,6 +341,26 @@ public struct WeekendCivilDate: Codable, Equatable, Hashable, Comparable, Sendab
         if lhs.year != rhs.year { return lhs.year < rhs.year }
         if lhs.month != rhs.month { return lhs.month < rhs.month }
         return lhs.day < rhs.day
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case year, month, day
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let year = try container.decode(Int.self, forKey: .year)
+        let month = try container.decode(Int.self, forKey: .month)
+        let day = try container.decode(Int.self, forKey: .day)
+        do {
+            try self.init(year: year, month: month, day: day)
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                forKey: .day,
+                in: container,
+                debugDescription: "Civil date must be a real Gregorian date"
+            )
+        }
     }
 
     fileprivate var canonicalString: String {
@@ -234,12 +377,32 @@ public struct WeekendOccurrenceID: Codable, Equatable, Hashable, Sendable {
     public let localStartDate: WeekendCivilDate
 
     public init(ruleID: WeekendRuleID, scheduleRevision: Int, localStartDate: WeekendCivilDate) throws {
-        guard scheduleRevision >= 0 else {
+        guard (0...WeekendSchedule.maxRevision).contains(scheduleRevision) else {
             throw WeekendScheduleValidationError.invalidRuleRevision
         }
         self.ruleID = ruleID
         self.scheduleRevision = scheduleRevision
         self.localStartDate = localStartDate
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ruleID, scheduleRevision, localStartDate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let ruleID = try container.decode(WeekendRuleID.self, forKey: .ruleID)
+        let scheduleRevision = try container.decode(Int.self, forKey: .scheduleRevision)
+        let localStartDate = try container.decode(WeekendCivilDate.self, forKey: .localStartDate)
+        do {
+            try self.init(ruleID: ruleID, scheduleRevision: scheduleRevision, localStartDate: localStartDate)
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                forKey: .scheduleRevision,
+                in: container,
+                debugDescription: "An occurrence revision must be between zero and the v1 maximum"
+            )
+        }
     }
 
     public var rawValue: String {
@@ -264,11 +427,18 @@ public struct WeekendOccurrence: Codable, Equatable, Hashable, Sendable {
         start: Date,
         end: Date,
         timeZoneIdentifier: String
-    ) {
+    ) throws {
         // All call sites are formed by the validated resolver. Keeping this
         // initializer private prevents an adapter from manufacturing a mutable
         // or open-ended occurrence accidentally.
-        self.id = try! WeekendOccurrenceID(
+        guard end > start,
+              start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              WeekendSchedule.validatedGregorianCalendar(timeZoneIdentifier: timeZoneIdentifier) != nil,
+              WeekendSchedule.localCivilDate(of: start, timeZoneIdentifier: timeZoneIdentifier) == localStartDate else {
+            throw WeekendScheduleValidationError.invalidOccurrence
+        }
+        self.id = try WeekendOccurrenceID(
             ruleID: rule.id,
             scheduleRevision: scheduleRevision,
             localStartDate: localStartDate
@@ -298,18 +468,24 @@ public struct WeekendOccurrence: Codable, Equatable, Hashable, Sendable {
         let end = try container.decode(Date.self, forKey: .end)
         let timeZoneIdentifier = try container.decode(String.self, forKey: .timeZoneIdentifier)
         let policy = try container.decode(WeekendPolicySnapshot.self, forKey: .policy)
-        guard id == (try? WeekendOccurrenceID(
+        let expectedID = try? WeekendOccurrenceID(
             ruleID: ruleID,
             scheduleRevision: scheduleRevision,
             localStartDate: localStartDate
-        )), end > start,
-        start.timeIntervalSinceReferenceDate.isFinite,
-        end.timeIntervalSinceReferenceDate.isFinite,
-        !timeZoneIdentifier.isEmpty else {
+        )
+        guard id == expectedID,
+              id.ruleID == ruleID,
+              id.scheduleRevision == scheduleRevision,
+              id.localStartDate == localStartDate,
+              end > start,
+              start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              WeekendSchedule.validatedGregorianCalendar(timeZoneIdentifier: timeZoneIdentifier) != nil,
+              WeekendSchedule.localCivilDate(of: start, timeZoneIdentifier: timeZoneIdentifier) == localStartDate else {
             throw DecodingError.dataCorruptedError(
                 forKey: .end,
                 in: container,
-                debugDescription: "An occurrence must have a matching stable identity, a finite end after its start, and a timezone"
+                debugDescription: "An occurrence must have a matching frozen identity, Gregorian civil start date, real timezone, and finite end after start"
             )
         }
         self.id = id
@@ -325,6 +501,8 @@ public struct WeekendOccurrence: Codable, Equatable, Hashable, Sendable {
 
 public struct WeekendSchedule: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
+    public static let maxEnabledDays = 7
+    public static let maxRevision = WeekendPolicySnapshot.maxRevision
 
     public let schemaVersion: Int
     public let revision: Int
@@ -336,7 +514,7 @@ public struct WeekendSchedule: Codable, Equatable, Sendable {
         weekday: WeekendRule? = nil,
         weekend: WeekendRule? = nil
     ) throws {
-        guard revision >= 0 else {
+        guard (0...Self.maxRevision).contains(revision) else {
             throw WeekendScheduleValidationError.invalidRuleRevision
         }
         if let weekday, weekday.id != .weekday {
@@ -358,12 +536,37 @@ public struct WeekendSchedule: Codable, Equatable, Sendable {
         [weekday, weekend].compactMap { $0 }
     }
 
+    /// v1 persists no alternate calendar identifier: every civil date is
+    /// Gregorian, and every timezone must be a Foundation-recognized identifier.
+    fileprivate static func validatedGregorianCalendar(timeZoneIdentifier: String) -> Calendar? {
+        guard let timeZone = TimeZone(identifier: timeZoneIdentifier) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar
+    }
+
+    fileprivate static func validatedGregorianCalendar(from calendar: Calendar) -> Calendar? {
+        guard calendar.identifier == .gregorian else { return nil }
+        return validatedGregorianCalendar(timeZoneIdentifier: calendar.timeZone.identifier)
+    }
+
+    fileprivate static func localCivilDate(of date: Date, timeZoneIdentifier: String) -> WeekendCivilDate? {
+        guard let calendar = validatedGregorianCalendar(timeZoneIdentifier: timeZoneIdentifier),
+              date.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = components.year, let month = components.month, let day = components.day else {
+            return nil
+        }
+        return try? WeekendCivilDate(year: year, month: month, day: day)
+    }
+
     /// Returns the active occurrence, or the earliest future occurrence when
     /// neither rule is active. A resolved occurrence freezes absolute dates and
     /// the policy snapshot; later configuration edits must create a new schedule
     /// revision rather than mutate this value.
     public func currentOrNext(after date: Date, calendar: Calendar = .current) -> WeekendOccurrence? {
-        guard date.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              let calendar = Self.validatedGregorianCalendar(from: calendar) else { return nil }
         return rules
             .compactMap { $0.resolveCurrentOrNext(after: date, scheduleRevision: revision, calendar: calendar) }
             .sorted { lhs, rhs in
@@ -541,15 +744,18 @@ private extension WeekendRule {
             guard let year = localComponents.year, let month = localComponents.month, let localDay = localComponents.day else {
                 return nil
             }
-            let civilDate = WeekendCivilDate(year: year, month: month, day: localDay)
-            return WeekendOccurrence(
-                rule: self,
-                scheduleRevision: scheduleRevision,
-                localStartDate: civilDate,
-                start: startDate,
-                end: endDate,
-                timeZoneIdentifier: calendar.timeZone.identifier
-            )
+            guard let civilDate = try? WeekendCivilDate(year: year, month: month, day: localDay),
+                  let occurrence = try? WeekendOccurrence(
+                    rule: self,
+                    scheduleRevision: scheduleRevision,
+                    localStartDate: civilDate,
+                    start: startDate,
+                    end: endDate,
+                    timeZoneIdentifier: calendar.timeZone.identifier
+                  ) else {
+                return nil
+            }
+            return occurrence
         }
         return candidates
             .sorted { $0.start < $1.start }

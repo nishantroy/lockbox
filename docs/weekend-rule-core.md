@@ -16,15 +16,18 @@ The model has exactly two optional slots:
   of Saturday and Sunday.
 
 A slot contains its enabled day set, local `start` and `end` (`LocalTime`), and an
-opaque `WeekendPolicySnapshot`. The snapshot contains a stable policy reference,
-a non-negative policy revision, and immutable serialized policy bytes. The core
-does not decode or apply those bytes. There is no arbitrary rule array, third
-priority, priority/precedence, skip, vacation, snooze, or one-off exception.
+opaque `WeekendPolicySnapshot`. The snapshot contains a stable digest reference,
+a bounded non-negative policy revision, and immutable serialized policy bytes. The
+reference is exactly `sha256:<64 lowercase hexadecimal digits>` for the snapshot
+bytes; the core verifies that digest without interpreting or logging the opaque
+bytes. References are at most 128 UTF-8 bytes and snapshots are non-empty and at
+most 64 KiB. There is no arbitrary rule array, third priority, priority/precedence,
+skip, vacation, snooze, or one-off exception.
 
 A present rule must have at least one enabled day and different boundaries. The
-schedule revision is non-negative and must increase for each persisted schedule
-edit. The constructor rejects a rule in the wrong slot and rejects any conflict
-before a schedule can be resolved.
+schedule revision is bounded to `0...999,999,999` and must increase for each
+persisted schedule edit. The constructor rejects a rule in the wrong slot and
+rejects any conflict before a schedule can be resolved.
 
 ## Schema and legacy shape
 
@@ -34,14 +37,30 @@ before a schedule can be resolved.
 {
   "schemaVersion": 1,
   "revision": 12,
-  "weekday": { "id": "weekday", "enabledDays": ["monday"], "start": {}, "end": {}, "policy": {} },
+  "weekday": {
+    "id": "weekday",
+    "enabledDays": ["monday"],
+    "start": { "hour": 22, "minute": 0 },
+    "end": { "hour": 7, "minute": 0 },
+    "policy": {
+      "reference": "sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+      "revision": 7,
+      "snapshotData": "AQID"
+    }
+  },
   "weekend": null
 }
 ```
 
-`enabledDays` is encoded in Sunday-to-Saturday order regardless of Set iteration
-order. Rule identity is encoded and checked, rather than inferred from a display
-label. A schedule can be empty because both profiles are optional.
+`enabledDays` is encoded as a bounded, non-empty array of the exact lowercase
+strings `sunday`, `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, and
+`saturday`, in Sunday-to-Saturday order. Decoding rejects integer day values,
+unknown/mixed-case names, duplicates, unsorted arrays, and arrays longer than
+seven before constructing the set. Rule identity is encoded and checked, rather
+than inferred from a display label. A schedule can be empty because both profiles
+are optional. There is no v1 integer-day compatibility migration; old integer or
+malformed documents are rejected and must remain available for a separately
+approved, locked migration.
 
 `WeekendScheduleMigration.fromLegacyDaily` is intentionally a pure conversion
 from the existing `LockboxConfiguration` (`start`, `end`, `enabled`). An enabled
@@ -60,8 +79,10 @@ surface the failure. Do not let the app and monitor observe different versions.
 
 ## Resolution contract
 
-`currentOrNext(after:calendar:)` and `nextOccurrence(after:calendar:)` resolve
-against the supplied calendar's local timezone and return a value type containing:
+`currentOrNext(after:calendar:)` and `nextOccurrence(after:calendar:)` accept only a
+Gregorian `Calendar` with a Foundation-recognized timezone identifier. Resolution
+reconstructs a Gregorian calendar from that timezone, rather than inheriting an
+alternate calendar contract, and returns a value type containing:
 
 - a stable `WeekendOccurrenceID`;
 - rule identity and schedule revision;
@@ -69,6 +90,14 @@ against the supplied calendar's local timezone and return a value type containin
 - absolute `start` and `end` dates;
 - the calendar timezone identifier used for resolution; and
 - the exact frozen policy snapshot from the rule.
+
+`WeekendCivilDate` validates a real Gregorian date. `WeekendOccurrenceID` and all
+schedule/policy revisions reject negatives and values above `999,999,999`.
+Occurrence decoding validates that the timezone identifier exists, that `start`
+and `end` are finite with `end > start`, that every duplicated identity field
+matches the ID, and that the decoded local start date is exactly the Gregorian
+civil date of `start` in the reconstructed timezone. A detached or malformed
+occurrence is rejected.
 
 Occurrences are half-open: `[start, end)`. At the start boundary the occurrence
 is current; at the end boundary it is over and the resolver returns a later
@@ -127,7 +156,10 @@ frameworks:
   treat a stable activity name as proof that an occurrence is active.
 
 The core deliberately does not call `DeviceActivityCenter.startMonitoring`,
-`stopMonitoring`, `ManagedSettingsStore`, or existing `RuntimeStore` APIs.
+`stopMonitoring`, `ManagedSettingsStore`, or existing `RuntimeStore` APIs. Policy
+bytes remain opaque value data; the digest is the only reference/snapshot binding
+performed here, and a later adapter must still validate its own policy format
+before applying it.
 
 ## Integration gates
 

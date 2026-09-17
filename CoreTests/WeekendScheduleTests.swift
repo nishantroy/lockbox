@@ -9,10 +9,11 @@ final class WeekendScheduleTests: XCTestCase {
     }
 
     private var policy: WeekendPolicySnapshot {
-        try! WeekendPolicySnapshot(
-            reference: "selection.v1",
+        let snapshot = Data([0x01, 0x02, 0x03])
+        return try! WeekendPolicySnapshot(
+            reference: WeekendPolicyReference.forSnapshot(snapshot),
             revision: 7,
-            snapshotData: Data([0x01, 0x02, 0x03])
+            snapshotData: snapshot
         )
     }
 
@@ -174,7 +175,7 @@ final class WeekendScheduleTests: XCTestCase {
             let before = try XCTUnwrap(schedule.currentOrNext(after: dayStart.addingTimeInterval(8 * 3_600), calendar: utc))
             XCTAssertEqual(before.start, expectedStart)
             XCTAssertEqual(before.end, expectedEnd)
-            XCTAssertEqual(before.localStartDate, WeekendCivilDate(year: 2026, month: 9, day: 6 + day.rawValue - 1))
+            XCTAssertEqual(before.localStartDate, try WeekendCivilDate(year: 2026, month: 9, day: 6 + day.rawValue - 1))
 
             let atStart = try XCTUnwrap(schedule.currentOrNext(after: expectedStart, calendar: utc))
             XCTAssertEqual(atStart.id, before.id)
@@ -219,7 +220,7 @@ final class WeekendScheduleTests: XCTestCase {
         let fall = try XCTUnwrap(fallSchedule.currentOrNext(after: first, calendar: newYork))
         XCTAssertEqual(fall.start, first)
         XCTAssertEqual(fall.end, Date(timeIntervalSince1970: 1793511900))
-        XCTAssertEqual(fall.localStartDate, WeekendCivilDate(year: 2026, month: 11, day: 1))
+        XCTAssertEqual(fall.localStartDate, try WeekendCivilDate(year: 2026, month: 11, day: 1))
     }
 
     func testTimezoneChangeChangesFutureAbsoluteBoundaryButNotRuleOrOccurrenceIdentity() throws {
@@ -253,5 +254,115 @@ final class WeekendScheduleTests: XCTestCase {
         XCTAssertEqual(WeekendScheduleAdapter.activityName(for: .weekend), "phone-lockbox.schedule.v1.weekend")
         XCTAssertEqual(WeekendScheduleAdapter.occurrenceIdentity(for: occurrence), occurrence.id.rawValue)
         XCTAssertTrue(occurrence.id.rawValue.contains("weekday.r9.2026-09-07"))
+    }
+
+    func testV1DaysUseExactLowercaseStringFixturesAndRejectIntegers() throws {
+        let expected: [(WeekendScheduleDay, String)] = [
+            (.sunday, "sunday"), (.monday, "monday"), (.tuesday, "tuesday"),
+            (.wednesday, "wednesday"), (.thursday, "thursday"), (.friday, "friday"),
+            (.saturday, "saturday")
+        ]
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        for (day, name) in expected {
+            XCTAssertEqual(String(data: try encoder.encode(day), encoding: .utf8), "\"\(name)\"")
+            XCTAssertEqual(try decoder.decode(WeekendScheduleDay.self, from: Data("\"\(name)\"".utf8)), day)
+        }
+        XCTAssertThrowsError(try decoder.decode(WeekendScheduleDay.self, from: Data("2".utf8)))
+        XCTAssertThrowsError(try decoder.decode(WeekendScheduleDay.self, from: Data("\"Monday\"".utf8)))
+        XCTAssertThrowsError(try decoder.decode(WeekendScheduleDay.self, from: Data("\"monday \"".utf8)))
+    }
+
+    func testRuleDecodeRejectsDuplicatesUnsortedDaysAndOverlimitBeforeNormalization() throws {
+        let schedule = try WeekendSchedule(revision: 3, weekday: rule(.weekday, days: [.monday, .friday]))
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(schedule)) as? [String: Any])
+
+        var duplicate = original
+        var duplicateWeekday = try XCTUnwrap(duplicate["weekday"] as? [String: Any])
+        duplicateWeekday["enabledDays"] = ["monday", "monday"]
+        duplicate["weekday"] = duplicateWeekday
+        XCTAssertThrowsError(try decoder.decode(WeekendSchedule.self, from: JSONSerialization.data(withJSONObject: duplicate)))
+
+        var unsorted = original
+        var unsortedWeekday = try XCTUnwrap(unsorted["weekday"] as? [String: Any])
+        unsortedWeekday["enabledDays"] = ["friday", "monday"]
+        unsorted["weekday"] = unsortedWeekday
+        XCTAssertThrowsError(try decoder.decode(WeekendSchedule.self, from: JSONSerialization.data(withJSONObject: unsorted)))
+
+        var overlimit = original
+        var overlimitWeekday = try XCTUnwrap(overlimit["weekday"] as? [String: Any])
+        overlimitWeekday["enabledDays"] = Array(repeating: "monday", count: WeekendSchedule.maxEnabledDays + 1)
+        overlimit["weekday"] = overlimitWeekday
+        XCTAssertThrowsError(try decoder.decode(WeekendSchedule.self, from: JSONSerialization.data(withJSONObject: overlimit)))
+    }
+
+    func testPolicyReferenceBindsOpaqueSnapshotAndEnforcesBounds() throws {
+        let snapshot = Data([0x01, 0x02, 0x03])
+        let reference = try WeekendPolicyReference.forSnapshot(snapshot)
+        XCTAssertEqual(reference.rawValue.count, 71)
+        XCTAssertNoThrow(try WeekendPolicySnapshot(reference: reference, revision: 0, snapshotData: snapshot))
+        XCTAssertThrowsError(try WeekendPolicySnapshot(reference: reference, revision: -1, snapshotData: snapshot))
+        XCTAssertThrowsError(try WeekendPolicySnapshot(reference: reference, revision: WeekendPolicySnapshot.maxRevision + 1, snapshotData: snapshot))
+        XCTAssertThrowsError(try WeekendPolicySnapshot(reference: reference, revision: 0, snapshotData: Data([0x04]))) { error in
+            XCTAssertEqual(error as? WeekendScheduleValidationError, .invalidPolicyReferenceBinding)
+        }
+        let validJSON = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(WeekendPolicySnapshot(reference: reference, revision: 0, snapshotData: snapshot))
+        ) as! [String: Any]
+        var mismatchedJSON = validJSON
+        mismatchedJSON["snapshotData"] = Data([0x04]).base64EncodedString()
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            WeekendPolicySnapshot.self,
+            from: JSONSerialization.data(withJSONObject: mismatchedJSON)
+        ))
+        var overlimitJSON = validJSON
+        overlimitJSON["snapshotData"] = Data(repeating: 0, count: WeekendPolicySnapshot.maxSnapshotBytes + 1).base64EncodedString()
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            WeekendPolicySnapshot.self,
+            from: JSONSerialization.data(withJSONObject: overlimitJSON)
+        ))
+        XCTAssertThrowsError(try WeekendPolicySnapshot(reference: reference, revision: 0, snapshotData: Data(repeating: 0, count: WeekendPolicySnapshot.maxSnapshotBytes + 1)))
+        XCTAssertThrowsError(try WeekendPolicyReference(rawValue: "selection.v1"))
+    }
+
+    func testCivilDateOccurrenceIDAndOccurrenceDecodeValidateFrozenIdentity() throws {
+        XCTAssertThrowsError(try WeekendCivilDate(year: 2026, month: 2, day: 30))
+        XCTAssertThrowsError(try WeekendCivilDate(year: 2026, month: 13, day: 1))
+        XCTAssertThrowsError(try WeekendOccurrenceID(
+            ruleID: .weekday,
+            scheduleRevision: WeekendSchedule.maxRevision + 1,
+            localStartDate: try WeekendCivilDate(year: 2026, month: 9, day: 7)
+        ))
+        let standaloneID = Data(#"{"ruleID":"weekday","scheduleRevision":-1,"localStartDate":{"year":2026,"month":9,"day":7}}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(WeekendOccurrenceID.self, from: standaloneID))
+
+        let schedule = try WeekendSchedule(revision: 4, weekday: rule(.weekday, days: [.monday]))
+        let query = try date(DateComponents(year: 2026, month: 9, day: 7, hour: 10))
+        let occurrence = try XCTUnwrap(schedule.currentOrNext(after: query, calendar: utc))
+        let encoded = try JSONEncoder().encode(occurrence)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+
+        var badZone = object
+        badZone["timeZoneIdentifier"] = "not/a-real-time-zone"
+        XCTAssertThrowsError(try JSONDecoder().decode(WeekendOccurrence.self, from: JSONSerialization.data(withJSONObject: badZone)))
+
+        var badDate = object
+        badDate["localStartDate"] = ["year": 9999, "month": 99, "day": 99]
+        XCTAssertThrowsError(try JSONDecoder().decode(WeekendOccurrence.self, from: JSONSerialization.data(withJSONObject: badDate)))
+
+        var detachedStart = object
+        detachedStart["localStartDate"] = ["year": 2026, "month": 9, "day": 8]
+        XCTAssertThrowsError(try JSONDecoder().decode(WeekendOccurrence.self, from: JSONSerialization.data(withJSONObject: detachedStart)))
+    }
+
+    func testResolverRequiresGregorianCalendarContract() throws {
+        let profile = try rule(.weekday, days: [.monday])
+        let schedule = try WeekendSchedule(weekday: profile)
+        var buddhist = Calendar(identifier: .buddhist)
+        buddhist.timeZone = utc.timeZone
+        let query = try date(DateComponents(year: 2026, month: 9, day: 7, hour: 10))
+        XCTAssertNil(schedule.currentOrNext(after: query, calendar: buddhist))
     }
 }
