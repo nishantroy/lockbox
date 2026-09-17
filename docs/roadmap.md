@@ -1,6 +1,6 @@
 # Phone Lockbox — execution roadmap
 
-Updated: 2026-09-16. **Current milestone: build-14 focused QA and the R4 reliability gate.** R1–R3 source integration is complete and has automated coverage; physical-device acceptance is still required for the remaining lifecycle, accessibility and seven-night evidence. Build 14 is a source/install candidate, not a new device pass. Its Live Activity correction makes presentation opt-in and default-off. Build-13 device evidence still records natural enforcement end and recurrence, while a host-created Live Activity stayed stale until foreground cleanup; dependable host-closed ending requires unprovisioned ActivityKit push infrastructure. See [status and QA evidence](status-and-qa.md), [R2/R3 checklist](r2-r3-qa.md), and [R1 progress](r1-progress.md).
+Updated: 2026-09-16. **Current milestone: build-14 focused QA and the R4 reliability gate.** R1–R3 source integration is complete and has automated coverage; physical-device acceptance is still required for the remaining lifecycle, accessibility and seven-night evidence. Build 14 is an installed candidate, not a new device pass: it installed successfully after a retry, but automatic launch was denied because the iPhone was locked, and no post-install migration or custom-end focused QA has run. Its Live Activity correction makes presentation opt-in and default-off. Build-13 device evidence still records natural enforcement end and recurrence, while a host-created Live Activity stayed stale until foreground cleanup; dependable host-closed ending requires unprovisioned ActivityKit push infrastructure. See [status and QA evidence](status-and-qa.md), [R2/R3 checklist](r2-r3-qa.md), and [R1 progress](r1-progress.md).
 
 This document is the authoritative execution sequence. Product specifications describe intended behavior; they do not certify implementation or device reliability.
 
@@ -9,7 +9,7 @@ This document is the authoritative execution sequence. Product specifications de
 1. Read [status and QA evidence](status-and-qa.md), the [Sol review](reviews/2026-09-10-sol.md), and this roadmap.
 2. Read [product plan](product-plan.md), [technical plan](technical-plan.md), [interaction design](interaction-design.md), and [layout v1 contract](layout-v1-contract.md).
 3. Preserve the historical build-2/build-3 and build-13 evidence. Do not repeat a passed case without a relevant source or device change.
-4. Complete R4 before exposing any future feature. R5 production infrastructure is a prerequisite for R6 friend approvals and accountability; neither is represented by the local pairing or relay simulations.
+4. Complete R4 before exposing any future feature. R5 production infrastructure enables R5 exact-session friend unlock and is a prerequisite for R6 accountability; neither is represented by the local pairing or relay simulations.
 5. Do not change code, build identity, device schedules or installation as part of this planning update.
 
 ## Current product boundaries
@@ -34,7 +34,7 @@ The shared session/recovery core, stable occurrence identity, frozen active snap
 
 ### R3 — Recovery and active-session UX
 
-Finite Lock now, delayed explicit recovery, immutable active-session behavior, pending edits, natural-end precedence and recurrence preservation are integrated in the current source candidate. Build-14 custom-end bounds and exact-end validation are source-only until focused device QA. The normal product UI must never confuse developer reset with recovery or successful release.
+Finite Lock now, delayed explicit recovery, immutable active-session behavior, pending edits, natural-end precedence and recurrence preservation are integrated in the current source candidate. Build-14 custom-end bounds and exact-end validation remain unverified pending focused device QA. The normal product UI must never confuse developer reset with recovery or successful release.
 
 ## R4 — Build-14 reliability, accessibility and seven-night gate (current)
 
@@ -69,13 +69,16 @@ The outbox must be bounded, idempotent and retryable. Define offline, reinstall,
 
 ### R5.2 Friend unlock delivery and per-person permissions
 
-For each trusted person, sender consent and recipient consent are separate, explicit and revocable. The owner configures these scopes independently:
+For each trusted person, sender consent and recipient consent are separate, explicit and revocable. R5 exposes the exact-session unlock scopes independently:
 
 - **Approve early end:** may approve release of the owner's current session only.
 - **Receive requests:** may receive a request for that exact current session.
+- **Mutual pact:** opt into a second, independent one-way relationship; each person controls only their own lock and sharing.
+
+R5 also creates the schema and revocable consent capability needed for the later accountability scopes, but does not expose their ordinary UI or delivery. R6 separately exposes these scopes after explicit consent:
+
 - **Receive early-end notices:** may receive a privacy-minimal terminal notice for an ended-early session.
 - **Receive weekly shared summaries:** may receive the separate plain weekly summary described in R6.
-- **Mutual pact:** opt into a second, independent one-way relationship; each person controls only their own lock and sharing.
 
 A valid approval is a one-use signed capability bound to the exact session/occurrence, frozen policy identity and recipient relationship. The initial release rule is **one-of-N first valid approval** when more than one approved person is available; one approver cannot start, extend, or change a lock. No friend can see selections, usage, task steps, raw schedules or task details, start a session, extend a cutoff, change rules, or bypass the owner's local safety flow. Network delivery is never required for recovery or emergency access. Later quorum choices are out of scope until separately decided and tested.
 
