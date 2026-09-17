@@ -101,7 +101,9 @@ public struct TaskProviderConfiguration: Codable, Equatable, Sendable {
 
 /// A provider implementation is deliberately injected at a seam. The core
 /// only consumes its result; it does not claim to collect background steps,
-/// validate a camera image, or provide anti-cheat math verification.
+/// validate a camera image, or provide anti-cheat math verification. A result
+/// of `.accepted` is untrusted adapter input until a future provider
+/// integration supplies its own permission, integrity, and lifecycle checks.
 public protocol TaskUnlockProvider: Sendable {
     var kind: TaskProviderKind { get }
     var version: Int { get }
@@ -112,6 +114,8 @@ public protocol TaskUnlockProvider: Sendable {
 }
 
 public enum TaskProviderEvaluation: Equatable, Sendable {
+    /// Adapter-reported acceptance only; this is not authenticated proof and
+    /// cannot itself release enforcement.
     case accepted
     case rejected
     case unavailable
@@ -172,58 +176,69 @@ public struct TaskCompletionEvidence: Codable, Equatable, Sendable {
     }
 }
 
-/// A release authorization is separate from task completion. Both sources are
-/// exact-session scoped; neither can start or extend a session.
+/// A release authorization is separate from task completion. This framework
+/// currently accepts only a local recovery confirmation. Its `grantedAt` is
+/// metadata about when the local confirmation was made; it is not the trusted
+/// delivery/processing clock used for cutoff ordering.
+///
+/// A friend approval is intentionally not a source in this type. An arbitrary
+/// UUID cannot represent the R5 authenticated, exact-session-and-policy,
+/// revocable, single-use capability that a future friend integration requires.
 public struct TaskReleaseAuthorization: Codable, Equatable, Sendable {
     public enum Source: String, Codable, Sendable {
         case recoveryConfirmation
-        case exactSessionFriendApproval
     }
 
     public let source: Source
     public let commitmentID: UUID
     public let sessionID: UUID
     public let grantedAt: Date
-    public let approvalIdentifier: UUID?
 
     public init(
-        source: Source,
+        source: Source = .recoveryConfirmation,
         commitmentID: UUID,
         sessionID: UUID,
-        grantedAt: Date,
-        approvalIdentifier: UUID? = nil
+        grantedAt: Date
     ) {
         precondition(grantedAt.timeIntervalSinceReferenceDate.isFinite)
-        precondition(source == .recoveryConfirmation ? approvalIdentifier == nil : approvalIdentifier != nil)
         self.source = source
         self.commitmentID = commitmentID
         self.sessionID = sessionID
         self.grantedAt = grantedAt
-        self.approvalIdentifier = approvalIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
-        case source, commitmentID, sessionID, grantedAt, approvalIdentifier
+        case source, commitmentID, sessionID, grantedAt
+        // Kept only to reject old persisted friend-approval placeholders
+        // instead of silently accepting their extra field.
+        case approvalIdentifier
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(source, forKey: .source)
+        try container.encode(commitmentID, forKey: .commitmentID)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(grantedAt, forKey: .grantedAt)
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let source = try container.decode(Source.self, forKey: .source)
         let grantedAt = try container.decode(Date.self, forKey: .grantedAt)
-        let approvalIdentifier = try container.decodeIfPresent(UUID.self, forKey: .approvalIdentifier)
-        guard grantedAt.timeIntervalSinceReferenceDate.isFinite,
-              source == .recoveryConfirmation ? approvalIdentifier == nil : approvalIdentifier != nil else {
+        guard source == .recoveryConfirmation,
+              grantedAt.timeIntervalSinceReferenceDate.isFinite,
+              !container.contains(.approvalIdentifier) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .source,
                 in: container,
-                debugDescription: "Release authorization has an invalid source binding"
+                debugDescription: "Only locally verified recovery authorization is supported"
             )
         }
         self.source = source
         self.commitmentID = try container.decode(UUID.self, forKey: .commitmentID)
         self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
         self.grantedAt = grantedAt
-        self.approvalIdentifier = approvalIdentifier
     }
 }
 
@@ -258,7 +273,10 @@ public enum TaskCommitmentState: String, Codable, Sendable {
 public enum TaskCommitmentEvent: Equatable, Sendable {
     case start(at: Date)
     case submitCompletion(evidence: TaskCompletionEvidence, receivedAt: Date, providerResult: TaskProviderEvaluation)
-    case releaseEarly(at: Date, authorization: TaskReleaseAuthorization)
+    /// `grantedAt` in the authorization is grant metadata. `receivedAt` and
+    /// `processedAt` must come from the trusted local receipt/processing
+    /// boundary and are authoritative for the immutable cutoff.
+    case releaseEarly(authorization: TaskReleaseAuthorization, receivedAt: Date, processedAt: Date)
     case cancel(at: Date)
     case disableFuture(at: Date)
     case naturalCutoff(at: Date)
@@ -387,17 +405,25 @@ public struct TaskCommitment: Codable, Equatable, Sendable {
             state = .completionEligible
             return .completion(.accepted)
 
-        case let .releaseEarly(at: date, authorization):
-            guard date.timeIntervalSinceReferenceDate.isFinite,
-                  date < cutoffAt,
+        case let .releaseEarly(authorization, receivedAt, processedAt):
+            guard receivedAt.timeIntervalSinceReferenceDate.isFinite,
+                  processedAt.timeIntervalSinceReferenceDate.isFinite else {
+                return .rejected
+            }
+            // Receipt and processing are local lifecycle facts, unlike the
+            // authorization's grant metadata. Either trusted local instant
+            // at/after the cutoff means natural expiry wins this event, even
+            // when completion was already eligible or the event was delayed
+            // and replayed after relaunch.
+            if receivedAt >= cutoffAt || processedAt >= cutoffAt {
+                return expireNaturally(at: max(receivedAt, processedAt))
+            }
+            guard processedAt >= receivedAt,
                   state == .completionEligible,
                   authorization.commitmentID == id,
                   authorization.sessionID == sessionID,
                   authorization.grantedAt >= startAt,
-                  authorization.grantedAt <= date else {
-                if date.timeIntervalSinceReferenceDate.isFinite, date >= cutoffAt {
-                    return expireNaturally(at: date)
-                }
+                  authorization.grantedAt <= receivedAt else {
                 return .rejected
             }
             state = .releasedEarly
@@ -406,12 +432,17 @@ public struct TaskCommitment: Codable, Equatable, Sendable {
         case let .cancel(at: date):
             guard date.timeIntervalSinceReferenceDate.isFinite else { return .rejected }
             if date >= cutoffAt { return expireNaturally(at: date) }
-            guard state == .committed, date <= startAt else { return .rejected }
+            // The activation interval is half-open: cancellation is strictly
+            // pre-start, so a same-instant start/cancel race cannot cancel an
+            // occurrence that is beginning.
+            guard state == .committed, date < startAt else { return .rejected }
             state = .cancelled
             return .cancelled
 
         case let .disableFuture(at: date):
             guard date.timeIntervalSinceReferenceDate.isFinite else { return .rejected }
+            // At/after activation this records only the preference for later
+            // commitments; it never changes this exact-session commitment.
             guard state == .committed, date < startAt else { return .futureDisableRecorded }
             state = .disabledForFuture
             return .disabledForFuture
@@ -442,9 +473,15 @@ public struct TaskCommitment: Codable, Equatable, Sendable {
     private static func validState(_ state: TaskCommitmentState, hasEvidence: Bool) -> Bool {
         switch state {
         case .completionEligible, .releasedEarly:
+            // These states can only follow an accepted completion.
             return hasEvidence
-        case .committed, .active, .naturallyExpired, .cancelled, .disabledForFuture:
+        case .naturallyExpired:
+            // A commitment may expire with no completion, or retain the
+            // evidence from a legitimate completion that became eligible but
+            // lost the cutoff race.
             return true
+        case .committed, .active, .cancelled, .disabledForFuture:
+            return !hasEvidence
         }
     }
 
@@ -503,20 +540,54 @@ public struct TaskUnlockPolicyReference: Codable, Equatable, Sendable {
 /// provider/configuration snapshot, so disabling or editing this preference
 /// cannot rewrite an active exact-session commitment.
 public struct TaskUnlockSettings: Codable, Equatable, Sendable {
+    /// Revisions are persistence metadata, not an unbounded event counter.
+    /// Refusing updates at the bound is safer than wrapping into an old
+    /// revision and allowing a stale setting to appear current.
+    public static let maxRevision = 1_000_000
+
     public private(set) var enabled: Bool
     public private(set) var revision: Int
 
     public init(enabled: Bool = false, revision: Int = 0) {
-        precondition(revision >= 0)
+        precondition(Self.isValidRevision(revision))
         self.enabled = enabled
         self.revision = revision
     }
 
     @discardableResult
     public mutating func setEnabled(_ enabled: Bool) -> Bool {
-        guard self.enabled != enabled else { return false }
+        guard self.enabled != enabled, revision < Self.maxRevision else { return false }
         self.enabled = enabled
+        // The guard above makes this increment overflow-safe.
         revision += 1
         return true
+    }
+
+    private static func isValidRevision(_ revision: Int) -> Bool {
+        revision >= 0 && revision <= maxRevision
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, revision
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(revision, forKey: .revision)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let revision = try container.decode(Int.self, forKey: .revision)
+        guard Self.isValidRevision(revision) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .revision,
+                in: container,
+                debugDescription: "Settings revision must be between zero and the supported bound"
+            )
+        }
+        self.enabled = try container.decode(Bool.self, forKey: .enabled)
+        self.revision = revision
     }
 }

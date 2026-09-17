@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import PhoneLockboxCore
 
@@ -42,6 +43,21 @@ final class TaskUnlockTests: XCTestCase {
             providerVersion: commitment.providerConfiguration.version,
             observedAt: observedAt ?? start.addingTimeInterval(10)
         )
+    }
+
+    private func commitmentJSON(
+        for original: TaskCommitment,
+        state: TaskCommitmentState,
+        evidencePresent: Bool
+    ) throws -> Data {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        object["state"] = state.rawValue
+        if evidencePresent {
+            object["completionEvidenceIdentifier"] = UUID().uuidString
+        } else {
+            object.removeValue(forKey: "completionEvidenceIdentifier")
+        }
+        return try JSONSerialization.data(withJSONObject: object)
     }
 
     func testBuiltInProviderConfigurationsAreVersionedAndPrivacyMinimal() throws {
@@ -187,27 +203,195 @@ final class TaskUnlockTests: XCTestCase {
         XCTAssertEqual(commitment.state, .committed)
     }
 
+    func testReleaseUsesTrustedReceiptAndProcessingTimesNotGrantMetadata() throws {
+        var receivedAtCutoff = try commitment()
+        XCTAssertEqual(receivedAtCutoff.apply(.start(at: start)), .started)
+        XCTAssertEqual(receivedAtCutoff.apply(.submitCompletion(
+            evidence: evidence(for: receivedAtCutoff),
+            receivedAt: cutoff.addingTimeInterval(-1),
+            providerResult: .accepted
+        )), .completion(.accepted))
+        let backdatedGrant = TaskReleaseAuthorization(
+            commitmentID: receivedAtCutoff.id,
+            sessionID: receivedAtCutoff.sessionID,
+            grantedAt: cutoff.addingTimeInterval(-10)
+        )
+        XCTAssertEqual(receivedAtCutoff.apply(.releaseEarly(
+            authorization: backdatedGrant,
+            receivedAt: cutoff,
+            processedAt: cutoff.addingTimeInterval(1)
+        )), .naturallyExpired)
+        XCTAssertEqual(receivedAtCutoff.state, .naturallyExpired)
+
+        var processedAfterCutoff = try commitment()
+        XCTAssertEqual(processedAfterCutoff.apply(.start(at: start)), .started)
+        XCTAssertEqual(processedAfterCutoff.apply(.submitCompletion(
+            evidence: evidence(for: processedAfterCutoff),
+            receivedAt: cutoff.addingTimeInterval(-20),
+            providerResult: .accepted
+        )), .completion(.accepted))
+        let timelyGrant = TaskReleaseAuthorization(
+            commitmentID: processedAfterCutoff.id,
+            sessionID: processedAfterCutoff.sessionID,
+            grantedAt: cutoff.addingTimeInterval(-30)
+        )
+        XCTAssertEqual(processedAfterCutoff.apply(.releaseEarly(
+            authorization: timelyGrant,
+            receivedAt: cutoff.addingTimeInterval(-2),
+            processedAt: cutoff
+        )), .naturallyExpired)
+        XCTAssertEqual(processedAfterCutoff.state, .naturallyExpired)
+    }
+
+    func testLateReleaseAfterRelaunchCannotUseCompletionEligibleState() throws {
+        var beforeRelaunch = try commitment()
+        XCTAssertEqual(beforeRelaunch.apply(.start(at: start)), .started)
+        XCTAssertEqual(beforeRelaunch.apply(.submitCompletion(
+            evidence: evidence(for: beforeRelaunch),
+            receivedAt: cutoff.addingTimeInterval(-1),
+            providerResult: .accepted
+        )), .completion(.accepted))
+        let relaunched = try JSONDecoder().decode(
+            TaskCommitment.self,
+            from: JSONEncoder().encode(beforeRelaunch)
+        )
+        var afterRelaunch = relaunched
+        let authorization = TaskReleaseAuthorization(
+            commitmentID: afterRelaunch.id,
+            sessionID: afterRelaunch.sessionID,
+            grantedAt: cutoff.addingTimeInterval(-5)
+        )
+        XCTAssertEqual(afterRelaunch.apply(.releaseEarly(
+            authorization: authorization,
+            receivedAt: cutoff.addingTimeInterval(1),
+            processedAt: cutoff.addingTimeInterval(2)
+        )), .naturallyExpired)
+        XCTAssertEqual(afterRelaunch.state, .naturallyExpired)
+    }
+
+    func testReleaseRejectsUnorderedLocalTimesAndGrantMetadataAfterReceipt() throws {
+        var commitment = try commitment()
+        XCTAssertEqual(commitment.apply(.start(at: start)), .started)
+        XCTAssertEqual(commitment.apply(.submitCompletion(
+            evidence: evidence(for: commitment),
+            receivedAt: start.addingTimeInterval(1),
+            providerResult: .accepted
+        )), .completion(.accepted))
+
+        let grantAfterReceipt = TaskReleaseAuthorization(
+            commitmentID: commitment.id,
+            sessionID: commitment.sessionID,
+            grantedAt: start.addingTimeInterval(20)
+        )
+        XCTAssertEqual(commitment.apply(.releaseEarly(
+            authorization: grantAfterReceipt,
+            receivedAt: start.addingTimeInterval(10),
+            processedAt: start.addingTimeInterval(10)
+        )), .rejected)
+        XCTAssertEqual(commitment.state, .completionEligible)
+
+        let unordered = TaskReleaseAuthorization(
+            commitmentID: commitment.id,
+            sessionID: commitment.sessionID,
+            grantedAt: start.addingTimeInterval(5)
+        )
+        XCTAssertEqual(commitment.apply(.releaseEarly(
+            authorization: unordered,
+            receivedAt: start.addingTimeInterval(10),
+            processedAt: start.addingTimeInterval(9)
+        )), .rejected)
+        XCTAssertEqual(commitment.state, .completionEligible)
+
+        let nonFinite = Date(timeIntervalSinceReferenceDate: .infinity)
+        XCTAssertEqual(commitment.apply(.releaseEarly(
+            authorization: unordered,
+            receivedAt: nonFinite,
+            processedAt: nonFinite
+        )), .rejected)
+        XCTAssertEqual(commitment.state, .completionEligible)
+    }
+
+    func testCommitmentCodableRejectsImpossibleEvidenceStates() throws {
+        let original = try commitment()
+        for state in [TaskCommitmentState.committed, .active, .cancelled, .disabledForFuture] {
+            let data = try commitmentJSON(for: original, state: state, evidencePresent: true)
+            XCTAssertThrowsError(try JSONDecoder().decode(TaskCommitment.self, from: data), "evidence in \(state) must be rejected")
+        }
+        for state in [TaskCommitmentState.completionEligible, .releasedEarly] {
+            let data = try commitmentJSON(for: original, state: state, evidencePresent: false)
+            XCTAssertThrowsError(try JSONDecoder().decode(TaskCommitment.self, from: data), "missing evidence in \(state) must be rejected")
+        }
+
+        var naturallyExpiredWithoutCompletion = try commitment()
+        XCTAssertEqual(naturallyExpiredWithoutCompletion.apply(.naturalCutoff(at: cutoff)), .naturallyExpired)
+        let noEvidenceData = try JSONEncoder().encode(naturallyExpiredWithoutCompletion)
+        XCTAssertNoThrow(try JSONDecoder().decode(TaskCommitment.self, from: noEvidenceData))
+
+        var naturallyExpiredAfterCompletion = try commitment()
+        XCTAssertEqual(naturallyExpiredAfterCompletion.apply(.start(at: start)), .started)
+        XCTAssertEqual(naturallyExpiredAfterCompletion.apply(.submitCompletion(
+            evidence: evidence(for: naturallyExpiredAfterCompletion),
+            receivedAt: cutoff.addingTimeInterval(-1),
+            providerResult: .accepted
+        )), .completion(.accepted))
+        XCTAssertEqual(naturallyExpiredAfterCompletion.apply(.naturalCutoff(at: cutoff)), .naturallyExpired)
+        XCTAssertNotNil(naturallyExpiredAfterCompletion.completionEvidenceIdentifier)
+        let evidenceData = try JSONEncoder().encode(naturallyExpiredAfterCompletion)
+        XCTAssertNoThrow(try JSONDecoder().decode(TaskCommitment.self, from: evidenceData))
+    }
+
+    func testFriendApprovalPlaceholderCannotBeDecodedAsLocalAuthorization() throws {
+        let data = Data("""
+        {"source":"exactSessionFriendApproval","commitmentID":"\(UUID().uuidString)","sessionID":"\(UUID().uuidString)","grantedAt":10100,"approvalIdentifier":"\(UUID().uuidString)"}
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskReleaseAuthorization.self, from: data))
+
+        let recoveryWithFriendField = Data("""
+        {"source":"recoveryConfirmation","commitmentID":"\(UUID().uuidString)","sessionID":"\(UUID().uuidString)","grantedAt":10100,"approvalIdentifier":"\(UUID().uuidString)"}
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskReleaseAuthorization.self, from: recoveryWithFriendField))
+    }
+
+    func testSettingsCodableRejectsNegativeAndOverflowRevisions() throws {
+        let negative = Data(#"{"enabled":true,"revision":-1}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskUnlockSettings.self, from: negative))
+
+        let tooHigh = Data("{\"enabled\":true,\"revision\":\(TaskUnlockSettings.maxRevision + 1)}".utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskUnlockSettings.self, from: tooHigh))
+
+        let intMax = Data("{\"enabled\":false,\"revision\":\(Int.max)}".utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskUnlockSettings.self, from: intMax))
+
+        let atBound = try JSONDecoder().decode(
+            TaskUnlockSettings.self,
+            from: Data("{\"enabled\":false,\"revision\":\(TaskUnlockSettings.maxRevision)}".utf8)
+        )
+        var bounded = atBound
+        XCTAssertFalse(bounded.setEnabled(true))
+        XCTAssertFalse(bounded.enabled)
+        XCTAssertEqual(bounded.revision, TaskUnlockSettings.maxRevision)
+    }
+
     func testEarlyReleaseRequiresCompletionAndExactIndependentAuthorization() throws {
         var commitment = try commitment()
         XCTAssertEqual(commitment.apply(.start(at: start)), .started)
         let noCompletionAuthorization = TaskReleaseAuthorization(source: .recoveryConfirmation, commitmentID: commitment.id, sessionID: commitment.sessionID, grantedAt: start)
-        XCTAssertEqual(commitment.apply(.releaseEarly(at: start.addingTimeInterval(1), authorization: noCompletionAuthorization)), .rejected)
+        XCTAssertEqual(commitment.apply(.releaseEarly(authorization: noCompletionAuthorization, receivedAt: start.addingTimeInterval(1), processedAt: start.addingTimeInterval(1))), .rejected)
         let completion = evidence(for: commitment)
         XCTAssertEqual(commitment.apply(.submitCompletion(evidence: completion, receivedAt: start.addingTimeInterval(2), providerResult: .accepted)), .completion(.accepted))
         let wrongSession = TaskReleaseAuthorization(source: .recoveryConfirmation, commitmentID: commitment.id, sessionID: UUID(), grantedAt: start.addingTimeInterval(3))
-        XCTAssertEqual(commitment.apply(.releaseEarly(at: start.addingTimeInterval(4), authorization: wrongSession)), .rejected)
-        let friend = TaskReleaseAuthorization(source: .exactSessionFriendApproval, commitmentID: commitment.id, sessionID: commitment.sessionID, grantedAt: start.addingTimeInterval(3), approvalIdentifier: UUID())
-        XCTAssertEqual(commitment.apply(.releaseEarly(at: start.addingTimeInterval(5), authorization: friend)), .releasedEarly)
+        XCTAssertEqual(commitment.apply(.releaseEarly(authorization: wrongSession, receivedAt: start.addingTimeInterval(4), processedAt: start.addingTimeInterval(4))), .rejected)
+        XCTAssertEqual(commitment.apply(.releaseEarly(authorization: TaskReleaseAuthorization(source: .recoveryConfirmation, commitmentID: commitment.id, sessionID: commitment.sessionID, grantedAt: start.addingTimeInterval(3)), receivedAt: start.addingTimeInterval(5), processedAt: start.addingTimeInterval(5))), .releasedEarly)
         XCTAssertEqual(commitment.state, .releasedEarly)
     }
 
-    func testRecoveryAuthorizationIsIndependentOfFriendApproval() throws {
+    func testRecoveryAuthorizationIsTheOnlyLocalReleaseSource() throws {
         var commitment = try commitment()
         XCTAssertEqual(commitment.apply(.start(at: start)), .started)
         XCTAssertEqual(commitment.apply(.submitCompletion(evidence: evidence(for: commitment), receivedAt: start.addingTimeInterval(1), providerResult: .accepted)), .completion(.accepted))
         let recovery = TaskReleaseAuthorization(source: .recoveryConfirmation, commitmentID: commitment.id, sessionID: commitment.sessionID, grantedAt: start.addingTimeInterval(2))
-        XCTAssertEqual(commitment.apply(.releaseEarly(at: start.addingTimeInterval(3), authorization: recovery)), .releasedEarly)
-        XCTAssertNil(recovery.approvalIdentifier)
+        XCTAssertEqual(commitment.apply(.releaseEarly(authorization: recovery, receivedAt: start.addingTimeInterval(3), processedAt: start.addingTimeInterval(3))), .releasedEarly)
+        XCTAssertEqual(recovery.source, .recoveryConfirmation)
     }
 
     func testCancellationAndFutureDisableOnlyApplyBeforeCommitmentStarts() throws {
@@ -215,9 +399,24 @@ final class TaskUnlockTests: XCTestCase {
         XCTAssertEqual(cancelled.apply(.cancel(at: start.addingTimeInterval(-1))), .cancelled)
         XCTAssertEqual(cancelled.apply(.start(at: start)), .rejected)
 
+        var cancellationAtStart = try commitment()
+        // Activation is half-open. Cancellation is strictly pre-start, so the
+        // same instant cannot cancel a commitment, regardless of event order.
+        XCTAssertEqual(cancellationAtStart.apply(.cancel(at: start)), .rejected)
+        XCTAssertEqual(cancellationAtStart.state, .committed)
+        XCTAssertEqual(cancellationAtStart.apply(.start(at: start)), .started)
+        XCTAssertEqual(cancellationAtStart.apply(.cancel(at: start)), .rejected)
+        XCTAssertEqual(cancellationAtStart.state, .active)
+
         var disabled = try commitment()
         XCTAssertEqual(disabled.apply(.disableFuture(at: start.addingTimeInterval(-1))), .disabledForFuture)
         XCTAssertEqual(disabled.state, .disabledForFuture)
+
+        var disableAtStart = try commitment()
+        XCTAssertEqual(disableAtStart.apply(.disableFuture(at: start)), .futureDisableRecorded)
+        XCTAssertEqual(disableAtStart.state, .committed)
+        XCTAssertEqual(disableAtStart.apply(.start(at: start)), .started)
+        XCTAssertEqual(disableAtStart.state, .active)
 
         var active = try commitment()
         XCTAssertEqual(active.apply(.start(at: start)), .started)
@@ -231,10 +430,10 @@ final class TaskUnlockTests: XCTestCase {
         XCTAssertEqual(commitment.apply(.start(at: start)), .started)
         XCTAssertEqual(commitment.apply(.submitCompletion(evidence: evidence(for: commitment), receivedAt: start.addingTimeInterval(1), providerResult: .accepted)), .completion(.accepted))
         let authorization = TaskReleaseAuthorization(source: .recoveryConfirmation, commitmentID: commitment.id, sessionID: commitment.sessionID, grantedAt: start.addingTimeInterval(2))
-        XCTAssertEqual(commitment.apply(.releaseEarly(at: start.addingTimeInterval(3), authorization: authorization)), .releasedEarly)
+        XCTAssertEqual(commitment.apply(.releaseEarly(authorization: authorization, receivedAt: start.addingTimeInterval(3), processedAt: start.addingTimeInterval(3))), .releasedEarly)
         XCTAssertEqual(commitment.apply(.naturalCutoff(at: cutoff)), .rejected)
         XCTAssertEqual(commitment.state, .releasedEarly)
-        XCTAssertEqual(commitment.apply(.releaseEarly(at: cutoff.addingTimeInterval(1), authorization: authorization)), .rejected)
+        XCTAssertEqual(commitment.apply(.releaseEarly(authorization: authorization, receivedAt: cutoff.addingTimeInterval(1), processedAt: cutoff.addingTimeInterval(1))), .rejected)
         XCTAssertEqual(commitment.state, .releasedEarly)
     }
 
