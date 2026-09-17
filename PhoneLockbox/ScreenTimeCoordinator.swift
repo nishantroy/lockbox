@@ -73,14 +73,20 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// A reconciliation failure remains visible until a later reconciliation
     /// succeeds; an unrelated successful UI action must not erase it.
     private var reconciliationError: String?
+    private var quickActionDelivery = QuickActionDeliveryGate()
 
-    /// The claim identity stays attached to the request until a destination's
-    /// explicit presentation callback acknowledges it. Keeping the token in
-    /// this value prevents a stale callback from acknowledging a re-leased
-    /// route after a crash or scene teardown.
+    /// The durable route identity and claim stay attached to a delivery from
+    /// queue claim through UI dismissal. Keeping both values here prevents a
+    /// stale callback from acknowledging a re-leased route or settling a
+    /// newer presentation after a crash or scene teardown.
     struct PendingQuickAction: Equatable, Sendable {
+        let id: String
         let action: QuickActionRoute.Action
-        let claim: QuickActionPendingRouteStore.Claim?
+        let claim: QuickActionPendingRouteStore.Claim
+
+        var deliveryIdentity: QuickActionDeliveryGate.Identity {
+            QuickActionDeliveryGate.Identity(id: id, action: action)
+        }
     }
 
     var selectedItemCount: Int { selection.applicationTokens.count + selection.categoryTokens.count + selection.webDomainTokens.count }
@@ -710,33 +716,53 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// App Intents. An invalid or expired route is rejected without any
     /// Managed Settings or lifecycle mutation.
     func handleQuickActionURL(_ url: URL, now: Date = Date()) {
-        guard let route = QuickActionRoute.parse(url, now: now) else {
+        guard QuickActionRoute.parse(url, now: now) != nil else {
             lastError = "This Phone Lockbox shortcut link is invalid or expired. No lock was changed."
             return
         }
-        guard canPresentQuickAction(route.action) else { return }
-        pendingQuickAction = PendingQuickAction(action: route.action, claim: nil)
+        // Direct URL callbacks use the same durable nonce queue as App Intent
+        // handoffs. A current presentation therefore remains the sole busy
+        // identity; later focus/status/recovery routes wait in FIFO order.
+        guard QuickActionPendingRouteStore.enqueue(url, now: now) else {
+            lastError = "This Phone Lockbox shortcut could not be queued safely. No lock was changed."
+            return
+        }
+        processPendingQuickActionRoute(now: now)
     }
 
     /// A destination calls this only after it has consumed and presented the
-    /// requested UI. The durable queue is not acknowledged when state is
-    /// merely published: if presentation fails or the host dies first, the
-    /// lease expires and the same claim can be retried after relaunch.
-    func acknowledgePresentedQuickAction(_ pending: PendingQuickAction) {
-        guard pendingQuickAction == pending else { return }
-        if let claim = pending.claim {
-            _ = QuickActionPendingRouteStore.acknowledge(claim)
-        }
+    /// requested UI. Presentation acknowledgement validates the exact
+    /// in-memory identity but deliberately does not remove the durable claim:
+    /// a crash before dismissal/settlement must leave the route retryable.
+    @discardableResult
+    func acknowledgePresentedQuickAction(_ pending: PendingQuickAction) -> Bool {
+        guard pendingQuickAction == pending,
+              quickActionDelivery.accepts(pending.deliveryIdentity) else { return false }
+        return true
+    }
+
+    /// Releases the exact presented identity after its destination is
+    /// dismissed or settled. Durable acknowledgement happens at this boundary
+    /// so a crash before settlement remains retryable. A stale callback cannot
+    /// remove a re-leased claim because the queue still requires its token.
+    @discardableResult
+    func settlePresentedQuickAction(_ pending: PendingQuickAction) -> Bool {
+        guard pendingQuickAction == pending,
+              quickActionDelivery.accepts(pending.deliveryIdentity) else { return false }
+        let acknowledged = QuickActionPendingRouteStore.acknowledge(pending.claim)
+        guard quickActionDelivery.settle(pending.deliveryIdentity) else { return false }
         pendingQuickAction = nil
+        processPendingQuickActionRoute()
+        return acknowledged
     }
 
     /// Imports one App Intent handoff only at the app boundary. Claiming and
     /// acknowledging are separate durable operations so a host crash retries
     /// navigation; neither operation invokes an enforcement action.
-    func processPendingQuickActionRoute() {
+    func processPendingQuickActionRoute(now: Date = Date()) {
         guard pendingQuickAction == nil,
-              let claim = QuickActionPendingRouteStore.claim() else { return }
-        let now = Date()
+              quickActionDelivery.activeIdentity == nil,
+              let claim = QuickActionPendingRouteStore.claim(now: now) else { return }
         guard let route = QuickActionRoute.parse(claim.url, now: now) else {
             // Leave the claim unacknowledged. It will be retried until the
             // bounded route/queue age removes it; no invalid input can mutate
@@ -744,7 +770,9 @@ final class ScreenTimeCoordinator: ObservableObject {
             return
         }
         guard canPresentQuickAction(route.action) else { return }
-        pendingQuickAction = PendingQuickAction(action: route.action, claim: claim)
+        let pending = PendingQuickAction(id: route.id, action: route.action, claim: claim)
+        guard quickActionDelivery.begin(pending.deliveryIdentity) else { return }
+        pendingQuickAction = pending
     }
 
     private func canPresentQuickAction(_ action: QuickActionRoute.Action) -> Bool {

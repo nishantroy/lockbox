@@ -12,11 +12,19 @@ struct ContentView: View {
                     .navigationDestination(for: QuickActionRoute.Destination.self) { destination in
                         switch destination {
                         case .recovery:
-                            RecoveryView(coordinator: coordinator) { pending in
-                                guard let pending,
-                                      case .recovery = pending.action else { return }
-                                coordinator.acknowledgePresentedQuickAction(pending)
-                            }
+                            RecoveryView(
+                                coordinator: coordinator,
+                                onPresented: { pending in
+                                    guard let pending,
+                                          case .recovery = pending.action else { return }
+                                    _ = coordinator.acknowledgePresentedQuickAction(pending)
+                                },
+                                onDismissed: { pending in
+                                    guard let pending,
+                                          case .recovery = pending.action else { return }
+                                    _ = coordinator.settlePresentedQuickAction(pending)
+                                }
+                            )
                         }
                     }
             }

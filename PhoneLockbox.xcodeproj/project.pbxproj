@@ -26,6 +26,7 @@
 		5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */; };
 		5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E023311398A901C00301F601 /* ContentView.swift */; };
 		5BE2CD0427061CC6F52A4F20 /* ShieldConfiguration.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		5C890F679FE0DDF9ED27069A /* QuickActionDeliveryGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */; };
 		5E0E4133A5633F9B658EC1B4 /* RuntimeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */; };
 		5FE2806A4ED9CC173077DCBD /* RuntimeOccurrence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */; };
 		6080D7DA4E834C9154753BAD /* RuntimeContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */; };
@@ -127,6 +128,7 @@
 		26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionIntents.swift; sourceTree = "<group>"; };
 		2A5D95C14D31DEE7B354AE57 /* PhoneLockboxShieldConfiguration.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhoneLockboxShieldConfiguration.entitlements; sourceTree = "<group>"; };
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
+		35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryGate.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4937C609973AA395FE5785C2 /* LockboxPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicy.swift; sourceTree = "<group>"; };
 		4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeStore.swift; sourceTree = "<group>"; };
@@ -357,6 +359,7 @@
 		D18708BF90155CF876F08867 /* QuickActions */ = {
 			isa = PBXGroup;
 			children = (
+				35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */,
 				26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */,
 				544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */,
 				C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */,
@@ -593,6 +596,7 @@
 				3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */,
 				B3CC6F984D164E57CF206DA4 /* PeopleView.swift in Sources */,
 				1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */,
+				5C890F679FE0DDF9ED27069A /* QuickActionDeliveryGate.swift in Sources */,
 				E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */,
 				F0396C945F9466D0DFCC935B /* QuickActionPendingStore.swift in Sources */,
 				98EFB0DC3FE2850EFCE64059 /* QuickActionRoute.swift in Sources */,

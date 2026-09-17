@@ -25,8 +25,17 @@ struct LockboxTabView: View {
         }
         .lockboxScreen()
         .sheet(isPresented: $showingManualLock, onDismiss: {
+            // A focus identity remains busy until the sheet is actually gone.
+            // This prevents a rapid second URL from replacing its state while
+            // SwiftUI is still presenting or dismissing the first sheet.
+            if let presentedFocusAction {
+                coordinator.settlePresentedQuickAction(presentedFocusAction)
+            }
             requestedManualPreset = nil
             presentedFocusAction = nil
+            // If a regular Lock now sheet was already visible when an external
+            // route arrived, consume the queued route after that sheet closes.
+            consumeQuickAction()
         }) {
             ManualLockSheet(
                 coordinator: coordinator,
@@ -34,8 +43,10 @@ struct LockboxTabView: View {
                 onPresented: { pending in
                     guard let presentedFocusAction,
                           presentedFocusAction == pending else { return }
-                    coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
-                    self.presentedFocusAction = nil
+                    // Validate only the exact identity at presentation. The
+                    // durable claim is retained until onDismiss settles the
+                    // sheet, so a crash before dismissal can retry it.
+                    _ = coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
                 }
             )
         }
@@ -53,6 +64,8 @@ struct LockboxTabView: View {
         case .focus(let preset):
             // The sheet's onAppear is the presentation callback. Until then,
             // the claim (including its ID/token) remains durable and retryable.
+            // Never replace an already-presented regular or quick-action sheet.
+            guard presentedFocusAction == nil, !showingManualLock else { return }
             presentedFocusAction = pending
             requestedManualPreset = preset
             showingManualLock = true
@@ -60,14 +73,16 @@ struct LockboxTabView: View {
             // Status has no second screen: this visible Lockbox tab is its
             // destination, and this explicit consumption handler is the ack
             // point after the tab has been selected by ContentView.
-            coordinator.acknowledgePresentedQuickAction(pending)
+            _ = coordinator.acknowledgePresentedQuickAction(pending)
+            _ = coordinator.settlePresentedQuickAction(pending)
         case .recovery:
             if !navigationPath.contains(.recovery) {
                 navigationPath.append(.recovery)
             } else {
                 // Recovery is already the visible destination, so its
                 // presentation has already occurred and this is idempotent.
-                coordinator.acknowledgePresentedQuickAction(pending)
+                _ = coordinator.acknowledgePresentedQuickAction(pending)
+                _ = coordinator.settlePresentedQuickAction(pending)
             }
         }
     }

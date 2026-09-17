@@ -65,14 +65,19 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         static let currentSchema = 1
         let schemaVersion: Int
         var entries: [Entry]
+        /// A bounded replay tombstone set keeps an already-settled nonce from
+        /// being re-enqueued while its short-lived route could still be
+        /// replayed. These are navigation deduplication metadata, not auth.
+        var settledIDs: [String]
 
-        init(entries: [Entry] = []) {
+        init(entries: [Entry] = [], settledIDs: [String] = []) {
             self.schemaVersion = Self.currentSchema
             self.entries = entries
+            self.settledIDs = settledIDs
         }
 
         private enum CodingKeys: String, CodingKey {
-            case schemaVersion, entries
+            case schemaVersion, entries, settledIDs
         }
 
         init(from decoder: Decoder) throws {
@@ -89,8 +94,26 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
             while !entriesContainer.isAtEnd {
                 entries.append(try entriesContainer.decode(Entry.self))
             }
+
+            var settledIDs: [String] = []
+            if container.contains(.settledIDs) {
+                var settledContainer = try container.nestedUnkeyedContainer(forKey: .settledIDs)
+                guard let settledCount = settledContainer.count,
+                      settledCount <= QuickActionPendingRouteStore.maximumSettledIdentifiers else {
+                    throw QueueError.corrupt
+                }
+                settledIDs.reserveCapacity(settledCount)
+                while !settledContainer.isAtEnd {
+                    let id = try settledContainer.decode(String.self)
+                    guard id.utf8.count <= QuickActionPendingRouteStore.maximumIdentifierBytes else {
+                        throw QueueError.corrupt
+                    }
+                    settledIDs.append(id)
+                }
+            }
             self.schemaVersion = schemaVersion
             self.entries = entries
+            self.settledIDs = settledIDs
         }
     }
 
@@ -101,6 +124,27 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         case invalidClock
     }
 
+    /// Failure points used by host and simulator tests to prove that a
+    /// pre-rename failure is reported as unsuccessful while a post-rename
+    /// directory-sync failure remains a committed, durability-uncertain write.
+    enum WriteFailureInjection: Equatable, Sendable {
+        case write
+        case fileSync
+        case close
+        case rename
+        case directorySync
+    }
+
+    private enum WriteDurability: Equatable {
+        case durable
+        case atomicRenameOnly
+        case uncertain
+    }
+
+    private enum WriteOutcome: Equatable {
+        case committed(WriteDurability)
+    }
+
     private static let appGroupIdentifier = "group.com.phone-lockbox"
     private static let queueFileName = "phone-lockbox.quick-action-queue.json"
     private static let lockFileName = "phone-lockbox.quick-action-queue.lock"
@@ -109,6 +153,7 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
     // three known paths and a handful of decimal/UUID fields, so accepting a
     // multi-megabyte App Group document would only expand a local DoS surface.
     static let maximumEntries = 32
+    private static let maximumSettledIdentifiers = 64
     static let maximumQueueBytes = 32 * 1024
     static let maximumIdentifierBytes = 64
     static let maximumURLBytes = 1_024
@@ -125,12 +170,18 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
     private let queueURL: URL
     private let lockURL: URL
     private let lockTimeout: TimeInterval
+    private let failureInjection: WriteFailureInjection?
 
-    init(directoryURL: URL, lockTimeout: TimeInterval = 0.5) throws {
+    init(
+        directoryURL: URL,
+        lockTimeout: TimeInterval = 0.5,
+        failureInjection: WriteFailureInjection? = nil
+    ) throws {
         self.directoryURL = directoryURL
         self.queueURL = directoryURL.appendingPathComponent(Self.queueFileName)
         self.lockURL = directoryURL.appendingPathComponent(Self.lockFileName)
         self.lockTimeout = lockTimeout.isFinite ? max(0, min(lockTimeout, 5)) : 0.5
+        self.failureInjection = failureInjection
         do {
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
             try applyProtection(to: directoryURL)
@@ -140,9 +191,6 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
                 }
             }
             try applyProtection(to: lockURL)
-            if FileManager.default.fileExists(atPath: queueURL.path) {
-                try applyProtection(to: queueURL)
-            }
         } catch let error as QueueError {
             throw error
         } catch {
@@ -154,6 +202,12 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier),
               let store = try? Self(directoryURL: directory) else { return false }
         return store.enqueue(action, now: now)
+    }
+
+    static func enqueue(_ url: URL, now: Date = Date()) -> Bool {
+        guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier),
+              let store = try? Self(directoryURL: directory) else { return false }
+        return store.enqueue(url, now: now)
     }
 
     static func claim(now: Date = Date()) -> Claim? {
@@ -186,7 +240,8 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
             try withExclusiveLock {
                 var document = try read()
                 prune(&document, now: seconds)
-                guard !document.entries.contains(where: { $0.id == route.id }) else { return }
+                guard !document.entries.contains(where: { $0.id == route.id }),
+                      !document.settledIDs.contains(route.id) else { return }
                 guard document.entries.count < Self.maximumEntries else { throw QueueError.locked }
                 document.entries.append(Entry(id: route.id, url: url.absoluteString, enqueuedAt: seconds, claimToken: nil, claimUntil: nil))
                 try write(document)
@@ -229,8 +284,14 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
             guard let index = document.entries.firstIndex(where: {
                 $0.id == claim.id && $0.claimToken == claim.token
             }) else { return false }
+            let settledID = document.entries[index].id
             document.entries.remove(at: index)
-            try write(document)
+            document.settledIDs.removeAll { $0 == settledID }
+            document.settledIDs.append(settledID)
+            if document.settledIDs.count > Self.maximumSettledIdentifiers {
+                document.settledIDs.removeFirst(document.settledIDs.count - Self.maximumSettledIdentifiers)
+            }
+            _ = try write(document)
             return true
         }
     }
@@ -262,32 +323,88 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
     }
 
     private func read() throws -> Document {
-        guard FileManager.default.fileExists(atPath: queueURL.path) else { return Document() }
+#if canImport(Darwin) || canImport(Glibc)
+        // Bind validation and reading to one descriptor. O_NOFOLLOW rejects a
+        // symlink at open, O_NONBLOCK makes a hostile FIFO/device harmless,
+        // and fstat validates the exact inode that will be read.
+        let descriptor = open(queueURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return Document() }
+            throw QueueError.corrupt
+        }
+        defer { _ = close(descriptor) }
+        var fileInfo = stat()
+        guard fstat(descriptor, &fileInfo) == 0 else { throw QueueError.corrupt }
+        guard (fileInfo.st_mode & S_IFMT) == S_IFREG else { throw QueueError.corrupt }
+        let size = Int64(fileInfo.st_size)
+        guard size >= 0, size <= Int64(Self.maximumQueueBytes) else { throw QueueError.corrupt }
         do {
-            // This metadata check happens while the stable lock is held. The
-            // bounded FileHandle read is still max+1 so a file growing after
-            // stat cannot cause an unbounded allocation.
-            let attributes = try FileManager.default.attributesOfItem(atPath: queueURL.path)
-            guard (attributes[.type] as? FileAttributeType) == .typeRegular,
-                  let size = (attributes[.size] as? NSNumber)?.int64Value,
-                  size >= 0,
-                  size <= Int64(Self.maximumQueueBytes) else { throw QueueError.corrupt }
-            let handle = try FileHandle(forReadingFrom: queueURL)
-            defer { try? handle.close() }
-            let data = try handle.read(upToCount: Self.maximumQueueBytes + 1) ?? Data()
-            guard data.count <= Self.maximumQueueBytes else { throw QueueError.corrupt }
+            let data = try readBounded(from: descriptor)
             let document = try JSONDecoder().decode(Document.self, from: data)
             guard document.schemaVersion == Document.currentSchema,
                   document.entries.count <= Self.maximumEntries,
+                  document.settledIDs.count <= Self.maximumSettledIdentifiers,
                   Set(document.entries.map(\.id)).count == document.entries.count,
-                  document.entries.allSatisfy(validEntry) else { throw QueueError.corrupt }
+                  Set(document.settledIDs).count == document.settledIDs.count,
+                  Set(document.entries.map(\.id)).isDisjoint(with: document.settledIDs),
+                  document.entries.allSatisfy(validEntry),
+                  document.settledIDs.allSatisfy(isCanonicalUUID) else { throw QueueError.corrupt }
             return document
         } catch let error as QueueError {
             throw error
         } catch {
             throw QueueError.corrupt
         }
+#else
+        do {
+            let data = try Data(contentsOf: queueURL)
+            guard data.count <= Self.maximumQueueBytes else { throw QueueError.corrupt }
+            let document = try JSONDecoder().decode(Document.self, from: data)
+            guard document.schemaVersion == Document.currentSchema,
+                  document.entries.count <= Self.maximumEntries,
+                  document.settledIDs.count <= Self.maximumSettledIdentifiers,
+                  Set(document.entries.map(\.id)).count == document.entries.count,
+                  Set(document.settledIDs).count == document.settledIDs.count,
+                  Set(document.entries.map(\.id)).isDisjoint(with: document.settledIDs),
+                  document.entries.allSatisfy(validEntry),
+                  document.settledIDs.allSatisfy(isCanonicalUUID) else { throw QueueError.corrupt }
+            return document
+        } catch let error as QueueError {
+            throw error
+        } catch {
+            if !FileManager.default.fileExists(atPath: queueURL.path) { return Document() }
+            throw QueueError.corrupt
+        }
+#endif
     }
+
+#if canImport(Darwin) || canImport(Glibc)
+    private func readBounded(from descriptor: Int32) throws -> Data {
+        var data = Data()
+        data.reserveCapacity(Self.maximumQueueBytes)
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while data.count <= Self.maximumQueueBytes {
+            let requested = min(buffer.count, Self.maximumQueueBytes + 1 - data.count)
+            let count = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+                guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+#if canImport(Darwin)
+                return Darwin.read(descriptor, baseAddress, requested)
+#else
+                return Glibc.read(descriptor, baseAddress, requested)
+#endif
+            }
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw QueueError.corrupt
+            }
+            data.append(contentsOf: buffer[0..<count])
+        }
+        guard data.count <= Self.maximumQueueBytes else { throw QueueError.corrupt }
+        return data
+    }
+#endif
+
 
     private func validEntry(_ entry: Entry) -> Bool {
         guard entry.id.utf8.count <= Self.maximumIdentifierBytes,
@@ -306,10 +423,13 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         }
     }
 
-    /// Atomically replaces the queue and synchronizes both the file and its
-    /// containing directory where the platform supports directory fsync. A
-    /// power-loss/IO error is surfaced as unavailable; callers fail closed.
-    private func write(_ document: Document) throws {
+    /// Atomically replaces the queue and reports the logical mutation as
+    /// committed once rename succeeds. A directory-sync error after rename is
+    /// represented as `.uncertain`; callers must not report no effect or
+    /// blindly retry the same nonce. Unsupported sync remains the explicit
+    /// atomic-rename-only fallback.
+    @discardableResult
+    private func write(_ document: Document) throws -> WriteOutcome {
         guard document.entries.count <= Self.maximumEntries else { throw QueueError.corrupt }
         let data: Data
         do {
@@ -321,20 +441,33 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
 
 #if canImport(Darwin) || canImport(Glibc)
         let temporaryURL = directoryURL.appendingPathComponent(".\(Self.queueFileName).\(UUID().uuidString).tmp")
-        let descriptor = open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        let descriptor = open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else { throw QueueError.unavailable }
         var isOpen = true
+        var didRename = false
         do {
+            try injectedFailure(.write)
             try writeAll(data, to: descriptor)
             try applyProtection(to: temporaryURL)
-            try synchronize(descriptor)
+            try injectedFailure(.fileSync)
+            _ = try synchronize(descriptor)
+            try injectedFailure(.close)
             guard close(descriptor) == 0 else { throw QueueError.unavailable }
             isOpen = false
+            try injectedFailure(.rename)
             guard rename(temporaryURL.path, queueURL.path) == 0 else { throw QueueError.unavailable }
-            try synchronizeDirectory()
+            didRename = true
+            do {
+                let directorySync = try synchronizeDirectory()
+                return .committed(directorySync ? .durable : .atomicRenameOnly)
+            } catch {
+                // The replacement is already visible. Do not turn a hard
+                // directory-fsync error into an unsafe retry signal.
+                return .committed(.uncertain)
+            }
         } catch {
             if isOpen { _ = close(descriptor) }
-            _ = unlink(temporaryURL.path)
+            if !didRename { _ = unlink(temporaryURL.path) }
             if error is QueueError { throw error }
             throw QueueError.unavailable
         }
@@ -342,6 +475,7 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         do {
             try data.write(to: queueURL, options: [.atomic])
             try applyProtection(to: queueURL)
+            return .committed(.atomicRenameOnly)
         } catch {
             throw QueueError.unavailable
         }
@@ -367,7 +501,7 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
         }
     }
 
-    private func synchronize(_ descriptor: Int32) throws {
+    private func synchronize(_ descriptor: Int32) throws -> Bool {
 #if canImport(Darwin)
         let result = Darwin.fsync(descriptor)
 #else
@@ -375,25 +509,31 @@ struct QuickActionPendingRouteStore: @unchecked Sendable {
 #endif
         guard result != -1 else {
             guard isUnsupportedSyncError(errno) else { throw QueueError.unavailable }
-            return
+            return false
         }
+        return true
     }
 
-    private func synchronizeDirectory() throws {
-        let descriptor = open(directoryURL.path, O_RDONLY)
+    private func synchronizeDirectory() throws -> Bool {
+        try injectedFailure(.directorySync)
+        let descriptor = open(directoryURL.path, O_RDONLY | O_CLOEXEC)
         guard descriptor >= 0 else { throw QueueError.unavailable }
         defer { _ = close(descriptor) }
-        do {
 #if canImport(Darwin)
-            let result = Darwin.fsync(descriptor)
+        let result = Darwin.fsync(descriptor)
 #else
-            let result = Glibc.fsync(descriptor)
+        let result = Glibc.fsync(descriptor)
 #endif
-            guard result != -1 else {
-                guard isUnsupportedSyncError(errno) else { throw QueueError.unavailable }
-                return
-            }
+        guard result != -1 else {
+            guard isUnsupportedSyncError(errno) else { throw QueueError.unavailable }
+            return false
         }
+        return true
+    }
+
+    private func injectedFailure(_ stage: WriteFailureInjection) throws {
+        guard failureInjection == stage else { return }
+        throw QueueError.unavailable
     }
 
     private func isUnsupportedSyncError(_ value: Int32) -> Bool {

@@ -1,4 +1,9 @@
 import XCTest
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 @testable import PhoneLockbox
 
 final class QuickActionRouteTests: XCTestCase {
@@ -102,6 +107,46 @@ final class QuickActionRouteTests: XCTestCase {
     }
 }
 
+final class QuickActionDeliveryGateTests: XCTestCase {
+    func testFocusPresentationKeepsMixedRoutesBusyUntilDismissal() {
+        let focusA = QuickActionDeliveryGate.Identity(id: "focus-a", action: .focus(.thirtyMinutes))
+        let focusB = QuickActionDeliveryGate.Identity(id: "focus-b", action: .focus(.oneHour))
+        let status = QuickActionDeliveryGate.Identity(id: "status", action: .status)
+        let recovery = QuickActionDeliveryGate.Identity(id: "recovery", action: .recovery)
+        var gate = QuickActionDeliveryGate()
+
+        XCTAssertTrue(gate.begin(focusA))
+        XCTAssertFalse(gate.begin(focusB))
+        XCTAssertFalse(gate.begin(status))
+        XCTAssertFalse(gate.begin(recovery))
+        XCTAssertTrue(gate.accepts(focusA))
+        XCTAssertFalse(gate.accepts(focusB))
+        XCTAssertFalse(gate.accepts(status))
+        XCTAssertFalse(gate.settle(status))
+
+        XCTAssertTrue(gate.settle(focusA))
+        XCTAssertFalse(gate.accepts(focusA), "Callback after dismissal must be harmless")
+        XCTAssertTrue(gate.begin(status))
+        XCTAssertFalse(gate.begin(recovery))
+        XCTAssertTrue(gate.settle(status))
+        XCTAssertTrue(gate.begin(recovery))
+        XCTAssertTrue(gate.settle(recovery))
+    }
+
+    func testOnlyExactIdentityCanSettleAfterAReclaimedDelivery() {
+        let oldFocus = QuickActionDeliveryGate.Identity(id: "same-route", action: .focus(.thirtyMinutes))
+        let newStatus = QuickActionDeliveryGate.Identity(id: "same-route", action: .status)
+        var gate = QuickActionDeliveryGate()
+
+        XCTAssertTrue(gate.begin(oldFocus))
+        XCTAssertTrue(gate.settle(oldFocus))
+        XCTAssertTrue(gate.begin(newStatus))
+        XCTAssertFalse(gate.accepts(oldFocus))
+        XCTAssertFalse(gate.settle(oldFocus))
+        XCTAssertTrue(gate.settle(newStatus))
+    }
+}
+
 final class QuickActionPendingRouteStoreTests: XCTestCase {
     private let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
 
@@ -128,13 +173,50 @@ final class QuickActionPendingRouteStoreTests: XCTestCase {
         XCTAssertEqual(try store.claim(now: now)?.url, second)
     }
 
-    func testClaimRemainsRetryableAcrossCrashBeforePresentationAck() throws {
+    func testSettledNonceIsDeduplicatedAfterAcknowledgement() throws {
+        let store = try makeStore()
+        let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        XCTAssertTrue(store.enqueue(url, now: now))
+        let claim = try XCTUnwrap(store.claim(now: now))
+        XCTAssertTrue(try store.acknowledge(claim))
+        // The duplicate callback has the same nonce, but it cannot create a
+        // second presentation after the original identity settled.
+        XCTAssertTrue(store.enqueue(url, now: now.addingTimeInterval(1)))
+        XCTAssertNil(try store.claim(now: now.addingTimeInterval(1)))
+    }
+
+    func testMixedFocusStatusRecoveryRoutesProgressAfterExactDismissal() throws {
+        let store = try makeStore()
+        let focus = try XCTUnwrap(QuickActionRoute.url(for: .focus(.thirtyMinutes), now: now))
+        let status = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let recovery = try XCTUnwrap(QuickActionRoute.url(for: .recovery, now: now))
+        XCTAssertTrue(store.enqueue(focus, now: now))
+        XCTAssertTrue(store.enqueue(status, now: now))
+        XCTAssertTrue(store.enqueue(recovery, now: now))
+
+        // A is presenting: later callbacks remain queued behind its exact
+        // claim until the destination settles.
+        let focusClaim = try XCTUnwrap(store.claim(now: now))
+        XCTAssertEqual(focusClaim.url, focus)
+        XCTAssertNil(try store.claim(now: now.addingTimeInterval(30)))
+        XCTAssertTrue(try store.acknowledge(focusClaim))
+
+        let statusClaim = try XCTUnwrap(store.claim(now: now.addingTimeInterval(30)))
+        XCTAssertEqual(statusClaim.url, status)
+        XCTAssertTrue(try store.acknowledge(statusClaim))
+        let recoveryClaim = try XCTUnwrap(store.claim(now: now.addingTimeInterval(30)))
+        XCTAssertEqual(recoveryClaim.url, recovery)
+        XCTAssertTrue(try store.acknowledge(recoveryClaim))
+    }
+
+    func testClaimRemainsRetryableAcrossCrashBeforeSettlement() throws {
         let store = try makeStore()
         let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
         XCTAssertTrue(store.enqueue(url, now: now))
         let first = try XCTUnwrap(store.claim(now: now))
-        // Simulate a failed presentation or process death: no UI callback
-        // invokes acknowledge for this claim.
+        // Presentation is not settlement. Simulate a process death after the
+        // destination callback but before dismissal: no durable acknowledgement
+        // is written, so the route remains retryable.
         XCTAssertNil(try store.claim(now: now.addingTimeInterval(59)))
         let retry = try XCTUnwrap(store.claim(now: now.addingTimeInterval(60)))
         XCTAssertEqual(retry.url, first.url)
@@ -225,6 +307,118 @@ final class QuickActionPendingRouteStoreTests: XCTestCase {
         XCTAssertTrue(try store.acknowledge(retry))
         XCTAssertEqual(try store.claim(now: now.addingTimeInterval(60))?.url, secondURL)
     }
+
+#if canImport(Darwin) || canImport(Glibc)
+    func testDirectSymlinkIsRejectedWithoutFollowingItsTarget() throws {
+        let directory = try temporaryDirectory()
+        let queueURL = directory.appendingPathComponent("phone-lockbox.quick-action-queue.json")
+        let targetURL = directory.appendingPathComponent("outside.json")
+        try Data("not the queue".utf8).write(to: targetURL)
+        XCTAssertEqual(targetURL.path.withCString { target in
+            queueURL.path.withCString { link in symlink(target, link) }
+        }, 0)
+        defer { _ = unlink(queueURL.path) }
+
+        let store = try QuickActionPendingRouteStore(directoryURL: directory)
+        XCTAssertThrowsError(try store.claim(now: now))
+    }
+
+    func testFIFOAndDirectoryQueueReplacementsAreRejectedWithoutBlocking() throws {
+        let directory = try temporaryDirectory()
+        let queueURL = directory.appendingPathComponent("phone-lockbox.quick-action-queue.json")
+        XCTAssertEqual(queueURL.path.withCString { mkfifo($0, 0o600) }, 0)
+        defer { _ = unlink(queueURL.path) }
+        let store = try QuickActionPendingRouteStore(directoryURL: directory)
+        let started = Date()
+        XCTAssertThrowsError(try store.claim(now: now))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+
+        _ = unlink(queueURL.path)
+        try FileManager.default.createDirectory(at: queueURL, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: queueURL) }
+        XCTAssertThrowsError(try store.claim(now: now))
+    }
+
+    func testReplacementRaceNeverReadsSymlinkTargetAndReturnsPromptly() throws {
+        let directory = try temporaryDirectory()
+        let queueURL = directory.appendingPathComponent("phone-lockbox.quick-action-queue.json")
+        let outsideURL = directory.appendingPathComponent("outside.json")
+        let statusURL = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let recoveryURL = try XCTUnwrap(QuickActionRoute.url(for: .recovery, now: now))
+        let statusEntry: [String: Any] = [
+            "id": QuickActionRoute.parse(statusURL, now: now)!.id,
+            "url": statusURL.absoluteString,
+            "enqueuedAt": 1_000_000,
+            "claimToken": NSNull(),
+            "claimUntil": NSNull()
+        ]
+        let recoveryEntry: [String: Any] = [
+            "id": QuickActionRoute.parse(recoveryURL, now: now)!.id,
+            "url": recoveryURL.absoluteString,
+            "enqueuedAt": 1_000_000,
+            "claimToken": NSNull(),
+            "claimUntil": NSNull()
+        ]
+        let statusData = try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "entries": [statusEntry]])
+        let recoveryData = try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "entries": [recoveryEntry]])
+        try statusData.write(to: queueURL)
+        try recoveryData.write(to: outsideURL)
+        let store = try QuickActionPendingRouteStore(directoryURL: directory)
+        let stop = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            defer { finished.signal() }
+            for _ in 0..<250 {
+                if stop.wait(timeout: .now()) == .success { return }
+                _ = unlink(queueURL.path)
+                _ = queueURL.path.withCString { link in symlink(outsideURL.path, link) }
+                usleep(100)
+                _ = unlink(queueURL.path)
+                try? statusData.write(to: queueURL)
+            }
+        }
+
+        var unexpectedRoutes: [URL] = []
+        for _ in 0..<250 {
+            do {
+                if let claim = try store.claim(now: now), claim.url != statusURL {
+                    unexpectedRoutes.append(claim.url)
+                }
+            } catch {
+                // Symlink/nonregular replacement is expected to fail closed.
+            }
+        }
+        stop.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(unexpectedRoutes.isEmpty, "Opened a replacement target: \(unexpectedRoutes)")
+    }
+
+    func testPreRenameWriteFailuresLeaveNoQueueMutation() throws {
+        let failures: [QuickActionPendingRouteStore.WriteFailureInjection] = [.write, .fileSync, .close, .rename]
+        let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        for failure in failures {
+            let directory = try temporaryDirectory()
+            let store = try QuickActionPendingRouteStore(directoryURL: directory, failureInjection: failure)
+            XCTAssertFalse(store.enqueue(url, now: now), "Unexpected success for \(failure)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("phone-lockbox.quick-action-queue.json").path))
+        }
+    }
+
+    func testDirectorySyncFailureReportsCommittedMutationAndDoesNotDuplicate() throws {
+        let directory = try temporaryDirectory()
+        let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let failingStore = try QuickActionPendingRouteStore(directoryURL: directory, failureInjection: .directorySync)
+        XCTAssertTrue(failingStore.enqueue(url, now: now))
+        let claim = try XCTUnwrap(failingStore.claim(now: now))
+        XCTAssertTrue(try failingStore.acknowledge(claim))
+
+        let relaunchedStore = try QuickActionPendingRouteStore(directoryURL: directory)
+        XCTAssertNil(try relaunchedStore.claim(now: now))
+        XCTAssertTrue(relaunchedStore.enqueue(url, now: now))
+        XCTAssertNil(try relaunchedStore.claim(now: now))
+    }
+#endif
 
     func testQueueAndLockFilesUseTheDocumentedProtectionContract() throws {
         let directory = try temporaryDirectory()
