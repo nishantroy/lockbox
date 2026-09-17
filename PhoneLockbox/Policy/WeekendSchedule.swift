@@ -591,6 +591,9 @@ public struct WeekendSchedule: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
         try container.encode(revision, forKey: .revision)
+        // Canonical v1 output omits an absent optional slot. Decoding also
+        // accepts explicit null for compatibility, but re-encoding always
+        // returns to this unambiguous omitted-key representation.
         try container.encodeIfPresent(weekday, forKey: .weekday)
         try container.encodeIfPresent(weekend, forKey: .weekend)
     }

@@ -47,10 +47,18 @@ rejects any conflict before a schedule can be resolved.
       "revision": 7,
       "snapshotData": "AQID"
     }
-  },
-  "weekend": null
+  }
 }
 ```
+
+The canonical v1 JSON omits `weekday` or `weekend` when that optional slot is
+absent; it never emits an absent slot as `null`. The four canonical shapes are
+therefore: the empty schedule has neither slot key, a weekday-only schedule has
+only `weekday`, a weekend-only schedule has only `weekend`, and a two-slot
+schedule has both keys. Decoding accepts an explicitly present `null` for either
+slot as a compatibility input, treating it exactly like an omitted key; any
+re-encoding emits the canonical omitted-key form. This keeps output
+unambiguous while allowing a locked migration to consume older documents.
 
 `enabledDays` is encoded as a bounded, non-empty array of the exact lowercase
 strings `sunday`, `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, and
@@ -167,23 +175,33 @@ Before app/monitor integration, a reviewer must accept this pure core and its
 exhaustive tests. The later integration change must then provide all of the
 following before device QA:
 
-1. an atomic App Group schema migration with rollback-safe old-data retention;
-2. one shared validated document consumed by app and monitor, with no local
+1. a future schedule envelope v1 with a documented maximum encoded document
+   size of **256 KiB (262,144 bytes)**, including envelope metadata and the
+   `WeekendSchedule` payload. This bound leaves room for two maximum 64 KiB
+   policy snapshots after base64 encoding plus envelope overhead. The App Group
+   storage boundary must reject a file above this limit from its file-size
+   metadata before loading its bytes, and must retain a post-read byte-count
+   check before calling `JSONDecoder` to cover races or non-file sources. This
+   is an integration requirement, not a limit enforced by this pure Codable
+   core; its typed field and snapshot limits remain defense in depth. Add an
+   oversized-document regression at that storage boundary;
+2. an atomic App Group schema migration with rollback-safe old-data retention;
+3. one shared validated document consumed by app and monitor, with no local
    defaults fallback;
-3. conflict preview and rejection in the editor before any side effect;
-4. a persisted schedule revision and active occurrence record written before
+4. conflict preview and rejection in the editor before any side effect;
+5. a persisted schedule revision and active occurrence record written before
    registration or policy application;
-5. frozen absolute end and policy snapshot for every active occurrence, including
+6. frozen absolute end and policy snapshot for every active occurrence, including
    relaunch, reboot, callback replay, and timezone/DST changes;
-6. callback handling bound to the stable rule/activity and occurrence IDs, with
+7. callback handling bound to the stable rule/activity and occurrence IDs, with
    natural-end precedence and stale/duplicate suppression;
-7. registration replacement that stops old activities only after the new
+8. registration replacement that stops old activities only after the new
    validated intent is durable, and no broad clear on an unrelated end callback;
-8. authorization, selection validation, error, and accessibility gates matching
+9. authorization, selection validation, error, and accessibility gates matching
    the existing R4 evidence requirements; and
-9. focused device tests for weekday/weekend boundaries, overnight cross-day
-   rejection, DST, timezone changes, reboot/relaunch, and the unchanged single
-   daily migration path.
+10. focused device tests for weekday/weekend boundaries, overnight cross-day
+    rejection, DST, timezone changes, reboot/relaunch, and the unchanged single
+    daily migration path.
 
 Until every gate passes, the existing production runtime remains the only runtime
 path and this file remains a source-only design contract.

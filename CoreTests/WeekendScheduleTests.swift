@@ -124,6 +124,59 @@ final class WeekendScheduleTests: XCTestCase {
         }
     }
 
+    func testCanonicalV1JSONFixturesEncodeAndDecodeOptionalSlots() throws {
+        let weekday = try rule(.weekday, days: [.monday], start: (22, 0), end: (7, 0))
+        let weekend = try rule(.weekend, days: [.saturday], start: (9, 0), end: (17, 0))
+        let fixtures: [(schedule: WeekendSchedule, json: String, presentKeys: Set<String>)] = [
+            (
+                try WeekendSchedule(revision: 0),
+                #"{"revision":0,"schemaVersion":1}"#,
+                []
+            ),
+            (
+                try WeekendSchedule(revision: 12, weekday: weekday),
+                #"{"revision":12,"schemaVersion":1,"weekday":{"enabledDays":["monday"],"end":{"hour":7,"minute":0},"id":"weekday","policy":{"reference":"sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","revision":7,"snapshotData":"AQID"},"start":{"hour":22,"minute":0}}}"#,
+                ["weekday"]
+            ),
+            (
+                try WeekendSchedule(revision: 12, weekend: weekend),
+                #"{"revision":12,"schemaVersion":1,"weekend":{"enabledDays":["saturday"],"end":{"hour":17,"minute":0},"id":"weekend","policy":{"reference":"sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","revision":7,"snapshotData":"AQID"},"start":{"hour":9,"minute":0}}}"#,
+                ["weekend"]
+            ),
+            (
+                try WeekendSchedule(revision: 12, weekday: weekday, weekend: weekend),
+                #"{"revision":12,"schemaVersion":1,"weekday":{"enabledDays":["monday"],"end":{"hour":7,"minute":0},"id":"weekday","policy":{"reference":"sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","revision":7,"snapshotData":"AQID"},"start":{"hour":22,"minute":0}},"weekend":{"enabledDays":["saturday"],"end":{"hour":17,"minute":0},"id":"weekend","policy":{"reference":"sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","revision":7,"snapshotData":"AQID"},"start":{"hour":9,"minute":0}}}"#,
+                ["weekday", "weekend"]
+            )
+        ]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let decoder = JSONDecoder()
+
+        for fixture in fixtures {
+            let encoded = try encoder.encode(fixture.schedule)
+            XCTAssertEqual(String(data: encoded, encoding: .utf8), fixture.json)
+
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(Set(object.keys).subtracting(["revision", "schemaVersion"]), fixture.presentKeys)
+            XCTAssertEqual(try decoder.decode(WeekendSchedule.self, from: Data(fixture.json.utf8)), fixture.schedule)
+        }
+    }
+
+    func testDecoderAcceptsExplicitNullSlotsButCanonicalizesThemAsOmitted() throws {
+        let explicitNull = Data(#"{"revision":0,"schemaVersion":1,"weekday":null,"weekend":null}"#.utf8)
+        let decoded = try JSONDecoder().decode(WeekendSchedule.self, from: explicitNull)
+        XCTAssertNil(decoded.weekday)
+        XCTAssertNil(decoded.weekend)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(
+            String(data: try encoder.encode(decoded), encoding: .utf8),
+            #"{"revision":0,"schemaVersion":1}"#
+        )
+    }
+
     func testRejectsStrictOverlapAndTouchingBoundaryIncludingOvernightCrossDay() throws {
         let weekdayOvernight = try rule(.weekday, days: [.friday], start: (22, 0), end: (7, 0))
         let weekendOverlap = try rule(.weekend, days: [.saturday], start: (6, 0), end: (8, 0))
