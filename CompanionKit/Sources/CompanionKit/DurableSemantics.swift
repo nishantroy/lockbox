@@ -65,26 +65,67 @@ public struct RelayResponse: Codable, Hashable, Sendable {
     public let operationID: String
     public let revision: UInt64
     public let result: RelayResult
+    /// The identity of the ledger this operation mutated (relay contract
+    /// v1.1). For an owner-signed operation this is the signer's own
+    /// identity; for a **helper-signed** operation (accept/approval/consent
+    /// acceptance) it is the *other* person's owner identity, since a
+    /// helper's action mutates the owner's ledger, not their own. Added
+    /// additively (R5 relay plan, Slice B1) for the on-device rollback
+    /// anchor (`RollbackAnchor` in `HTTPTransport.swift`); optional so the
+    /// in-memory relay and every existing test keep decoding/encoding
+    /// unchanged. A hosted relay (Slice A) should populate it.
+    public let ownerIdentityID: String?
+    /// Canonical state-root digest (32 bytes) for `revision`, as described in
+    /// `docs/companion-security.md`. Optional for the same back-compat
+    /// reason as `ownerIdentityID`.
+    public let stateRoot: Data?
 
-    public init(operationID: String, revision: UInt64, result: RelayResult) throws {
+    public init(operationID: String, revision: UInt64, result: RelayResult,
+                ownerIdentityID: String? = nil, stateRoot: Data? = nil) throws {
         try requireIdentifier(operationID, name: "operation ID")
         guard revision > 0 else { throw CompanionError.malformed("invalid response revision") }
+        if let ownerIdentityID { try requireIdentifier(ownerIdentityID, name: "response owner ID") }
+        if let stateRoot { guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid response state root") } }
         self.operationID = operationID
         self.revision = revision
         self.result = result
+        self.ownerIdentityID = ownerIdentityID
+        self.stateRoot = stateRoot
     }
 }
 
 public struct InboxResponse: Codable, Hashable, Sendable {
-    public let ownerIdentityID: String
+    /// Relay contract v1.1: present only when the fetching identity is the
+    /// **owner** of this ledger (fetching their own inbox). Omitted for a
+    /// pure helper inbox, since one helper identity's inbox items can span
+    /// several different owners' ledgers, so there is no single ledger to
+    /// attribute a revision/root to.
+    public let ownerIdentityID: String?
     public let revision: UInt64
     public let requests: [TrustedRequest]
+    /// Same presence rule as `ownerIdentityID` (owner-fetch only).
+    public let stateRoot: Data?
+    /// Every pairing where the fetching identity is the owner or the
+    /// approver. This is how a helper's device learns about a pairing the
+    /// owner confirmed — the friend never receives a `Pairing` value
+    /// directly from `accept`. Additive; `nil` for a relay/test double that
+    /// does not populate it.
+    public let pairings: [Pairing]?
+    /// The current, generation-bearing `RelationshipConsent` for each
+    /// pairing in `pairings`. Additive; `nil` for a relay/test double that
+    /// does not populate it.
+    public let consents: [RelationshipConsent]?
 
-    public init(ownerIdentityID: String, revision: UInt64, requests: [TrustedRequest]) throws {
-        try requireIdentifier(ownerIdentityID, name: "identity ID")
+    public init(ownerIdentityID: String?, revision: UInt64, requests: [TrustedRequest], stateRoot: Data? = nil,
+                pairings: [Pairing]? = nil, consents: [RelationshipConsent]? = nil) throws {
+        if let ownerIdentityID { try requireIdentifier(ownerIdentityID, name: "identity ID") }
+        if let stateRoot { guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid response state root") } }
         self.ownerIdentityID = ownerIdentityID
         self.revision = revision
         self.requests = requests
+        self.stateRoot = stateRoot
+        self.pairings = pairings
+        self.consents = consents
     }
 }
 

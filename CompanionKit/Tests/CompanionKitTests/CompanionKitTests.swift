@@ -944,4 +944,114 @@ final class CompanionKitTests: XCTestCase {
         _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
         return pairing
     }
+
+    // MARK: - Malicious relay: confirm response validation
+
+    func testConfirmRejectsARelayThatSwapsTheApproverKeyInTheResponse() throws {
+        let ownerKeys = InMemoryDeviceKeyStore()
+        let approverKeys = InMemoryDeviceKeyStore()
+        let attackerKeys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
+        let attackerSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: attackerKeys)
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
+        let maliciousTransport = ApproverSwappingTransport(real: relay, attacker: attackerSigner.identity)
+        let owner = CompanionClient(signer: ownerSigner, transport: maliciousTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+
+        let invitation = try owner.createInvite(inviteID: "invite-swap", validFor: 3_600, now: t,
+                                                nonce: Data(repeating: 3, count: 24))
+        let acceptance = try approver.accept(invitation, acceptanceID: "accept-swap", now: t)
+        XCTAssertThrowsError(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)) { error in
+            guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
+        }
+    }
+
+    func testSyncFetchInboxSignsAFreshIssuedAtInTheQueryBody() throws {
+        let (relay, owner, _, _, _) = try harness()
+        let capturing = InboxQueryCapturingTransport(real: relay)
+        let ownerViaCapture = CompanionClient(signer: owner.signer, transport: capturing,
+                                              now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        _ = try ownerViaCapture.fetchInbox()
+        XCTAssertEqual(capturing.capturedQuery?.identityID, owner.signer.identity.identityID)
+        XCTAssertEqual(capturing.capturedQuery?.issuedAt, Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    func testConfirmRejectsARelayThatSubstitutesTheOwner() throws {
+        let ownerKeys = InMemoryDeviceKeyStore()
+        let approverKeys = InMemoryDeviceKeyStore()
+        let attackerOwnerKeys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
+        let attackerOwnerSigner = try DeviceSigner.create(role: .owner, keyStore: attackerOwnerKeys)
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
+        let maliciousTransport = OwnerSwappingTransport(real: relay, attacker: attackerOwnerSigner.identity)
+        let owner = CompanionClient(signer: ownerSigner, transport: maliciousTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+
+        let invitation = try owner.createInvite(inviteID: "invite-owner-swap", validFor: 3_600, now: t,
+                                                nonce: Data(repeating: 3, count: 24))
+        let acceptance = try approver.accept(invitation, acceptanceID: "accept-owner-swap", now: t)
+        XCTAssertThrowsError(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)) { error in
+            guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
+        }
+    }
+}
+
+/// Forwards every operation to a real in-memory relay, capturing the decoded
+/// `InboxQuery` body of the most recent `fetchInbox` call so a test can
+/// assert on it directly.
+private final class InboxQueryCapturingTransport: CompanionTransport, @unchecked Sendable {
+    let real: InMemoryCompanionRelay
+    private(set) var capturedQuery: InboxQuery?
+    init(real: InMemoryCompanionRelay) { self.real = real }
+
+    func submit(_ operation: SignedOperation) throws -> RelayResponse { try real.submit(operation) }
+
+    func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
+        capturedQuery = try? JSONDecoder().decode(InboxQuery.self, from: operation.body)
+        return try real.fetchInbox(operation)
+    }
+}
+
+/// Forwards every operation to a real in-memory relay, except that a
+/// successful "confirm" response has its `Pairing.approver` swapped for an
+/// attacker identity before being returned — simulating a malicious relay
+/// trying to make the owner trust the wrong approver key.
+private final class ApproverSwappingTransport: CompanionTransport, @unchecked Sendable {
+    let real: InMemoryCompanionRelay
+    let attacker: DeviceIdentity
+    init(real: InMemoryCompanionRelay, attacker: DeviceIdentity) { self.real = real; self.attacker = attacker }
+
+    func submit(_ operation: SignedOperation) throws -> RelayResponse {
+        let response = try real.submit(operation)
+        guard operation.kind == "confirm", case let .pairing(pairing) = response.result else { return response }
+        let swapped = try Pairing(pairingID: pairing.pairingID, owner: pairing.owner, approver: attacker,
+                                  epoch: pairing.epoch, createdAt: pairing.createdAt, state: pairing.state)
+        return try RelayResponse(operationID: response.operationID, revision: response.revision, result: .pairing(swapped))
+    }
+
+    func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
+        try real.fetchInbox(operation)
+    }
+}
+
+/// Same idea as `ApproverSwappingTransport`, but substitutes the owner
+/// identity in the confirm response instead of the approver.
+private final class OwnerSwappingTransport: CompanionTransport, @unchecked Sendable {
+    let real: InMemoryCompanionRelay
+    let attacker: DeviceIdentity
+    init(real: InMemoryCompanionRelay, attacker: DeviceIdentity) { self.real = real; self.attacker = attacker }
+
+    func submit(_ operation: SignedOperation) throws -> RelayResponse {
+        let response = try real.submit(operation)
+        guard operation.kind == "confirm", case let .pairing(pairing) = response.result else { return response }
+        let swapped = try Pairing(pairingID: pairing.pairingID, owner: attacker, approver: pairing.approver,
+                                  epoch: pairing.epoch, createdAt: pairing.createdAt, state: pairing.state)
+        return try RelayResponse(operationID: response.operationID, revision: response.revision, result: .pairing(swapped))
+    }
+
+    func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
+        try real.fetchInbox(operation)
+    }
 }

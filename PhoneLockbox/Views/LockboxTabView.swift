@@ -3,13 +3,16 @@ import FamilyControls
 
 struct LockboxTabView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
     @Binding var navigationPath: [QuickActionRoute.Destination]
     @State private var showingManualLock = false
     @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
     @State private var presentedFocusAction: ScreenTimeCoordinator.PendingQuickAction?
 
-    init(coordinator: ScreenTimeCoordinator, navigationPath: Binding<[QuickActionRoute.Destination]> = .constant([])) {
+    init(coordinator: ScreenTimeCoordinator, companion: CompanionCoordinator,
+        navigationPath: Binding<[QuickActionRoute.Destination]> = .constant([])) {
         self.coordinator = coordinator
+        self.companion = companion
         _navigationPath = navigationPath
     }
 
@@ -20,7 +23,7 @@ struct LockboxTabView: View {
             } else if coordinator.hasActiveLock {
                 ActiveLockView(coordinator: coordinator)
             } else {
-                UnlockedLockboxView(coordinator: coordinator, showingManualLock: $showingManualLock)
+                UnlockedLockboxView(coordinator: coordinator, companion: companion, showingManualLock: $showingManualLock)
             }
         }
         .lockboxScreen()
@@ -160,6 +163,7 @@ private struct SetupView: View {
 
 struct UnlockedLockboxView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
     @Binding var showingManualLock: Bool
 
     private var windDownStatusMessage: String {
@@ -201,7 +205,7 @@ struct UnlockedLockboxView: View {
                     LockboxValueRow(label: "Apps & categories", value: "\(coordinator.savedSelectedItemCount) selected")
                     Divider().overlay(LockboxTheme.border).padding(.vertical, 2)
                     NavigationLink {
-                        SettingsView(coordinator: coordinator)
+                        SettingsView(coordinator: coordinator, companion: companion)
                     } label: {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")

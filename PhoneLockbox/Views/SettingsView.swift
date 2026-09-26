@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
     @State private var showingDeveloperUnlock = false
     @State private var showingEmergencyReset = false
     @State private var showingDesignGallery = false
@@ -151,6 +152,7 @@ struct SettingsView: View {
 
             DeveloperToolsSection(
                 coordinator: coordinator,
+                companion: companion,
                 showingDeveloperUnlock: $showingDeveloperUnlock,
                 showingEmergencyReset: $showingEmergencyReset,
                 showingDesignGallery: $showingDesignGallery
@@ -205,14 +207,65 @@ private enum NotificationAccessPresentation {
 
 private struct DeveloperToolsSection: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
     @Binding var showingDeveloperUnlock: Bool
     @Binding var showingEmergencyReset: Bool
     @Binding var showingDesignGallery: Bool
+    @State private var relayURLDraft = ""
+    @State private var showingResetAnchorsConfirmation = false
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 14) {
                 LockboxSectionLabel("Developer", systemImage: "wrench.and.screwdriver")
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Companion relay address")
+                        .font(.subheadline.weight(.semibold))
+                    TextField(CompanionCoordinator.defaultRelayBaseURLString, text: $relayURLDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        #endif
+                        .onAppear { relayURLDraft = companion.relayBaseURLString }
+                        .onSubmit { applyRelayURL() }
+                        .accessibilityLabel("Companion relay address")
+                        .accessibilityHint("Defaults to the local relay at 127.0.0.1 port 8002")
+                    Button("Save relay address") { applyRelayURL() }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                    Text("Prototype — local relay only. On a device, set this to your Mac's LAN address so the People tab can reach it.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    Button("Reset relay anchors", role: .destructive) {
+                        showingResetAnchorsConfirmation = true
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                    Text("Clears the on-device rollback/fork protection checkpoints. Development use only — after a reset, a real regression or fork from the relay would no longer be detected until a new checkpoint is established.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    NavigationLink {
+                        CompanionPrototypeView()
+                    } label: {
+                        HStack {
+                            Label("Companion protocol demo", systemImage: "network")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(LockboxTheme.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens a low-level, simulated-relay protocol demo. It is separate from the real People tab and does not use the relay address above.")
+                    Text("A low-level protocol demo against a simulated, in-memory relay — separate from the real People tab above.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                }
+
+                Divider().overlay(LockboxTheme.border)
 
                 Button {
                     showingDesignGallery = true
@@ -296,5 +349,26 @@ private struct DeveloperToolsSection: View {
                 DiagnosticsSection(coordinator: coordinator)
             }
         }
+        .confirmationDialog(
+            "Reset relay anchors?",
+            isPresented: $showingResetAnchorsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset relay anchors", role: .destructive) {
+                companion.resetRelayAnchors()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Development-only. This clears rollback/fork protection checkpoints; a real regression or fork from the relay would go undetected until a new checkpoint is established.")
+        }
+    }
+
+    private func applyRelayURL() {
+        let trimmed = relayURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, URL(string: trimmed) != nil else {
+            relayURLDraft = companion.relayBaseURLString
+            return
+        }
+        companion.relayBaseURLString = trimmed
     }
 }
