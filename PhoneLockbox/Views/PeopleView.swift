@@ -25,10 +25,17 @@ struct PeopleView: View {
             InboxCard(companion: companion)
             if let error = companion.lastError {
                 LockboxCard {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                        .accessibilityElement(children: .combine)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                        if companion.needsRepair {
+                            Text("This device's companion key needs to be re-paired: create a new invite or accept one again.")
+                                .font(.footnote)
+                                .foregroundStyle(LockboxTheme.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
                 }
             }
 #else
@@ -70,10 +77,10 @@ private struct IntroCard: View {
             VStack(alignment: .leading, spacing: 13) {
                 HStack(spacing: 12) {
                     LockboxIconBadge(systemImage: "person.2.fill", color: LockboxTheme.accent)
-                    Text("A trusted person can help you recover")
+                    Text("Set up a trusted person")
                         .font(.title3.weight(.semibold))
                 }
-                Text("Pairing uses device-held identities confirmed with a six-digit code — no account or email is required. This does not use Screen Time, and app selections and usage are never shared.")
+                Text("Pairing uses device-held identities confirmed with a six-digit code — no account or email is required. A trusted person can approve ending one exact session early, but that approval isn't connected to your lock yet in this build. This does not use Screen Time, and app selections and usage are never shared.")
                     .font(.subheadline)
                     .foregroundStyle(LockboxTheme.secondary)
             }
@@ -84,8 +91,10 @@ private struct IntroCard: View {
 private struct InviteSomeoneCard: View {
     @ObservedObject var companion: CompanionCoordinator
     @State private var pastedAcceptance = ""
+    @State private var typedCode = ""
     @State private var nickname = ""
     @State private var isCreating = false
+    @State private var isConfirming = false
 
     var body: some View {
         LockboxCard {
@@ -114,7 +123,7 @@ private struct InviteSomeoneCard: View {
 
                 Divider().overlay(LockboxTheme.border)
 
-                Text("Once they accept, they'll send back an acceptance code. Paste it here and compare the six digits with what they see before confirming.")
+                Text("Once they accept, they'll send back an acceptance code. Paste it here, then ask them to read their six-digit code aloud and type exactly what they say below — don't read it off screen yourself.")
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
                 TextField("Paste acceptance code", text: $pastedAcceptance, axis: .vertical)
@@ -125,18 +134,27 @@ private struct InviteSomeoneCard: View {
                     #endif
                 if let acceptance = companion.decodeAcceptance(from: pastedAcceptance) {
                     VStack(alignment: .leading, spacing: 8) {
-                        LockboxValueRow(label: "Code", value: acceptance.verificationCode)
                         TextField("Name for this person", text: $nickname)
                             .textFieldStyle(.roundedBorder)
-                        Button("This matches — confirm") {
+                        TextField("Six-digit code they read aloud", text: $typedCode)
+                            .textFieldStyle(.roundedBorder)
+                            #if os(iOS)
+                            .keyboardType(.numberPad)
+                            #endif
+                            .accessibilityLabel("Six-digit code they read aloud")
+                        Button(isConfirming ? "Confirming…" : "Confirm") {
+                            isConfirming = true
                             Task {
-                                await companion.confirmAcceptance(acceptance, nickname: nickname)
-                                pastedAcceptance = ""
-                                nickname = ""
+                                await companion.confirmAcceptance(acceptance, typedVerificationCode: typedCode, nickname: nickname)
+                                isConfirming = false
+                                if companion.pendingAcceptance == nil {
+                                    pastedAcceptance = ""; typedCode = ""; nickname = ""
+                                }
                             }
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                        .accessibilityHint("Confirms this person as a trusted approver after you've verified the code matches")
+                        .disabled(typedCode.count != 6 || isConfirming)
+                        .accessibilityHint("Confirms this person as a trusted approver only if the typed code matches")
                     }
                 }
             }
@@ -176,7 +194,7 @@ private struct AcceptInviteCard: View {
                 if let acceptance = companion.pendingAcceptance {
                     VStack(alignment: .leading, spacing: 8) {
                         LockboxValueRow(label: "Your code", value: acceptance.verificationCode)
-                        Text("Show them this code, or share the text below, so they can confirm it matches before pairing completes.")
+                        Text("Read this code aloud to them, or share the text below, so they can type it in to confirm.")
                             .font(.footnote)
                             .foregroundStyle(LockboxTheme.secondary)
                         ShareLink(item: companion.acceptanceShareText(acceptance)) {
@@ -227,6 +245,7 @@ private struct OwnerPersonRow: View {
     @ObservedObject var companion: CompanionCoordinator
     let person: CompanionPerson
     @State private var isBusy = false
+    @State private var showingRemoveConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -235,23 +254,36 @@ private struct OwnerPersonRow: View {
                 Spacer()
                 LockboxStatusBadge(title: statusTitle, color: statusColor)
             }
+            Toggle("Can approve early end", isOn: Binding(
+                get: { person.hasGrantedApproveEarlyEnd },
+                set: { enabled in run { await companion.setOwnerGrant(.approveEarlyEnd, enabled: enabled, for: person) } }
+            ))
+            .tint(LockboxTheme.accent)
+            .disabled(isBusy)
+            Toggle("Receives my requests", isOn: Binding(
+                get: { person.hasGrantedReceiveRequests },
+                set: { enabled in run { await companion.setOwnerGrant(.receiveRequests, enabled: enabled, for: person) } }
+            ))
+            .tint(LockboxTheme.accent)
+            .disabled(isBusy)
             Text(statusDetail)
                 .font(.footnote)
                 .foregroundStyle(LockboxTheme.secondary)
-            HStack(spacing: 10) {
-                if person.hasGrantedApproveEarlyEnd {
-                    Button("Turn off", role: .destructive) { run { await companion.revokeEarlyEndTrust(person) } }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-                } else {
-                    Button("Allow early-end requests") { run { await companion.grantEarlyEndTrust(person) } }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                }
-                Button("Remove", role: .destructive) { run { await companion.revokePairing(person) } }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-            }
-            .disabled(isBusy)
+            Button("Remove", role: .destructive) { showingRemoveConfirmation = true }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                .disabled(isBusy)
         }
         .accessibilityElement(children: .contain)
+        .confirmationDialog(
+            "Remove \(person.nickname)?",
+            isPresented: $showingRemoveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { run { await companion.revokePairing(person) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This revokes their pairing. They will no longer be able to approve early-end requests for you.")
+        }
     }
 
     private func run(_ action: @escaping () async -> Void) {
@@ -290,24 +322,26 @@ private struct ApproverPersonRow: View {
             HStack {
                 Text(person.nickname).font(.subheadline.weight(.semibold))
                 Spacer()
-                LockboxStatusBadge(title: person.hasAcceptedApproveEarlyEnd ? "Accepted" : "Pending",
-                                   color: person.hasAcceptedApproveEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary)
+                LockboxStatusBadge(title: person.isFullyTrustedForEarlyEnd ? "Accepted" : "Pending",
+                                   color: person.isFullyTrustedForEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary)
             }
-            Text(person.hasAcceptedApproveEarlyEnd
+            Toggle("Can approve early end", isOn: Binding(
+                get: { person.hasAcceptedApproveEarlyEnd },
+                set: { enabled in run { await companion.setApproverAccept(.approveEarlyEnd, enabled: enabled, for: person) } }
+            ))
+            .tint(LockboxTheme.accent)
+            .disabled(isBusy || !person.hasGrantedApproveEarlyEnd)
+            Toggle("Receives their requests", isOn: Binding(
+                get: { person.hasAcceptedReceiveRequests },
+                set: { enabled in run { await companion.setApproverAccept(.receiveRequests, enabled: enabled, for: person) } }
+            ))
+            .tint(LockboxTheme.accent)
+            .disabled(isBusy || !person.hasGrantedReceiveRequests)
+            Text(person.isFullyTrustedForEarlyEnd
                  ? "You can approve their exact-session early-end requests."
-                 : "They've asked you to help. Accept only if you understand this only approves ending one exact current session.")
+                 : "They've asked you to help. Accept only if you understand this only approves ending one exact current session — it never starts, extends, or controls their lock.")
                 .font(.footnote)
                 .foregroundStyle(LockboxTheme.secondary)
-            HStack(spacing: 10) {
-                if person.hasAcceptedApproveEarlyEnd {
-                    Button("Turn off", role: .destructive) { run { await companion.revokeEarlyEndTrust(person) } }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-                } else {
-                    Button("Accept") { run { await companion.acceptEarlyEndTrust(person) } }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                }
-            }
-            .disabled(isBusy)
         }
         .accessibilityElement(children: .contain)
     }
@@ -403,7 +437,7 @@ private struct InboxRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(item.isMine ? "Your request" : "Request for your help")
+                Text(item.isMine ? "Your request" : title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 LockboxStatusBadge(title: item.status.rawValue.capitalized, color: color(for: item.status))
@@ -422,6 +456,14 @@ private struct InboxRow: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// "Who is asking" for a friend inbox row: the requesting owner's known
+    /// nickname when this device has paired with them, otherwise a neutral
+    /// fallback rather than a raw identifier.
+    private var title: String {
+        let name = companion.personName(forIdentityID: item.request.owner.identityID) ?? "Someone you're paired with"
+        return "\(name) is asking for help"
     }
 
     private func respond(_ decision: CompanionKit.ApproverDecision) {

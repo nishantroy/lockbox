@@ -185,9 +185,18 @@ final class ScreenTimeCoordinator: ObservableObject {
     var companionActiveSessionIdentity: (sessionID: String, activeSetID: String, start: Date, end: Date)? {
         let sessions = enforcementSessions(at: currentDate())
         guard sessions.count == 1, let session = sessions.first else { return nil }
-        let digest = SHA256.hash(data: session.policy.selectionData)
-        let activeSetID = digest.map { String(format: "%02x", $0) }.joined()
-        return (session.id.uuidString, activeSetID, session.start, session.end)
+        return (session.id.uuidString, Self.companionActiveSetID(for: sessions), session.start, session.end)
+    }
+
+    /// Derived from session **identity only** — `SHA256("PhoneLockbox.active-set.v1" || sorted session IDs)`
+    /// — never from `RuntimeSession.policy.selectionData` (the restricted
+    /// app/category selection). A companion request must not be able to
+    /// fingerprint which apps are blocked, even indirectly through a hash.
+    static func companionActiveSetID(for sessions: [RuntimeSession]) -> String {
+        let sortedIDs = sessions.map { $0.id.uuidString }.sorted()
+        let input = (["PhoneLockbox.active-set.v1"] + sortedIDs).joined(separator: "|")
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     var nextScheduledStart: Date? {

@@ -11,7 +11,8 @@ public protocol AsyncCompanionTransport: Sendable {
     /// signed. The HTTP relay (v1) has no dedicated consent-read endpoint, so
     /// `HTTPCompanionTransport` does not implement this; callers must supply
     /// the last known `RelationshipConsent` (returned by a prior grant/accept
-    /// call) directly to `AsyncCompanionClient.requestUnlock`.
+    /// call, or by a prior inbox fetch's `consents`) directly to
+    /// `AsyncCompanionClient.requestUnlock`.
     func consent(relationshipID: String) async throws -> RelationshipConsent
 
     /// A successful response includes the committed owner-scoped revision
@@ -34,14 +35,19 @@ public extension AsyncCompanionTransport {
 // MARK: - Transport error code mapping
 
 public extension CompanionError {
-    /// Reconstructs a `CompanionError` from the wire code produced by
-    /// `transportCode`. Error bodies are `{ "error": "<code>" }` only, so
-    /// associated values that are not carried on the wire (for example the
-    /// specific revisions in `staleRevision`) come back as `0`; callers that
-    /// need the exact expected/actual revision should read it from the
-    /// enclosing `RelayResponse`/anchor instead of this reconstructed error.
+    /// Reconstructs a `CompanionError` from the wire code produced by the
+    /// relay. Codes mirror both `CompanionError.transportCode` and
+    /// `DurableRelayError` (the durable relay's own vocabulary — see
+    /// `CompanionRelayService/Sources/CompanionRelayService/DurableOperation.swift`),
+    /// since the deployed relay's reducer is a port of both. Error bodies are
+    /// `{ "error": "<code>" }` only, so associated values that are not
+    /// carried on the wire (for example the specific revisions in
+    /// `staleRevision`) come back as `0`; callers that need the exact
+    /// expected/actual revision should read it from the enclosing
+    /// `RelayResponse`/anchor instead of this reconstructed error.
     static func fromTransportCode(_ code: String) -> CompanionError {
         switch code {
+        // CompanionError's own vocabulary.
         case "stale_revision": return .staleRevision(expected: 0, actual: 0)
         case "operation_conflict": return .operationConflict
         case "missing_operation_revision": return .missingOperationRevision
@@ -62,6 +68,21 @@ public extension CompanionError {
         case "unsupported_scope": return .unsupportedScope
         case "consent_required": return .consentRequired
         case "malformed": return .malformed("relay rejected the operation")
+        // DurableRelayError's vocabulary (the durable relay's own error
+        // enum). None of these have a distinct CompanionError case, so they
+        // map to `.malformed` with a code-specific, distinguishable message
+        // rather than collapsing into a single generic string.
+        case "invalid_envelope": return .malformed("invalid operation envelope")
+        case "invalid_operation_id": return .malformed("invalid operation ID")
+        case "idempotency_conflict": return .operationConflict
+        case "unknown_owner": return .unknownIdentity
+        case "ambiguous_owner": return .malformed("ambiguous owner")
+        case "response_corrupt": return .malformed("relay response is corrupt")
+        case "revision_overflow": return .malformed("revision exhausted")
+        case "epoch_overflow": return .malformed("epoch exhausted")
+        case "unsupported_operation": return .malformed("unsupported operation")
+        case "mutation_changed_revision": return .malformed("mutation changed revision unexpectedly")
+        case "payload_too_large": return .malformed("payload too large")
         default: return .malformed("unrecognized relay error: \(code)")
         }
     }
@@ -69,13 +90,27 @@ public extension CompanionError {
 
 // MARK: - Rollback anchor
 
-/// Storage for the per-owner `(revision, stateRoot)` rollback/fork anchor.
-/// The embedding must keep this in trusted, monotonic, App Group-capable
-/// storage (see `docs/companion-security.md`); it must not be derived from,
-/// or copied beside, the mutable local cache it is meant to protect.
+/// Storage for the per-`(relay base URL, owner)` rollback/fork anchor. The
+/// embedding must keep this in trusted, monotonic, App Group-capable storage
+/// (see `docs/companion-security.md`); it must not be derived from, or
+/// copied beside, the mutable local cache it is meant to protect.
+///
+/// `withCheckpoint` is the only mutating entry point so an implementation can
+/// make "load current value, decide, save new value" atomic under one lock —
+/// `RollbackAnchor` relies on that to avoid a load/decide/save race between
+/// concurrent callers.
 public protocol RollbackAnchorStore: Sendable {
-    func loadCheckpoint(ownerIdentityID: String) -> CompanionCheckpoint?
-    func saveCheckpoint(_ checkpoint: CompanionCheckpoint) throws
+    /// Loads the current checkpoint for `key` (or `nil` if none exists yet),
+    /// passes it to `mutate`, and — if `mutate` returns a non-nil checkpoint —
+    /// persists that checkpoint before returning `mutate`'s result. The whole
+    /// sequence must happen under one lock. A stored checkpoint that fails to
+    /// decode must throw (fail closed), never silently read back as `nil`.
+    func withCheckpoint<T: Sendable>(forKey key: String, _ mutate: (CompanionCheckpoint?) throws -> (T, CompanionCheckpoint?)) throws -> T
+
+    /// Deletes every stored checkpoint. Used only by an explicit developer
+    /// action ("Reset relay anchors"); never called from ordinary request
+    /// handling.
+    func resetAll() throws
 }
 
 /// Reference/test adapter. Not durable across process restarts; production
@@ -86,14 +121,16 @@ public final class InMemoryRollbackAnchorStore: RollbackAnchorStore, @unchecked 
 
     public init() {}
 
-    public func loadCheckpoint(ownerIdentityID: String) -> CompanionCheckpoint? {
+    public func withCheckpoint<T: Sendable>(forKey key: String, _ mutate: (CompanionCheckpoint?) throws -> (T, CompanionCheckpoint?)) throws -> T {
         lock.lock(); defer { lock.unlock() }
-        return values[ownerIdentityID]
+        let (result, newValue) = try mutate(values[key])
+        if let newValue { values[key] = newValue }
+        return result
     }
 
-    public func saveCheckpoint(_ checkpoint: CompanionCheckpoint) throws {
+    public func resetAll() throws {
         lock.lock(); defer { lock.unlock() }
-        values[checkpoint.ownerIdentityID] = checkpoint
+        values.removeAll()
     }
 }
 
@@ -103,35 +140,54 @@ public final class InMemoryRollbackAnchorStore: RollbackAnchorStore, @unchecked 
 public final class UserDefaultsRollbackAnchorStore: RollbackAnchorStore, @unchecked Sendable {
     private let defaults: UserDefaults
     private let lock = NSLock()
+    private static let keyPrefix = "com.phone-lockbox.companion.anchor."
+    private static let indexKey = "com.phone-lockbox.companion.anchor.index"
 
     public init(defaults: UserDefaults) {
         self.defaults = defaults
     }
 
-    public func loadCheckpoint(ownerIdentityID: String) -> CompanionCheckpoint? {
+    public func withCheckpoint<T: Sendable>(forKey key: String, _ mutate: (CompanionCheckpoint?) throws -> (T, CompanionCheckpoint?)) throws -> T {
         lock.lock(); defer { lock.unlock() }
-        guard let data = defaults.data(forKey: Self.key(ownerIdentityID)) else { return nil }
-        return try? JSONDecoder().decode(CompanionCheckpoint.self, from: data)
+        let storageKey = Self.keyPrefix + key
+        let current: CompanionCheckpoint?
+        if let data = defaults.data(forKey: storageKey) {
+            // A corrupt stored checkpoint must fail closed: it must never be
+            // treated as "no anchor yet", since that would silently disable
+            // rollback protection for a key that was already anchored.
+            guard let decoded = try? JSONDecoder().decode(CompanionCheckpoint.self, from: data) else {
+                throw CompanionError.malformed("stored companion relay anchor is corrupt")
+            }
+            current = decoded
+        } else {
+            current = nil
+        }
+        let (result, newValue) = try mutate(current)
+        if let newValue {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            defaults.set(try encoder.encode(newValue), forKey: storageKey)
+            var index = Set((defaults.array(forKey: Self.indexKey) as? [String]) ?? [])
+            if index.insert(key).inserted {
+                defaults.set(Array(index), forKey: Self.indexKey)
+            }
+        }
+        return result
     }
 
-    public func saveCheckpoint(_ checkpoint: CompanionCheckpoint) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(checkpoint)
+    public func resetAll() throws {
         lock.lock(); defer { lock.unlock() }
-        defaults.set(data, forKey: Self.key(checkpoint.ownerIdentityID))
-    }
-
-    private static func key(_ ownerIdentityID: String) -> String {
-        "com.phone-lockbox.companion.anchor.\(ownerIdentityID)"
+        let index = (defaults.array(forKey: Self.indexKey) as? [String]) ?? []
+        for key in index { defaults.removeObject(forKey: Self.keyPrefix + key) }
+        defaults.removeObject(forKey: Self.indexKey)
     }
 }
 
 /// Validates an incoming `(revision, stateRoot)` pair against the last
-/// accepted checkpoint for that owner and persists the result. A lower
-/// revision, or a different root at an already-seen revision, is rejected —
-/// this is the on-device rollback/fork detector described in
+/// accepted checkpoint for `(relayBaseURL, ownerIdentityID)` and persists the
+/// result — the on-device rollback/fork detector described in
 /// `docs/r5-relay-plan.md` (Architecture: "Independent monotonic anchor").
+/// Keying by relay base URL as well as owner ID keeps a dev/staging relay
+/// from colliding with a production one that happens to reuse an owner ID.
 public struct RollbackAnchor: Sendable {
     private let store: any RollbackAnchorStore
 
@@ -139,26 +195,44 @@ public struct RollbackAnchor: Sendable {
         self.store = store
     }
 
-    public func currentCheckpoint(ownerIdentityID: String) -> CompanionCheckpoint? {
-        store.loadCheckpoint(ownerIdentityID: ownerIdentityID)
+    static func storageKey(relayBaseURL: String, ownerIdentityID: String) -> String {
+        "\(relayBaseURL)#\(ownerIdentityID)"
     }
 
+    /// - Parameter enforceIfNoCheckpoint: Governs behavior only when there is
+    ///   **no existing checkpoint** for this key yet. Once a checkpoint
+    ///   exists, a missing state root is always rejected and the revision may
+    ///   never regress, regardless of this flag — an anchor cannot be turned
+    ///   back off for a key it has already started protecting.
     @discardableResult
-    public func accept(ownerIdentityID: String, revision: UInt64, stateRoot: Data) throws -> CompanionCheckpoint {
-        if let previous = store.loadCheckpoint(ownerIdentityID: ownerIdentityID) {
-            guard revision >= previous.revision else {
-                throw CompanionError.staleRevision(expected: previous.revision, actual: revision)
+    public func accept(relayBaseURL: String, ownerIdentityID: String, revision: UInt64, stateRoot: Data?,
+                       enforceIfNoCheckpoint: Bool) throws -> CompanionCheckpoint? {
+        let key = Self.storageKey(relayBaseURL: relayBaseURL, ownerIdentityID: ownerIdentityID)
+        return try store.withCheckpoint(forKey: key) { previous in
+            if previous == nil, stateRoot == nil, !enforceIfNoCheckpoint {
+                return (nil, nil)
             }
-            if revision == previous.revision {
-                guard stateRoot == previous.stateRoot else {
-                    throw CompanionError.malformed("conflicting relay state root at revision \(revision)")
+            guard let stateRoot else {
+                throw CompanionError.malformed("relay response is missing a state root")
+            }
+            if let previous {
+                guard revision >= previous.revision else {
+                    throw CompanionError.staleRevision(expected: previous.revision, actual: revision)
                 }
-                return previous
+                if revision == previous.revision {
+                    guard stateRoot == previous.stateRoot else {
+                        throw CompanionError.malformed("conflicting relay state root at revision \(revision)")
+                    }
+                    return (previous, nil)
+                }
             }
+            let checkpoint = try CompanionCheckpoint(ownerIdentityID: ownerIdentityID, revision: revision, stateRoot: stateRoot)
+            return (checkpoint, checkpoint)
         }
-        let checkpoint = try CompanionCheckpoint(ownerIdentityID: ownerIdentityID, revision: revision, stateRoot: stateRoot)
-        try store.saveCheckpoint(checkpoint)
-        return checkpoint
+    }
+
+    public func resetAll() throws {
+        try store.resetAll()
     }
 }
 
@@ -175,30 +249,26 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
     private let session: URLSession
     private let anchor: RollbackAnchor?
     private let enforceStateRoot: Bool
-    private let fallbackOwnerIdentityID: (@Sendable () -> String?)?
 
     /// - Parameters:
     ///   - baseURL: Relay base URL, for example `http://127.0.0.1:8002`.
     ///   - session: Injectable for tests (a `URLProtocol`-stubbed session).
-    ///   - anchorStore: When supplied, every accepted response is checked
-    ///     against, and folded into, the rollback anchor before being
-    ///     returned to the caller.
-    ///   - enforceStateRoot: When `true` (the default), a response that is
-    ///     missing a state root or owner identity is rejected once an anchor
-    ///     store is configured, so a relay that has not yet implemented
-    ///     anchoring cannot silently disable rollback protection. Set to
-    ///     `false` only for interim integration testing against a relay
-    ///     build that does not populate these fields yet.
-    ///   - fallbackOwnerIdentityID: Used only if a response omits
-    ///     `ownerIdentityID` (the current `RelayResponse` shape may, since
-    ///     the field was added additively in this slice).
+    ///   - anchorStore: When supplied, every response to an owner-signed
+    ///     operation is checked against, and folded into, the rollback
+    ///     anchor before being returned to the caller. Helper-signed
+    ///     operations and a pure helper inbox are never anchored — per the
+    ///     relay contract, `ownerIdentityID`/`stateRoot` on those responses
+    ///     either name a different person's ledger or are omitted entirely.
+    ///   - enforceStateRoot: Governs behavior only the first time a given
+    ///     `(baseURL, owner)` key is seen (default `true`, fail closed). Once
+    ///     a checkpoint exists for that key, a missing root is always
+    ///     rejected regardless of this flag.
     public init(baseURL: URL, session: URLSession = .shared, anchorStore: (any RollbackAnchorStore)? = nil,
-                enforceStateRoot: Bool = true, fallbackOwnerIdentityID: (@Sendable () -> String?)? = nil) {
+                enforceStateRoot: Bool = true) {
         self.baseURL = baseURL
         self.session = session
         self.anchor = anchorStore.map(RollbackAnchor.init(store:))
         self.enforceStateRoot = enforceStateRoot
-        self.fallbackOwnerIdentityID = fallbackOwnerIdentityID
     }
 
     public func submit(_ operation: SignedOperation) async throws -> RelayResponse {
@@ -206,15 +276,15 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         guard response.operationID == operation.operationID else {
             throw CompanionTransportError.malformedResponse
         }
-        try validateAnchor(revision: response.revision, stateRoot: response.stateRoot,
-                            ownerIdentityID: response.ownerIdentityID)
+        try validateAnchor(for: operation, revision: response.revision, stateRoot: response.stateRoot,
+                           ownerIdentityID: response.ownerIdentityID)
         return response
     }
 
     public func fetchInbox(_ operation: SignedOperation) async throws -> InboxResponse {
         let response: InboxResponse = try await post(path: "v1/inbox", body: operation)
-        try validateAnchor(revision: response.revision, stateRoot: response.stateRoot,
-                            ownerIdentityID: response.ownerIdentityID)
+        try validateAnchor(for: operation, revision: response.revision, stateRoot: response.stateRoot,
+                           ownerIdentityID: response.ownerIdentityID)
         return response
     }
 
@@ -232,18 +302,33 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         return (try? JSONDecoder().decode(Health.self, from: data))?.ok ?? false
     }
 
-    private func validateAnchor(revision: UInt64, stateRoot: Data?, ownerIdentityID: String?) throws {
+    /// Anchors only a response to an operation this device's **owner**
+    /// identity signed, and only when the relay attributes that response to
+    /// that same owner identity. This is deliberate: a helper-signed
+    /// operation's `ownerIdentityID` (per the v1.1 relay contract) names the
+    /// *other* person's ledger, and a pure helper inbox omits
+    /// `ownerIdentityID`/`stateRoot` entirely because it can span many
+    /// owners' ledgers. Neither should be folded into this device's own
+    /// rollback anchor.
+    private func validateAnchor(for operation: SignedOperation, revision: UInt64, stateRoot: Data?,
+                                ownerIdentityID: String?) throws {
         guard let anchor else { return }
-        guard let stateRoot else {
-            if enforceStateRoot { throw CompanionTransportError.server(.malformed("relay response is missing a state root")) }
+        guard operation.signer.role == .owner else { return }
+        guard let ownerIdentityID else {
+            if enforceStateRoot {
+                throw CompanionTransportError.server(.malformed("relay response for an owner-signed operation is missing its owner identity"))
+            }
             return
         }
-        guard let ownerID = ownerIdentityID ?? fallbackOwnerIdentityID?() else {
-            if enforceStateRoot { throw CompanionTransportError.server(.malformed("relay response is missing an owner identity for anchoring")) }
-            return
+        guard ownerIdentityID == operation.signer.identityID else {
+            // A hard integrity violation, not a "no anchor yet" situation —
+            // reject regardless of enforceStateRoot.
+            throw CompanionTransportError.server(.malformed("relay response owner identity does not match the signing owner"))
         }
+        try operation.signer.validate()
         do {
-            try anchor.accept(ownerIdentityID: ownerID, revision: revision, stateRoot: stateRoot)
+            try anchor.accept(relayBaseURL: baseURL.absoluteString, ownerIdentityID: ownerIdentityID,
+                              revision: revision, stateRoot: stateRoot, enforceIfNoCheckpoint: enforceStateRoot)
         } catch let error as CompanionError {
             throw CompanionTransportError.server(error)
         }
@@ -296,8 +381,8 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         case 400: return "malformed"
         case 401: return "invalid_signature"
         case 403: return "unauthorized"
-        case 409: return "operation_conflict"
-        case 413: return "malformed"
+        case 409: return "stale_revision"
+        case 413: return "payload_too_large"
         case 429: return "rate_limited"
         default: return "malformed"
         }
@@ -408,7 +493,8 @@ public struct AsyncCompanionClient: Sendable {
     /// Targets are explicit identities, each paired to the exact pairing and
     /// bilateral consent generation the caller currently knows about (there
     /// is no HTTP consent-read endpoint in v1; the caller supplies the
-    /// `RelationshipConsent` last returned by a grant/accept call).
+    /// `RelationshipConsent` last returned by a grant/accept call, or by a
+    /// prior inbox fetch's `consents`).
     public func requestUnlock(requestID: String, pairings: [Pairing], consents: [RelationshipConsent],
                               session: ActiveSession, targets: [String], validFor: TimeInterval) async throws -> TrustedRequest {
         guard !pairings.isEmpty, pairings.count == targets.count, pairings.count == consents.count,
@@ -467,7 +553,13 @@ public struct AsyncCompanionClient: Sendable {
         _ = try await submit("revoke", PairingReference(pairingID: pairing.pairingID, epoch: pairing.epoch))
     }
 
-    public func fetchInbox() async throws -> [TrustedRequest] {
+    /// The full inbox response, including — per the v1.1 relay contract —
+    /// `pairings` (every pairing where this identity is the owner or the
+    /// approver) and `consents` (the current, generation-bearing consent for
+    /// each of those pairings). `ownerIdentityID`/`stateRoot` are present
+    /// only when this identity is fetching its own ledger as an owner; they
+    /// are `nil` for a pure helper inbox.
+    public func fetchInboxResponse() async throws -> InboxResponse {
         let query = InboxQuery(identityID: signer.identity.identityID)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -482,9 +574,13 @@ public struct AsyncCompanionClient: Sendable {
                                             kind: "inbox", signer: signer.identity, body: body,
                                             signature: signature)
         let response = try await transport.fetchInbox(operation)
-        guard response.ownerIdentityID == signer.identity.identityID else {
+        if let ownerIdentityID = response.ownerIdentityID, ownerIdentityID != signer.identity.identityID {
             throw CompanionError.malformed("inbox response owner mismatch")
         }
-        return response.requests
+        return response
+    }
+
+    public func fetchInbox() async throws -> [TrustedRequest] {
+        try await fetchInboxResponse().requests
     }
 }

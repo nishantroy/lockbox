@@ -4,11 +4,12 @@ import Foundation
 import CompanionKit
 
 /// Local-only registry entry for one paired relationship. The relay (v1) has
-/// no "list my pairings" or "read consent" endpoint, so the device's own
-/// cache of `Pairing`/`RelationshipConsent` — updated whenever a mutation
-/// succeeds — is the only place this information lives on this device. This
-/// mirrors the architecture note that the owner's device, not the relay, is
-/// the thing this prototype trusts to remember its own state.
+/// no "list my pairings" endpoint outside of `/v1/inbox`'s `pairings`/
+/// `consents` arrays, so the device's own cache — refreshed on every inbox
+/// fetch, and updated whenever a mutation this device makes succeeds — is
+/// the only place this information lives on this device. This mirrors the
+/// architecture note that the owner's device, not the relay, is the thing
+/// this prototype trusts to remember its own state.
 struct CompanionPerson: Codable, Identifiable, Hashable {
     enum LocalRole: String, Codable {
         /// This pairing is for *my* lockbox; `pairing.approver` is the
@@ -25,13 +26,10 @@ struct CompanionPerson: Codable, Identifiable, Hashable {
     var pairing: Pairing
     var consent: RelationshipConsent?
 
-    var hasGrantedApproveEarlyEnd: Bool {
-        consent?.ownerScopes.contains(.approveEarlyEnd) ?? false
-    }
-
-    var hasAcceptedApproveEarlyEnd: Bool {
-        consent?.approverScopes.contains(.approveEarlyEnd) ?? false
-    }
+    var hasGrantedApproveEarlyEnd: Bool { consent?.ownerScopes.contains(.approveEarlyEnd) ?? false }
+    var hasGrantedReceiveRequests: Bool { consent?.ownerScopes.contains(.receiveRequests) ?? false }
+    var hasAcceptedApproveEarlyEnd: Bool { consent?.approverScopes.contains(.approveEarlyEnd) ?? false }
+    var hasAcceptedReceiveRequests: Bool { consent?.approverScopes.contains(.receiveRequests) ?? false }
 
     var isFullyTrustedForEarlyEnd: Bool {
         consent?.authorizes(.approveEarlyEnd) ?? false
@@ -76,6 +74,10 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var inboxItems: [CompanionInboxItem] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastError: String?
+    /// Set only when a signer's private key could not be loaded from the
+    /// Keychain, so the People tab can offer a distinct "re-pair" affordance
+    /// instead of a generic error.
+    @Published private(set) var needsRepair = false
     @Published var pendingInvitation: Invitation?
     @Published var pendingAcceptance: PairingAcceptance?
 
@@ -94,11 +96,24 @@ final class CompanionCoordinator: ObservableObject {
         sharedDefaults: UserDefaults? = nil,
         makeSession: @escaping @Sendable () -> URLSession = { URLSession(configuration: .ephemeral) }) {
         self.keyStore = keyStore ?? KeychainDeviceKeyStore(service: Self.keychainService)
-        let defaults = sharedDefaults ?? UserDefaults(suiteName: Self.appGroupIdentifier) ?? .standard
-        self.sharedDefaults = defaults
-        self.anchorStore = UserDefaultsRollbackAnchorStore(defaults: defaults)
-        self.relayBaseURLString = defaults.string(forKey: Self.relayBaseURLDefaultsKey) ?? Self.defaultRelayBaseURLString
+        var startupError: String?
+        let resolvedDefaults: UserDefaults
+        if let sharedDefaults {
+            resolvedDefaults = sharedDefaults
+        } else if let groupDefaults = UserDefaults(suiteName: Self.appGroupIdentifier) {
+            resolvedDefaults = groupDefaults
+        } else {
+            // Fail visibly rather than silently writing companion pairing
+            // data into `.standard`, which is not App Group storage and is
+            // shared with unrelated app state.
+            resolvedDefaults = UserDefaults(suiteName: "com.phone-lockbox.companion.unavailable.\(UUID().uuidString)") ?? .standard
+            startupError = "The shared App Group storage is unavailable. Companion pairing data will not be saved between launches."
+        }
+        self.sharedDefaults = resolvedDefaults
+        self.anchorStore = UserDefaultsRollbackAnchorStore(defaults: resolvedDefaults)
+        self.relayBaseURLString = resolvedDefaults.string(forKey: Self.relayBaseURLDefaultsKey) ?? Self.defaultRelayBaseURLString
         self.makeSession = makeSession
+        self.lastError = startupError
         loadIdentities()
         loadPeople()
     }
@@ -156,13 +171,18 @@ final class CompanionCoordinator: ObservableObject {
         savePeople()
     }
 
+    /// Looks up a known person's display name for `identityID`, wherever it
+    /// appears as either side of a pairing this device knows about.
+    func personName(forIdentityID identityID: String) -> String? {
+        people.first { $0.pairing.owner.identityID == identityID || $0.pairing.approver.identityID == identityID }?.nickname
+    }
+
     // MARK: - Transport
 
     private func makeClient(signer: DeviceSigner) -> AsyncCompanionClient {
         let baseURL = URL(string: relayBaseURLString) ?? URL(string: Self.defaultRelayBaseURLString)!
-        let ownerID = ownerIdentity?.identityID
         let transport = HTTPCompanionTransport(baseURL: baseURL, session: makeSession(), anchorStore: anchorStore,
-                                               enforceStateRoot: false, fallbackOwnerIdentityID: { ownerID })
+                                               enforceStateRoot: true)
         return AsyncCompanionClient(signer: signer, transport: transport)
     }
 
@@ -171,7 +191,16 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     private func fail(_ error: Error) {
+        needsRepair = Self.isKeyUnavailable(error)
         lastError = Self.describe(error)
+    }
+
+    private static func isKeyUnavailable(_ error: Error) -> Bool {
+        switch error {
+        case CompanionError.keyUnavailable: return true
+        case CompanionTransportError.server(.keyUnavailable): return true
+        default: return false
+        }
     }
 
     private static func describe(_ error: Error) -> String {
@@ -191,12 +220,17 @@ final class CompanionCoordinator: ObservableObject {
 
     private static func describeCompanionError(_ error: CompanionError) -> String {
         switch error {
-        case .keyUnavailable: return "This device's companion key is unavailable and needs to be re-paired."
+        case .keyUnavailable:
+            return "This device's companion key is unavailable and needs to be re-paired."
         case .expired: return "That invitation or request has expired."
         case .wrongVerificationCode: return "That code doesn't match. Double-check it with the other person."
         case .revokedPairing: return "That pairing has been revoked."
         case .rateLimited: return "Too many attempts. Wait a moment and try again."
         case .consentRequired: return "That person hasn't accepted early-end trust yet."
+        case .malformed(let detail) where detail.localizedCaseInsensitiveContains("state root")
+            || detail.localizedCaseInsensitiveContains("owner identity")
+            || detail.localizedCaseInsensitiveContains("anchor"):
+            return "The relay's response failed an integrity check (\(detail)). Treating this as untrusted; nothing was changed here."
         default: return "The relay rejected that action (\(error.transportCode))."
         }
     }
@@ -209,7 +243,7 @@ final class CompanionCoordinator: ObservableObject {
             let client = makeClient(signer: try signer(for: identity))
             let invitation = try await client.createInvite(inviteID: UUID().uuidString, validFor: 3_600, now: Date())
             pendingInvitation = invitation
-            lastError = nil
+            lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
 
@@ -224,7 +258,7 @@ final class CompanionCoordinator: ObservableObject {
             let client = makeClient(signer: try signer(for: identity))
             let acceptance = try await client.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
             pendingAcceptance = acceptance
-            lastError = nil
+            lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
 
@@ -232,7 +266,9 @@ final class CompanionCoordinator: ObservableObject {
     /// `Invitation.shareLink`. There is no relay endpoint to list pending
     /// acceptances (v1 has only operations/inbox/health), so the friend
     /// shares this back to the owner out of band, the same way the invite
-    /// itself was shared.
+    /// itself was shared. It never includes the verification code in a form
+    /// meant to be read visually — the owner types the code the friend reads
+    /// aloud, so a copied link alone cannot complete pairing.
     func acceptanceShareText(_ acceptance: PairingAcceptance) -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(acceptance)) ?? Data()
@@ -246,49 +282,63 @@ final class CompanionCoordinator: ObservableObject {
         return try? JSONDecoder().decode(PairingAcceptance.self, from: data)
     }
 
-    func confirmAcceptance(_ acceptance: PairingAcceptance, nickname: String) async {
+    /// `typedVerificationCode` is whatever the owner typed after hearing the
+    /// friend read their six digits aloud — never the code decoded from
+    /// `acceptance` itself. The relay rejects a mismatch with
+    /// `wrongVerificationCode`; this is the actual security check, not a
+    /// local string comparison.
+    func confirmAcceptance(_ acceptance: PairingAcceptance, typedVerificationCode: String, nickname: String) async {
         do {
             let identity = try ensureIdentity(role: .owner)
             let client = makeClient(signer: try signer(for: identity))
-            let pairing = try await client.confirm(acceptance, verificationCode: acceptance.verificationCode, now: Date())
-            upsertPerson(pairing: pairing, localRole: .iAmOwner,
-                        nickname: nickname.isEmpty ? nil : nickname)
+            let pairing = try await client.confirm(acceptance, verificationCode: typedVerificationCode, now: Date())
+            upsertPerson(pairing: pairing, localRole: .iAmOwner, nickname: nickname.isEmpty ? nil : nickname)
             pendingAcceptance = nil
-            lastError = nil
+            lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
 
-    // MARK: - Consent
+    // MARK: - Consent (two independent scopes, per person)
 
-    func grantEarlyEndTrust(_ person: CompanionPerson) async {
+    /// Owner side: grant or revoke exactly one scope for `person`, leaving
+    /// the other scope's grant untouched. `grantScopes`/`acceptScopes`
+    /// replace the full scope set, so this reads the current set from cached
+    /// consent, adds/removes just `scope`, and resubmits; `revokeScopes` is
+    /// already subtractive.
+    func setOwnerGrant(_ scope: CompanionScope, enabled: Bool, for person: CompanionPerson) async {
         guard person.localRole == .iAmOwner else { return }
         do {
             let identity = try ensureIdentity(role: .owner)
             let client = makeClient(signer: try signer(for: identity))
-            let consent = try await client.grantScopes(pairing: person.pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+            let consent: RelationshipConsent
+            if enabled {
+                var scopes = Set(person.consent?.ownerScopes ?? [])
+                scopes.insert(scope)
+                consent = try await client.grantScopes(pairing: person.pairing, scopes: Array(scopes))
+            } else {
+                consent = try await client.revokeScopes(pairing: person.pairing, scopes: [scope])
+            }
             upsertPerson(pairing: person.pairing, localRole: .iAmOwner, consent: consent)
-            lastError = nil
+            lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
 
-    func acceptEarlyEndTrust(_ person: CompanionPerson) async {
+    /// Approver side: accept or revoke exactly one scope for `person`.
+    func setApproverAccept(_ scope: CompanionScope, enabled: Bool, for person: CompanionPerson) async {
         guard person.localRole == .iAmApprover else { return }
         do {
             let identity = try ensureIdentity(role: .trustedApprover)
             let client = makeClient(signer: try signer(for: identity))
-            let consent = try await client.acceptScopes(pairing: person.pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+            let consent: RelationshipConsent
+            if enabled {
+                var scopes = Set(person.consent?.approverScopes ?? [])
+                scopes.insert(scope)
+                consent = try await client.acceptScopes(pairing: person.pairing, scopes: Array(scopes))
+            } else {
+                consent = try await client.revokeScopes(pairing: person.pairing, scopes: [scope])
+            }
             upsertPerson(pairing: person.pairing, localRole: .iAmApprover, consent: consent)
-            lastError = nil
-        } catch { fail(error) }
-    }
-
-    func revokeEarlyEndTrust(_ person: CompanionPerson) async {
-        do {
-            let identity = try ensureIdentity(role: person.localRole == .iAmOwner ? .owner : .trustedApprover)
-            let client = makeClient(signer: try signer(for: identity))
-            let consent = try await client.revokeScopes(pairing: person.pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-            upsertPerson(pairing: person.pairing, localRole: person.localRole, consent: consent)
-            lastError = nil
+            lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
 
@@ -300,7 +350,7 @@ final class CompanionCoordinator: ObservableObject {
             try await client.revoke(person.pairing)
             people.removeAll { $0.id == person.id }
             savePeople()
-            lastError = nil
+            lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
 
@@ -328,47 +378,113 @@ final class CompanionCoordinator: ObservableObject {
             let session = try ActiveSession(owner: identity, sessionID: sessionID, activeSetID: activeSetID,
                                             startsAt: start, endsAt: end)
             _ = try await client.publishSession(session)
+            let validFor = min(max(60, end.timeIntervalSince(Date())), CompanionLimits.maxRequestLifetime)
             _ = try await client.requestUnlock(requestID: UUID().uuidString, pairings: targets.map(\.pairing),
                                                consents: targets.compactMap(\.consent), session: session,
                                                targets: targets.map { $0.pairing.approver.identityID },
-                                               validFor: max(60, end.timeIntervalSince(Date())))
-            lastError = nil
+                                               validFor: validFor)
+            lastError = nil; needsRepair = false
             await refreshInbox()
         } catch { fail(error) }
     }
 
     func respond(_ item: CompanionInboxItem, decision: ApproverDecision) async {
-        guard !item.isMine,
-              let targetBinding = item.request.binding(for: item.viewerIdentityID),
-              let person = people.first(where: { $0.pairing.pairingID == targetBinding.pairingID }) else { return }
+        guard !item.isMine else {
+            lastError = "This is your own request; there's nothing for you to approve here."
+            return
+        }
+        guard let targetBinding = item.request.binding(for: item.viewerIdentityID) else {
+            lastError = "This request doesn't target this device's identity."
+            return
+        }
+        guard let person = people.first(where: { $0.pairing.pairingID == targetBinding.pairingID }) else {
+            lastError = "No known pairing matches this request. Pull to refresh and try again."
+            return
+        }
         do {
             let identity = try ensureIdentity(role: .trustedApprover)
             let client = makeClient(signer: try signer(for: identity))
             _ = try await client.submitApproval(request: item.request, pairing: person.pairing, decision: decision)
-            lastError = nil
+            lastError = nil; needsRepair = false
             await refreshInbox()
         } catch { fail(error) }
     }
 
     // MARK: - Foreground refresh
 
+    /// Fetches this device's owner and/or approver inbox and, from each
+    /// response's `pairings`/`consents` (relay contract v1.1), refreshes the
+    /// local person registry — this is how a friend's device learns about a
+    /// pairing the owner confirmed (P1: "friend side works end to end"), and
+    /// how the owner's cached consent generation stays current after a
+    /// friend accepts (P1: "owner consent refresh").
     func refreshInbox() async {
         isRefreshing = true
         defer { isRefreshing = false }
         var items: [CompanionInboxItem] = []
-        if let ownerIdentity, let signer = try? signer(for: ownerIdentity) {
-            let client = makeClient(signer: signer)
-            if let requests = try? await client.fetchInbox() {
-                items += requests.map { CompanionInboxItem(request: $0, viewerIdentityID: ownerIdentity.identityID) }
-            }
+        var encounteredError: Error?
+        var anyFetchSucceeded = false
+
+        if let ownerIdentity {
+            do {
+                let signer = try signer(for: ownerIdentity)
+                let client = makeClient(signer: signer)
+                let response = try await client.fetchInboxResponse()
+                items += response.requests.map { CompanionInboxItem(request: $0, viewerIdentityID: ownerIdentity.identityID) }
+                applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
+                anyFetchSucceeded = true
+            } catch { encounteredError = error }
         }
-        if let approverIdentity, let signer = try? signer(for: approverIdentity) {
-            let client = makeClient(signer: signer)
-            if let requests = try? await client.fetchInbox() {
-                items += requests.map { CompanionInboxItem(request: $0, viewerIdentityID: approverIdentity.identityID) }
-            }
+        if let approverIdentity {
+            do {
+                let signer = try signer(for: approverIdentity)
+                let client = makeClient(signer: signer)
+                let response = try await client.fetchInboxResponse()
+                items += response.requests.map { CompanionInboxItem(request: $0, viewerIdentityID: approverIdentity.identityID) }
+                applyInboxSnapshot(response, viewerIdentity: approverIdentity)
+                anyFetchSucceeded = true
+            } catch { encounteredError = error }
         }
+
         inboxItems = items.sorted { $0.request.createdAt > $1.request.createdAt }
+        if let encounteredError {
+            fail(encounteredError)
+        } else if anyFetchSucceeded || (ownerIdentity == nil && approverIdentity == nil) {
+            lastError = nil; needsRepair = false
+        }
+    }
+
+    private func applyInboxSnapshot(_ response: InboxResponse, viewerIdentity: DeviceIdentity) {
+        guard let pairings = response.pairings else { return }
+        var consentsByPairingID: [String: RelationshipConsent] = [:]
+        for consent in response.consents ?? [] { consentsByPairingID[consent.pairingID] = consent }
+        for pairing in pairings {
+            let localRole: CompanionPerson.LocalRole
+            if pairing.owner.identityID == viewerIdentity.identityID {
+                localRole = .iAmOwner
+            } else if pairing.approver.identityID == viewerIdentity.identityID {
+                localRole = .iAmApprover
+            } else {
+                continue
+            }
+            upsertPerson(pairing: pairing, localRole: localRole, consent: consentsByPairingID[pairing.pairingID])
+        }
+    }
+
+    // MARK: - Developer
+
+    /// Deletes every on-device rollback-anchor checkpoint. This is a
+    /// deliberate escape hatch for development/testing only: after a reset,
+    /// the next response for a given owner is treated as the first one seen,
+    /// so a real regression or fork in the interim would no longer be
+    /// detected. It never touches paired-people data or consent.
+    func resetRelayAnchors() {
+        do {
+            try RollbackAnchor(store: anchorStore).resetAll()
+            lastError = nil
+        } catch {
+            lastError = "Couldn't reset relay anchors: \(error.localizedDescription)"
+        }
     }
 }
 #else

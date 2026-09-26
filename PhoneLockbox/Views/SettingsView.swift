@@ -212,6 +212,7 @@ private struct DeveloperToolsSection: View {
     @Binding var showingEmergencyReset: Bool
     @Binding var showingDesignGallery: Bool
     @State private var relayURLDraft = ""
+    @State private var showingResetAnchorsConfirmation = false
 
     var body: some View {
         LockboxCard {
@@ -235,6 +236,31 @@ private struct DeveloperToolsSection: View {
                     Button("Save relay address") { applyRelayURL() }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                     Text("Prototype — local relay only. On a device, set this to your Mac's LAN address so the People tab can reach it.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    Button("Reset relay anchors", role: .destructive) {
+                        showingResetAnchorsConfirmation = true
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                    Text("Clears the on-device rollback/fork protection checkpoints. Development use only — after a reset, a real regression or fork from the relay would no longer be detected until a new checkpoint is established.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    NavigationLink {
+                        CompanionPrototypeView()
+                    } label: {
+                        HStack {
+                            Label("Companion protocol demo", systemImage: "network")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(LockboxTheme.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens a low-level, simulated-relay protocol demo. It is separate from the real People tab and does not use the relay address above.")
+                    Text("A low-level protocol demo against a simulated, in-memory relay — separate from the real People tab above.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
@@ -322,6 +348,18 @@ private struct DeveloperToolsSection: View {
 
                 DiagnosticsSection(coordinator: coordinator)
             }
+        }
+        .confirmationDialog(
+            "Reset relay anchors?",
+            isPresented: $showingResetAnchorsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset relay anchors", role: .destructive) {
+                companion.resetRelayAnchors()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Development-only. This clears rollback/fork protection checkpoints; a real regression or fork from the relay would go undetected until a new checkpoint is established.")
         }
     }
 
