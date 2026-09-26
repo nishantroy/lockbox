@@ -680,6 +680,21 @@ public enum RelayResult: Codable, Hashable, Sendable {
     case acknowledgement
 }
 
+/// Shared by both `CompanionClient.confirm` (sync) and
+/// `AsyncCompanionClient.confirm` (async). The moment a pairing is confirmed
+/// is the first time this device trusts a specific approver key for a
+/// specific owner; the relay's response is the only source for that key, so
+/// it must be checked against what this device actually confirmed rather
+/// than stored as-is. A malicious relay answering confirm with a different
+/// owner or a substituted approver key must never be accepted.
+func validateConfirmResponse(_ pairing: Pairing, acceptance: PairingAcceptance, signerIdentity: DeviceIdentity) throws {
+    guard pairing.owner == signerIdentity, pairing.approver == acceptance.approver,
+          pairing.state == .active else {
+        throw CompanionError.malformed("relay confirm response does not match the confirmed acceptance")
+    }
+    try pairing.validate()
+}
+
 public struct CompanionClient: Sendable {
     public let signer: DeviceSigner
     public let transport: any CompanionTransport
@@ -737,6 +752,7 @@ public struct CompanionClient: Sendable {
         let confirmation = try PairingConfirmation(acceptance: acceptance, owner: signer.identity, verificationCode: verificationCode, issuedAt: now)
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).confirmation", fields: confirmation.signingFields())
         guard case let .pairing(pairing) = try submit("confirm", SignedConfirmation(confirmation: confirmation, signature: signature)) else { throw CompanionError.malformed("relay response") }
+        try validateConfirmResponse(pairing, acceptance: acceptance, signerIdentity: signer.identity)
         return pairing
     }
 
@@ -847,7 +863,7 @@ public struct CompanionClient: Sendable {
     }
 
     public func fetchInbox() throws -> [TrustedRequest] {
-        let query = InboxQuery(identityID: signer.identity.identityID)
+        let query = InboxQuery(identityID: signer.identity.identityID, issuedAt: now())
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(query)
         let operationID = operationIdentifier(kind: "inbox", signer: signer.identity, body: body)
@@ -921,7 +937,17 @@ public struct ApprovalUse: Codable, Sendable {
 }
 public struct InboxQuery: Codable, Sendable {
     public let identityID: String
-    public init(identityID: String) { self.identityID = identityID }
+    /// Signed freshness hint for the relay (this query body is covered by
+    /// the enclosing `SignedOperation`'s signature, like every other
+    /// operation kind). Optional so an older encoded query, or a relay that
+    /// does not check it yet, still decodes; both `CompanionClient` and
+    /// `AsyncCompanionClient` always populate it with the current time.
+    public let issuedAt: Date?
+
+    public init(identityID: String, issuedAt: Date? = nil) {
+        self.identityID = identityID
+        self.issuedAt = issuedAt
+    }
 }
 public struct RequestReference: Codable, Sendable {
     public let requestID: String

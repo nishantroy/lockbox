@@ -486,6 +486,7 @@ public struct AsyncCompanionClient: Sendable {
         guard case let .pairing(pairing) = try await submit("confirm", SignedConfirmation(confirmation: confirmation, signature: signature)) else {
             throw CompanionError.malformed("relay response")
         }
+        try validateConfirmResponse(pairing, acceptance: acceptance, signerIdentity: signer.identity)
         return pairing
     }
 
@@ -598,7 +599,7 @@ public struct AsyncCompanionClient: Sendable {
     /// only when this identity is fetching its own ledger as an owner; they
     /// are `nil` for a pure helper inbox.
     public func fetchInboxResponse() async throws -> InboxResponse {
-        let query = InboxQuery(identityID: signer.identity.identityID)
+        let query = InboxQuery(identityID: signer.identity.identityID, issuedAt: now())
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(query)

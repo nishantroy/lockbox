@@ -67,7 +67,12 @@ final class CompanionCoordinator: ObservableObject {
     private static let keychainService = "com.phone-lockbox.companion.keys"
     private static let appGroupIdentifier = "group.com.phone-lockbox"
     private static let peopleDefaultsKey = "com.phone-lockbox.companion.people.v1"
-    private static let acceptedInviteOwnersDefaultsKey = "com.phone-lockbox.companion.acceptedInviteOwners.v1"
+    /// Replaces the earlier `acceptedInviteOwners.v1` key (a bare
+    /// `Set<DeviceIdentity>`), which let *any* owner this device had ever
+    /// accepted an invite from justify an unbounded number of first-seen
+    /// pairings. This is prototype-only local state, so the old key is
+    /// simply abandoned rather than migrated.
+    private static let pendingAcceptancesDefaultsKey = "com.phone-lockbox.companion.pendingAcceptances.v1"
     private static let ownerIdentityDefaultsKey = "com.phone-lockbox.companion.identity.owner.v1"
     private static let approverIdentityDefaultsKey = "com.phone-lockbox.companion.identity.approver.v1"
     private static let relayBaseURLDefaultsKey = "com.phone-lockbox.companion.relayBaseURL.v1"
@@ -136,13 +141,15 @@ final class CompanionCoordinator: ObservableObject {
         if resolvedDefaults != nil {
             loadIdentities()
             loadPeople()
-            loadAcceptedInviteOwners()
+            loadPendingAcceptances()
+            pendingAcceptances = CompanionTrustMerge.pruneExpiredPendingAcceptances(pendingAcceptances, now: Date())
+            savePendingAcceptances()
         }
     }
 
     // MARK: - Identity and persistence
 
-    private var acceptedInviteOwners: Set<DeviceIdentity> = []
+    private var pendingAcceptances: [CompanionPendingAcceptance] = []
 
     private func loadIdentities() {
         ownerIdentity = decodedIdentity(forKey: Self.ownerIdentityDefaultsKey)
@@ -184,17 +191,17 @@ final class CompanionCoordinator: ObservableObject {
         sharedDefaults.set(data, forKey: Self.peopleDefaultsKey)
     }
 
-    private func loadAcceptedInviteOwners() {
-        guard let sharedDefaults, let data = sharedDefaults.data(forKey: Self.acceptedInviteOwnersDefaultsKey),
-              let decoded = try? JSONDecoder().decode(Set<DeviceIdentity>.self, from: data) else { return }
-        acceptedInviteOwners = decoded
+    private func loadPendingAcceptances() {
+        guard let sharedDefaults, let data = sharedDefaults.data(forKey: Self.pendingAcceptancesDefaultsKey),
+              let decoded = try? JSONDecoder().decode([CompanionPendingAcceptance].self, from: data) else { return }
+        pendingAcceptances = decoded
     }
 
-    private func saveAcceptedInviteOwners() {
+    private func savePendingAcceptances() {
         guard let sharedDefaults else { return }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(acceptedInviteOwners) else { return }
-        sharedDefaults.set(data, forKey: Self.acceptedInviteOwnersDefaultsKey)
+        guard let data = try? encoder.encode(pendingAcceptances) else { return }
+        sharedDefaults.set(data, forKey: Self.pendingAcceptancesDefaultsKey)
     }
 
     /// Looks up a known person's display name for `identityID`, wherever it
@@ -284,13 +291,17 @@ final class CompanionCoordinator: ObservableObject {
         do {
             let identity = try ensureIdentity(role: .trustedApprover)
             let client = makeClient(signer: try signer(for: identity))
-            let acceptance = try await client.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
+            let acceptanceID = UUID().uuidString
+            let acceptance = try await client.accept(invitation, acceptanceID: acceptanceID, now: Date())
             pendingAcceptance = acceptance
             // Persisted so a later inbox-reported pairing can be checked
-            // against an owner identity this device actually saw and
-            // accepted an invite from — see `CompanionTrustMerge`.
-            acceptedInviteOwners.insert(invitation.payload.owner)
-            saveAcceptedInviteOwners()
+            // against this exact accept attempt — see `CompanionTrustMerge`
+            // and `CompanionPendingAcceptance`. The record is consumed
+            // (removed) once its pairing is learned from the inbox.
+            let record = try CompanionPendingAcceptance(ownerIdentity: invitation.payload.owner, acceptanceID: acceptanceID,
+                                                        approverIdentity: identity, createdAt: Date())
+            pendingAcceptances.append(record)
+            savePendingAcceptances()
             lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
@@ -340,9 +351,17 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     /// Only path that may create an `.iAmOwner` person entry — a direct
-    /// result of this device's own `confirm()` call, never the inbox.
+    /// result of this device's own `confirm()` call (already checked against
+    /// the acceptance by `validateConfirmResponse` inside `confirm` itself),
+    /// never the inbox. Still never replaces an existing entry whose owner
+    /// or approver differs, as a last line of defense against a pairing-ID
+    /// collision or a caller bug.
     private func upsertConfirmedPairing(_ pairing: Pairing, nickname: String?) {
         if let index = people.firstIndex(where: { $0.pairing.pairingID == pairing.pairingID }) {
+            guard people[index].pairing.owner == pairing.owner, people[index].pairing.approver == pairing.approver else {
+                lastError = "The relay returned a pairing that conflicts with one already stored; ignoring it."
+                return
+            }
             people[index].pairing = pairing
             if let nickname { people[index].nickname = nickname }
         } else {
@@ -396,13 +415,20 @@ final class CompanionCoordinator: ObservableObject {
         } catch { fail(error) }
     }
 
-    /// A consent this device just produced by signing its own mutation is
-    /// trusted directly (no need to route it back through
-    /// `CompanionTrustMerge`, which exists to police *untrusted* relay data).
+    /// Even a consent returned in direct response to this device's own
+    /// signed mutation still comes from the relay over the wire, so it is
+    /// routed through the same `CompanionTrustMerge.decide(consent:)` check
+    /// as inbox-observed consent (matching pairing ID/epoch/owner/approver,
+    /// generation never regressing) rather than stored as-is.
     private func applyOwnConsentUpdate(_ consent: RelationshipConsent, forPairingID pairingID: String) {
         guard let index = people.firstIndex(where: { $0.pairing.pairingID == pairingID }) else { return }
-        people[index].consent = consent
-        savePeople()
+        switch CompanionTrustMerge.decide(consent: consent, for: people[index].pairing, existingConsent: people[index].consent) {
+        case .accepted(let accepted):
+            people[index].consent = accepted
+            savePeople()
+        case .rejected(let reason):
+            lastError = "The relay returned unexpected consent data (\(reason)); ignoring it."
+        }
     }
 
     func revokePairing(_ person: CompanionPerson) async {
@@ -492,6 +518,9 @@ final class CompanionCoordinator: ObservableObject {
         guard isAvailable else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+        let prunedCount = pendingAcceptances.count
+        pendingAcceptances = CompanionTrustMerge.pruneExpiredPendingAcceptances(pendingAcceptances, now: Date())
+        if pendingAcceptances.count != prunedCount { savePendingAcceptances() }
         var items: [CompanionInboxItem] = []
         var encounteredError: Error?
         var anyFetchSucceeded = false
@@ -545,7 +574,7 @@ final class CompanionCoordinator: ObservableObject {
             let existingPairing = existingIndex.map { people[$0].pairing }
             let decision = CompanionTrustMerge.decide(pairing: pairing, viewerIdentityID: viewerIdentity.identityID,
                                                       existingPairing: existingPairing,
-                                                      acceptedInviteOwners: acceptedInviteOwners)
+                                                      pendingAcceptances: pendingAcceptances)
             let resolvedPairing: Pairing?
             switch decision {
             case .unchanged:
@@ -553,10 +582,14 @@ final class CompanionCoordinator: ObservableObject {
             case .update(let updated):
                 if let existingIndex { people[existingIndex].pairing = updated }
                 resolvedPairing = updated
-            case .add(let added):
+            case .add(let added, let consumedAcceptanceID):
                 let localRole: CompanionPerson.LocalRole = added.owner.identityID == viewerIdentity.identityID ? .iAmOwner : .iAmApprover
                 let name = localRole == .iAmOwner ? "Trusted person" : "Person you're helping"
                 people.append(CompanionPerson(nickname: name, localRole: localRole, pairing: added, consent: nil))
+                // Consumed so this record cannot justify a second, different
+                // pairing later.
+                pendingAcceptances.removeAll { $0.acceptanceID == consumedAcceptanceID }
+                savePendingAcceptances()
                 resolvedPairing = added
             case .rejected:
                 rejections += 1
