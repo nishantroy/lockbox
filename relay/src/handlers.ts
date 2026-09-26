@@ -24,6 +24,20 @@ function errorResponse(error: unknown): Response {
   return json(500, { error: "internal" });
 }
 
+/**
+ * Vercel sets `x-forwarded-for` at the edge; the first entry is the actual
+ * client (subsequent entries are intermediate proxies). `scripts/dev-server.ts`
+ * sets this same header from the raw socket address for local dev, so this
+ * extraction is uniform across both deployment targets and never needs its
+ * own "look at the socket" fallback here.
+ */
+function clientIPFromRequest(request: Request): string | null {
+  const header = request.headers.get("x-forwarded-for");
+  if (!header) return null;
+  const first = header.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : null;
+}
+
 async function readBody(request: Request): Promise<Buffer> {
   const contentLength = request.headers.get("content-length");
   if (contentLength && Number(contentLength) > MAX_RAW_BODY_BYTES) {
@@ -40,7 +54,7 @@ export async function handleOperations(request: Request): Promise<Response> {
   if (request.method !== "POST") return json(405, { error: "malformed" });
   try {
     const body = await readBody(request);
-    const response = await submitOperation(body);
+    const response = await submitOperation(body, undefined, clientIPFromRequest(request));
     return json(200, encodeRelayResponse(response));
   } catch (error) {
     if (error instanceof Error && (error as { __oversized?: boolean }).__oversized) {
@@ -54,7 +68,7 @@ export async function handleInbox(request: Request): Promise<Response> {
   if (request.method !== "POST") return json(405, { error: "malformed" });
   try {
     const body = await readBody(request);
-    const response = await fetchInboxOperation(body);
+    const response = await fetchInboxOperation(body, undefined, clientIPFromRequest(request));
     return json(200, encodeInboxResponse(response));
   } catch (error) {
     if (error instanceof Error && (error as { __oversized?: boolean }).__oversized) {

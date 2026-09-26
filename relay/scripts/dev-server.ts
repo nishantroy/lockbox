@@ -32,6 +32,14 @@ async function toWebRequest(req: IncomingMessage, url: string): Promise<Request>
     if (typeof value === "string") headers.set(key, value);
     else if (Array.isArray(value)) headers.set(key, value.join(", "));
   }
+  // Mirrors what Vercel's edge does for its functions: sets
+  // `x-forwarded-for` from the real client address. A local dev client won't
+  // send this header itself, so src/handlers.ts's `clientIPFromRequest` can
+  // stay uniform across both deployment targets rather than needing its own
+  // "fall back to the socket" special case.
+  if (!headers.has("x-forwarded-for") && req.socket.remoteAddress) {
+    headers.set("x-forwarded-for", req.socket.remoteAddress);
+  }
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let body: Buffer | undefined;
   if (hasBody) {

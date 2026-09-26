@@ -47,7 +47,9 @@ import {
   readOwnerLedger,
   withTransaction,
   upsertRetentionMarkers,
-  chargeGlobalRateLimit,
+  chargeGlobalRateLimits,
+  GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
+  GLOBAL_RATE_LIMIT_MAX,
   AmbiguousOwnerError,
   OwnerRowConflictError,
   PairingRoutingConflictError,
@@ -58,9 +60,12 @@ import { canonicalFramed, digest, COMPANION_VERSION } from "./canonical.js";
 /** 5-minute freshness window for an inbox query that supplies `issuedAt` (see `decodeInboxQuery`). */
 const INBOX_FRESHNESS_WINDOW_SECONDS = 5 * 60;
 
-/** Global per-signer request budget, charged before any owner row is touched -- see `chargeGlobalRateLimit` in db.ts. */
-const GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 60;
-const GLOBAL_RATE_LIMIT_MAX = 60;
+/** Builds the global rate-limit subjects for one request: always the signer identity, plus the client IP when the HTTP layer resolved one (see handlers.ts). */
+function rateLimitSubjects(signerIdentityID: string, clientIP: string | null): string[] {
+  const subjects = [`signer:${signerIdentityID}`];
+  if (clientIP) subjects.push(`ip:${clientIP}`);
+  return subjects;
+}
 
 /**
  * Canonical root of *one owner's* ledger state only (never the whole
@@ -124,7 +129,7 @@ interface TransactionOutcome {
   surfaceExpired: boolean;
 }
 
-export async function submitOperation(rawBody: Buffer, now: number = nowSeconds()): Promise<RelayResponse> {
+export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(), clientIP: string | null = null): Promise<RelayResponse> {
   if (rawBody.length > MAX_RAW_BODY_BYTES) throw relayError("malformed");
   let operation: SignedOperation;
   try {
@@ -136,14 +141,18 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
   if (!verifySignedOperationSignature(operation)) throw relayError("invalid_signature");
 
   const pool = getPool();
-  // Global, DB-backed, per-signer rate limit charged *before* any owner
-  // partition is resolved or locked (P2: "count failed attempts and inbox
-  // fetches, and bound approver-signed ops aimed at arbitrary owners").
+  // Global, DB-backed rate limit charged *before* any owner partition is
+  // resolved or locked (P2: "count failed attempts and inbox fetches, and
+  // bound approver-signed ops aimed at arbitrary owners"), keyed by both the
+  // signer identity and (when the HTTP layer resolved one) the client IP --
+  // every listed subject is charged unconditionally and the request is
+  // allowed only if all of them are still within budget, so flooding from
+  // many identities behind one IP still bounds that IP, and vice versa.
   // Unlike src/reducer.ts's `chargeRateLimit` (scoped to one already-open
   // owner transaction), this also bounds e.g. a flood of `ack`s from fresh
   // random identities, each of which would otherwise unconditionally create
   // a new `companion_owner` row before any per-owner limiter ever runs.
-  const allowed = await chargeGlobalRateLimit(pool, `signer:${operation.signer.identityID}`, now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
+  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
   if (!allowed) throw relayError("rate_limited");
 
   const resolved = await resolveOwner(operation);
@@ -277,7 +286,7 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
   return outcome.response;
 }
 
-export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeconds()): Promise<InboxResponse> {
+export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeconds(), clientIP: string | null = null): Promise<InboxResponse> {
   if (rawBody.length > MAX_RAW_BODY_BYTES) throw relayError("malformed");
   let operation: SignedOperation;
   try {
@@ -289,7 +298,7 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   if (!verifySignedOperationSignature(operation)) throw relayError("invalid_signature");
 
   const pool = getPool();
-  const allowed = await chargeGlobalRateLimit(pool, `signer:${operation.signer.identityID}`, now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
+  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
   if (!allowed) throw relayError("rate_limited");
 
   let query;
@@ -304,12 +313,14 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   // supplies a signed `issuedAt`, enforce the same pattern every other
   // `issuedAt` field in this protocol uses: up to 60s of future clock skew,
   // and (per this fetch's own 5-minute freshness contract) no more than 5
-  // minutes stale. `REQUIRE_FRESH_INBOX=true` makes the field mandatory
-  // once a client reliably sends it (docs/r5-relay-plan.md review fix); the
-  // legacy `{"identityID":...}` form (key omitted, not null) is then rejected.
+  // minutes stale. `REQUIRE_FRESH_INBOX` defaults to *requiring* `issuedAt`
+  // (both Swift clients always send it now) and rejects the legacy
+  // `{"identityID":...}` form (key omitted, not null); set it to the exact
+  // string `"false"` to explicitly allow the legacy form during a
+  // transition/rollback.
   if (query.issuedAt !== undefined) {
     if (query.issuedAt > now + 60 || query.issuedAt < now - INBOX_FRESHNESS_WINDOW_SECONDS) throw relayError("expired");
-  } else if (process.env.REQUIRE_FRESH_INBOX === "true") {
+  } else if (process.env.REQUIRE_FRESH_INBOX !== "false") {
     throw relayError("malformed");
   }
 

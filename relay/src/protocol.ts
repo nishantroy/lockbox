@@ -875,12 +875,13 @@ export function verifyPairingReplacementSignature(p: PairingReplacement): boolea
 export interface InboxQuery {
   identityID: string;
   /**
-   * Optional freshness timestamp. The inbox fetch operation otherwise has no
+   * Freshness timestamp. The inbox fetch operation otherwise has no
    * freshness check at all (no expiry, no nonce); when present, the relay
-   * enforces a 5-minute window around it (src/service.ts). Not yet sent by
-   * either Swift client; accepted as optional so it can be adopted without a
-   * wire break, and can be made mandatory later behind the
-   * `REQUIRE_FRESH_INBOX` config flag.
+   * enforces a 5-minute window around it (src/service.ts). Both Swift
+   * clients now always send this field. It stays optional on this type (and
+   * the wire format) for backward/legacy decoding, but `src/service.ts`'s
+   * `REQUIRE_FRESH_INBOX` defaults to *requiring* it -- only an explicit
+   * `REQUIRE_FRESH_INBOX=false` accepts the legacy `issuedAt`-less form.
    */
   issuedAt?: number;
 }

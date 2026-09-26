@@ -504,7 +504,7 @@ describe("R5 relay lifecycle", () => {
     const requestID = uniqueID("request");
     await submit(buildOperation({ kind: "request", payload: requestPayload(s, requestID, s.now + 40_000), signer: s.owner, expectedRevision: 6 }));
 
-    const ownerInboxOp = buildOperation({ kind: "inbox", payload: { identityID: s.owner.identity.identityID }, signer: s.owner, expectedRevision: null });
+    const ownerInboxOp = buildOperation({ kind: "inbox", payload: { identityID: s.owner.identity.identityID, issuedAt: swiftDate(Math.floor(Date.now() / 1000)) }, signer: s.owner, expectedRevision: null });
     const ownerInbox = await fetchInboxOperation(toRequest(ownerInboxOp));
     expect(ownerInbox.ownerIdentityID).toBe(s.owner.identity.identityID);
     expect(ownerInbox.stateRoot).toBeInstanceOf(Buffer);
@@ -512,7 +512,7 @@ describe("R5 relay lifecycle", () => {
     expect(ownerInbox.pairings.map((p) => p.pairingID)).toContain(s.pairingID);
     expect(ownerInbox.consents.map((c) => c.relationshipID)).toContain(s.pairingID);
 
-    const helperInboxOp = buildOperation({ kind: "inbox", payload: { identityID: s.approver.identity.identityID }, signer: s.approver, expectedRevision: null });
+    const helperInboxOp = buildOperation({ kind: "inbox", payload: { identityID: s.approver.identity.identityID, issuedAt: swiftDate(Math.floor(Date.now() / 1000)) }, signer: s.approver, expectedRevision: null });
     const helperInbox = await fetchInboxOperation(toRequest(helperInboxOp));
     expect(helperInbox.ownerIdentityID).toBeUndefined();
     expect(helperInbox.stateRoot).toBeUndefined();

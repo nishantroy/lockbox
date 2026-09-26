@@ -325,15 +325,26 @@ describe("P1.3: consent max-age and inbox freshness", () => {
     await expect(fetchInboxOperation(toRequest(futureInbox), now)).rejects.toMatchObject({ code: "expired" });
   });
 
-  it("inbox: REQUIRE_FRESH_INBOX=true rejects a query with no issuedAt at all", async () => {
+  it("inbox: a query with no issuedAt at all is rejected by default (REQUIRE_FRESH_INBOX defaults to true)", async () => {
     const now = BASE_NOW + 6_000;
     const owner = makeIdentity("owner");
     await submitOperation(toRequest(buildOperation({ kind: "ack", payload: {}, signer: owner, expectedRevision: null })), now);
     const noTimestampInbox = buildOperation({ kind: "inbox", payload: { identityID: owner.identity.identityID }, signer: owner, expectedRevision: null });
 
-    process.env.REQUIRE_FRESH_INBOX = "true";
+    expect(process.env.REQUIRE_FRESH_INBOX).toBeUndefined();
+    await expect(fetchInboxOperation(toRequest(noTimestampInbox), now)).rejects.toMatchObject({ code: "malformed" });
+  });
+
+  it("inbox: REQUIRE_FRESH_INBOX=\"false\" explicitly allows the legacy (issuedAt-less) form", async () => {
+    const now = BASE_NOW + 6_500;
+    const owner = makeIdentity("owner");
+    await submitOperation(toRequest(buildOperation({ kind: "ack", payload: {}, signer: owner, expectedRevision: null })), now);
+    const noTimestampInbox = buildOperation({ kind: "inbox", payload: { identityID: owner.identity.identityID }, signer: owner, expectedRevision: null });
+
+    process.env.REQUIRE_FRESH_INBOX = "false";
     try {
-      await expect(fetchInboxOperation(toRequest(noTimestampInbox), now)).rejects.toMatchObject({ code: "malformed" });
+      const result = await fetchInboxOperation(toRequest(noTimestampInbox), now);
+      expect(result.ownerIdentityID).toBe(owner.identity.identityID);
     } finally {
       delete process.env.REQUIRE_FRESH_INBOX;
     }
@@ -726,7 +737,7 @@ describe("P1.4: time-dependent invariants", () => {
     const s = await setupPairedSession(now);
     const before = await testPool().query<{ revision: string }>(`SELECT revision FROM companion_owner WHERE owner_id = $1`, [s.owner.identity.identityID]);
     // A read (inbox fetch) never touches revision.
-    const inboxOp = buildOperation({ kind: "inbox", payload: { identityID: s.owner.identity.identityID }, signer: s.owner, expectedRevision: null });
+    const inboxOp = buildOperation({ kind: "inbox", payload: { identityID: s.owner.identity.identityID, issuedAt: swiftDate(now) }, signer: s.owner, expectedRevision: null });
     await fetchInboxOperation(toRequest(inboxOp), now);
     // A failed command (wrong scope) is rejected before any state mutation commits.
     const badOp = buildOperation({ kind: "consent", payload: { relationshipID: s.pairingID, pairingID: s.pairingID, pairEpoch: 1, owner: encodeDeviceIdentityWire(s.owner.identity), approver: encodeDeviceIdentityWire(s.approver.identity), action: "ownerGrant", scopes: { scopes: ["mutualPact"] }, nonce: Buffer.alloc(20, 5).toString("base64"), issuedAt: swiftDate(now) }, signer: s.owner, expectedRevision: s.nextRevision });

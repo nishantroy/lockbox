@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import { handleOperations, handleInbox, handleHealth } from "../src/handlers.js";
-import { makeIdentity, buildOperation } from "./setup.js";
+import { makeIdentity, buildOperation, swiftDate } from "./setup.js";
 import { MAX_RAW_BODY_BYTES } from "../src/protocol.js";
 
 function post(body: unknown, headers: Record<string, string> = {}): Request {
@@ -79,7 +79,7 @@ describe("POST /v1/inbox", () => {
   it("200 with an owner's own inbox", async () => {
     const owner = makeIdentity("owner");
     await handleOperations(post(buildOperation({ kind: "ack", payload: {}, signer: owner, expectedRevision: null })));
-    const inboxOp = buildOperation({ kind: "inbox", payload: { identityID: owner.identity.identityID }, signer: owner, expectedRevision: null });
+    const inboxOp = buildOperation({ kind: "inbox", payload: { identityID: owner.identity.identityID, issuedAt: swiftDate(Math.floor(Date.now() / 1000)) }, signer: owner, expectedRevision: null });
     const response = await handleInbox(new Request("http://127.0.0.1:8002/v1/inbox", { method: "POST", body: JSON.stringify(inboxOp) }));
     expect(response.status).toBe(200);
     const body = await response.json();

@@ -17,6 +17,28 @@ export const MIGRATIONS_DIR = join(__dirname, "..", "migrations");
 
 let pool: pg.Pool | undefined;
 
+/** The docker-compose.yml/README-documented local Postgres, also relay/.env.example's default. */
+export const DEFAULT_LOCAL_DATABASE_URL = "postgres://relay:relay@127.0.0.1:56330/companion_relay";
+
+/**
+ * Resolves `DATABASE_URL`, defaulting to the local Postgres
+ * (`docker-compose.yml`'s `127.0.0.1:56330`) so `db:migrate`/`dev`/
+ * `retention:purge` -- and the test suite -- work from a clean checkout with
+ * no `.env` yet. Production must still set it explicitly: this default only
+ * applies when `NODE_ENV !== "production"`, so a real deployment can never
+ * silently fall back to a local address that doesn't exist there.
+ */
+export function resolveDatabaseURL(): string {
+  const configured = process.env.DATABASE_URL;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("DATABASE_URL is not set (required when NODE_ENV=production)");
+  }
+  // eslint-disable-next-line no-console
+  console.error(`DATABASE_URL not set; defaulting to ${DEFAULT_LOCAL_DATABASE_URL} (NODE_ENV != "production")`);
+  return DEFAULT_LOCAL_DATABASE_URL;
+}
+
 /**
  * Pool size and idle timeout are configurable via env vars because the right
  * values differ sharply between local dev/tests (many short-lived
@@ -30,8 +52,7 @@ let pool: pg.Pool | undefined;
  */
 export function getPool(): pg.Pool {
   if (!pool) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) throw new Error("DATABASE_URL is not set");
+    const connectionString = resolveDatabaseURL();
     const max = Number(process.env.PGPOOL_MAX ?? "10");
     const idleTimeoutMillis = Number(process.env.PGPOOL_IDLE_TIMEOUT_MS ?? "30000");
     pool = new pg.Pool({ connectionString, max, idleTimeoutMillis });
@@ -283,15 +304,19 @@ export async function ownersForApprover(client: pg.Pool | pg.PoolClient, approve
   return result.rows.map((r) => r.owner_id);
 }
 
+/** Shared window/budget for the global per-subject rate limiter (`chargeGlobalRateLimit(s)`/`purgeStaleRateLimits`), so the charging side (src/service.ts) and the purge side (src/retention.ts) agree on what "stale" means. */
+export const GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 60;
+export const GLOBAL_RATE_LIMIT_MAX = 60;
+
 /**
- * Global, DB-backed, fixed-window rate limiter keyed by `subject` (typically
- * `signer:<identityID>`, optionally combined with a client IP when one is
- * available). Charged in its own implicit single-statement transaction
- * *before* any owner row is resolved/locked, so it bounds every request
- * regardless of whether it succeeds, fails, targets an owner that doesn't
- * exist, or is an inbox fetch (none of which reach the per-owner-ledger rate
- * limiter in src/reducer.ts, which only runs once inside an already-open
- * owner transaction). Returns `true` if the request should be allowed.
+ * Global, DB-backed, fixed-window rate limiter keyed by `subject` (e.g.
+ * `signer:<identityID>` or `ip:<address>`). Charged in its own implicit
+ * single-statement transaction *before* any owner row is resolved/locked, so
+ * it bounds every request regardless of whether it succeeds, fails, targets
+ * an owner that doesn't exist, or is an inbox fetch (none of which reach the
+ * per-owner-ledger rate limiter in src/reducer.ts, which only runs once
+ * inside an already-open owner transaction). Returns `true` if this one
+ * subject is still within its budget for the window.
  */
 export async function chargeGlobalRateLimit(pool: pg.Pool, subject: string, nowSeconds: number, windowSeconds: number, maxCount: number): Promise<boolean> {
   const result = await pool.query<{ count: number }>(
@@ -307,10 +332,39 @@ export async function chargeGlobalRateLimit(pool: pg.Pool, subject: string, nowS
   return count <= maxCount;
 }
 
-/** Deletes rate-limit rows whose window has been stale for at least `windowSeconds` past `cutoffSeconds`; used by retention. */
-export async function purgeStaleRateLimits(pool: pg.Pool, cutoffSeconds: number): Promise<number> {
-  const result = await pool.query(`DELETE FROM companion_rate_limit WHERE window_start < to_timestamp($1)`, [cutoffSeconds]);
+/**
+ * Charges every subject (typically the signer identity and, when known, the
+ * client IP) unconditionally -- each attempt is recorded regardless of
+ * whether another subject is already over budget -- and allows the request
+ * only if *all* of them are still within budget. Charging (not just
+ * checking) every subject even when one already denies the request means a
+ * attacker who floods from many identities behind one IP still drives that
+ * IP's counter up, and vice versa.
+ */
+export async function chargeGlobalRateLimits(pool: pg.Pool, subjects: readonly string[], nowSeconds: number, windowSeconds: number, maxCount: number): Promise<boolean> {
+  const results = await Promise.all(subjects.map((subject) => chargeGlobalRateLimit(pool, subject, nowSeconds, windowSeconds, maxCount)));
+  return results.every(Boolean);
+}
+
+/** Deletes rate-limit rows whose window is stale relative to `nowSeconds` (i.e. `window_start < now - windowSeconds`), not on the 30-day retention window -- a fixed-window counter's row is meaningless once its window has elapsed, regardless of the protocol's unrelated data-retention policy. */
+export async function purgeStaleRateLimits(pool: pg.Pool, nowSeconds: number, windowSeconds: number): Promise<number> {
+  const result = await pool.query(`DELETE FROM companion_rate_limit WHERE window_start < to_timestamp($1) - make_interval(secs => $2)`, [nowSeconds, windowSeconds]);
   return result.rowCount ?? 0;
+}
+
+/** Returns the retention purge owner-batch cursor (the last `owner_id` fully processed), or `null` if none has been recorded yet. */
+export async function getRetentionCursor(pool: pg.Pool): Promise<string | null> {
+  const result = await pool.query<{ last_owner_id: string | null }>(`SELECT last_owner_id FROM companion_retention_cursor WHERE id = 'default'`);
+  return result.rows[0]?.last_owner_id ?? null;
+}
+
+/** Persists the retention purge owner-batch cursor. */
+export async function setRetentionCursor(pool: pg.Pool, lastOwnerID: string | null): Promise<void> {
+  await pool.query(
+    `INSERT INTO companion_retention_cursor (id, last_owner_id) VALUES ('default', $1)
+     ON CONFLICT (id) DO UPDATE SET last_owner_id = EXCLUDED.last_owner_id`,
+    [lastOwnerID]
+  );
 }
 
 export async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {

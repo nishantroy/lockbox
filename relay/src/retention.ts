@@ -26,11 +26,24 @@
 // stay honest about "this owner's state changed".
 
 import type pg from "pg";
-import { lockOwnerRow, saveOwnerRow, deleteRetentionMarker, deleteApproverPairing, readOwnerLedger, insertOperation, purgeStaleRateLimits, type StoredOperation } from "./db.js";
+import {
+  lockOwnerRow,
+  saveOwnerRow,
+  deleteRetentionMarker,
+  deleteApproverPairing,
+  readOwnerLedger,
+  insertOperation,
+  purgeStaleRateLimits,
+  getRetentionCursor,
+  setRetentionCursor,
+  GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
+  type StoredOperation
+} from "./db.js";
 import { emptyLedger, type Marker } from "./ledger.js";
 import { computeStateRoot } from "./service.js";
 import { digest } from "./canonical.js";
 import { randomUUID } from "node:crypto";
+import { relayError } from "./errors.js";
 
 export interface RetentionSummary {
   purgedRequests: number;
@@ -79,6 +92,34 @@ export interface PurgeOptions {
 
 const DEFAULT_MAX_DURATION_MS = 8_000; // leaves headroom under Vercel Hobby's default 10s function timeout
 
+/**
+ * Fetches the owners one batch should process. With no `maxOwners` cap
+ * (tests, manual/local runs), this is simply every owner in order and the
+ * persisted cursor is left untouched. With a cap (the production cron path),
+ * it resumes just after the last cursor position and wraps around to the
+ * start once it runs out, so a bounded-duration batch sweeps through every
+ * owner over successive invocations instead of only ever reaching the same
+ * early-`owner_id` owners.
+ */
+async function fetchOwnerBatch(pool: pg.Pool, maxOwners: number | undefined): Promise<{ ownerIDs: string[]; usingCursor: boolean }> {
+  if (maxOwners === undefined) {
+    const all = await pool.query<{ owner_id: string }>(`SELECT owner_id FROM companion_owner ORDER BY owner_id`);
+    return { ownerIDs: all.rows.map((r) => r.owner_id), usingCursor: false };
+  }
+  const cursor = await getRetentionCursor(pool);
+  const firstBatch = await pool.query<{ owner_id: string }>(
+    cursor !== null ? `SELECT owner_id FROM companion_owner WHERE owner_id > $1 ORDER BY owner_id LIMIT $2` : `SELECT owner_id FROM companion_owner ORDER BY owner_id LIMIT $1`,
+    cursor !== null ? [cursor, maxOwners] : [maxOwners]
+  );
+  let ownerIDs = firstBatch.rows.map((r) => r.owner_id);
+  if (ownerIDs.length < maxOwners && cursor !== null) {
+    const remaining = maxOwners - ownerIDs.length;
+    const wrapBatch = await pool.query<{ owner_id: string }>(`SELECT owner_id FROM companion_owner WHERE owner_id <= $1 ORDER BY owner_id LIMIT $2`, [cursor, remaining]);
+    ownerIDs = ownerIDs.concat(wrapBatch.rows.map((r) => r.owner_id));
+  }
+  return { ownerIDs, usingCursor: true };
+}
+
 export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, nowSeconds: number, options: PurgeOptions = {}): Promise<RetentionSummary> {
   if (!Number.isFinite(retentionDays) || retentionDays < 1) {
     throw new Error(`invalid retentionDays: ${retentionDays} (must be a finite number >= 1)`);
@@ -88,22 +129,21 @@ export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, 
   const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
   const started = Date.now();
 
-  const ownerRows = await pool.query<{ owner_id: string }>(
-    options.maxOwners !== undefined ? `SELECT owner_id FROM companion_owner ORDER BY owner_id LIMIT $1` : `SELECT owner_id FROM companion_owner ORDER BY owner_id`,
-    options.maxOwners !== undefined ? [options.maxOwners] : []
-  );
+  const { ownerIDs, usingCursor } = await fetchOwnerBatch(pool, options.maxOwners);
 
   let index = 0;
-  for (; index < ownerRows.rows.length; index += 1) {
+  let lastProcessedOwnerID: string | null = null;
+  for (; index < ownerIDs.length; index += 1) {
     if (Date.now() - started > maxDurationMs) break;
-    const { owner_id } = ownerRows.rows[index]!;
+    const ownerID = ownerIDs[index]!;
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const touched = await purgeOwner(client, owner_id, cutoff, nowSeconds, summary);
+      const touched = await purgeOwner(client, ownerID, cutoff, nowSeconds, summary);
       await client.query("COMMIT");
       summary.ownersScanned += 1;
       if (touched) summary.ownersTouched += 1;
+      lastProcessedOwnerID = ownerID;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -111,11 +151,15 @@ export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, 
       client.release();
     }
   }
-  summary.ownersRemaining = ownerRows.rows.length - index;
+  summary.ownersRemaining = ownerIDs.length - index;
+
+  if (usingCursor && lastProcessedOwnerID !== null) {
+    await setRetentionCursor(pool, lastProcessedOwnerID);
+  }
 
   const purgedOperations = await pool.query(`DELETE FROM companion_operation WHERE committed_at < to_timestamp($1)`, [cutoff]);
   summary.purgedOperationRows = purgedOperations.rowCount ?? 0;
-  summary.purgedRateLimitRows = await purgeStaleRateLimits(pool, cutoff);
+  summary.purgedRateLimitRows = await purgeStaleRateLimits(pool, nowSeconds, GLOBAL_RATE_LIMIT_WINDOW_SECONDS);
 
   return summary;
 }
@@ -140,6 +184,15 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
   const row = await lockOwnerRow(client, preread.ledger.owner, emptyLedger, computeStateRoot);
   const ledger = row.ledger;
   let changed = false;
+
+  // Fail closed exactly like the mutation path (src/service.ts's
+  // submitOperation) and the owner-inbox read path do: verify the stored
+  // root against the loaded state *before* pruning/re-rooting anything, so
+  // a purge never silently re-roots an already-corrupt/tampered record on
+  // top of the mismatch.
+  if (!computeStateRoot(ledger, row.revision).equals(row.storedStateRoot)) {
+    throw relayError("integrity_error");
+  }
 
   // Requests that lapsed without any later activity are only lazily marked
   // "expired" when something touches them (approval/use/cancel/session
@@ -256,7 +309,7 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
     const committedRevision = row.revision + 1;
     const newRoot = computeStateRoot(ledger, committedRevision);
     await saveOwnerRow(client, ownerID, row.revision, committedRevision, ledger, newRoot);
-    await insertOperation(client, systemPurgeOperation(ownerID, committedRevision, now));
+    await insertOperation(client, systemPurgeOperation(ownerID, committedRevision, now, newRoot));
   }
   return changed;
 }
@@ -270,8 +323,12 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
  * (a purge is an owner-partition-local, not third-party, event), and
  * `signedOperation`/digests are internally-consistent placeholders, never
  * independently re-verified as a real signature anywhere in this codebase.
+ * `stateRootAfter` is the *real* `newRoot` this purge just committed (not a
+ * placeholder): the whole point of persisting it per-operation is so a later
+ * read can recover the exact `(revision, stateRoot)` pair as of this commit,
+ * and a placeholder would silently break that for this revision forever.
  */
-function systemPurgeOperation(ownerID: string, committedRevision: number, now: number): StoredOperation {
+function systemPurgeOperation(ownerID: string, committedRevision: number, now: number, newRoot: Buffer): StoredOperation {
   const marker = Buffer.from(JSON.stringify({ system: "retention_purge", ownerID, committedRevision }), "utf8");
   const responseBody = Buffer.from("{}", "utf8");
   return {
@@ -288,17 +345,8 @@ function systemPurgeOperation(ownerID: string, committedRevision: number, now: n
     responseBody,
     responseDigest: digest(responseBody),
     disposition: "accepted",
-    stateRootAfter: computeStateRootPlaceholder(),
+    stateRootAfter: newRoot,
     committedRevision,
     committedAt: now
   };
-}
-
-// `stateRootAfter` on the operation row exists so an idempotent *client*
-// replay can report the exact root as of that commit; a system purge
-// operation is never replayed by a client (its operationID is a fresh UUID
-// each time, never reused), so this value is only ever read back as an
-// opaque 32-byte placeholder, never compared against a fresh computation.
-function computeStateRootPlaceholder(): Buffer {
-  return digest(Buffer.from("retention-purge-receipt", "utf8"));
 }

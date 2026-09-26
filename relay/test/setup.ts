@@ -9,10 +9,10 @@ import pg from "pg";
 import { generateEd25519KeyPair, sign } from "../src/crypto.js";
 import { deviceIdentityID, base64url, canonicalBytes, digest, COMPANION_VERSION, secondsToSwiftDate } from "../src/canonical.js";
 import type { DeviceIdentity, CompanionRole } from "../src/protocol.js";
-import { migrate, closePool } from "../src/db.js";
+import { migrate, closePool, resolveDatabaseURL } from "../src/db.js";
 
 if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = "postgres://relay:relay@127.0.0.1:56330/companion_relay";
+  process.env.DATABASE_URL = resolveDatabaseURL();
 }
 
 let pool: pg.Pool | undefined;
