@@ -63,6 +63,8 @@ Begin only after automatic release and cleanup are demonstrated under the record
 
 **Depends on:** R4 gate for ordinary exposure. This is two sequential subphases under one production prerequisite; the local companion/pairing and relay simulations remain developer-only.
 
+**Status (2026-09-26):** owner approved starting R5 before the remaining R4 items (accessibility deferred, pre-window overlap case not run). Implementation plan: [R5 relay plan](r5-relay-plan.md) — TypeScript relay targeting Vercel Hobby + Neon Postgres, local-first; 30-day retention of terminal records.
+
 ### R5.1 Durable relay and identity lifecycle
 
 Replace simulations with a deployed authenticated transport, real PostgreSQL adapter, durable server inbox/fetch, device-held signing keys, explicit pairing and re-pairing, and documented identity/key rotation and revocation. Preserve accountless companion use where approved; do not require Screen Time authorization for companion-only setup. APNs or text may wake/remind, but never carry approval credentials or become authoritative delivery.
