@@ -1,0 +1,947 @@
+import XCTest
+@testable import CompanionKit
+
+final class CompanionKitTests: XCTestCase {
+    private let t = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func harness() throws -> (InMemoryCompanionRelay, CompanionClient, CompanionClient, Pairing, ActiveSession) {
+        let ownerKeys = InMemoryDeviceKeyStore()
+        let approverKeys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let invitation = try owner.createInvite(inviteID: "invite-1", validFor: 3_600, now: t,
+                                                nonce: Data(repeating: 7, count: 24))
+        let acceptance = try approver.accept(invitation, acceptanceID: "accept-1", now: t)
+        let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "session-1", activeSetID: "set-1",
+                                        startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(3_600))
+        _ = try owner.publishSession(session)
+        return (relay, owner, approver, pairing, session)
+    }
+
+    func testPairingRequiresSignedMutualConfirmationAndForwardedLinkIsNotAuthority() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let invitation = try owner.createInvite(inviteID: "invite-forward", validFor: 100, now: t,
+                                                nonce: Data(repeating: 2, count: 24))
+        XCTAssertNoThrow(try Invitation.fromShareLink(invitation.shareLink))
+        XCTAssertThrowsError(try relay.pairing(id: "not-authorized"))
+
+        let attackerKeys = InMemoryDeviceKeyStore()
+        let attacker = try DeviceSigner.create(role: .trustedApprover, keyStore: attackerKeys)
+        let attackerClient = CompanionClient(signer: attacker, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let acceptance = try attackerClient.accept(invitation, acceptanceID: "forwarded-accept", now: t)
+        // Possession created a pending handshake only. It cannot unlock or
+        // become a pairing until the owner explicitly confirms this identity.
+        XCTAssertThrowsError(try relay.pairing(id: "not-authorized"))
+        let forgedCode = try PairingConfirmation(acceptance: acceptance, owner: ownerSigner.identity,
+                                                verificationCode: "000000", issuedAt: t)
+        XCTAssertEqual(forgedCode.verificationCode, "000000")
+        XCTAssertThrowsError(try owner.confirm(acceptance, verificationCode: "000000", now: t))
+        XCTAssertNoThrow(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t))
+    }
+
+    func testInviteIsConsumedAcrossTwoPendingAcceptances() throws {
+        let ownerKeys = InMemoryDeviceKeyStore()
+        let firstKeys = InMemoryDeviceKeyStore()
+        let secondKeys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
+        let firstSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: firstKeys)
+        let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondKeys)
+        let now = t
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: now)
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { now })
+        let first = CompanionClient(signer: firstSigner, transport: relay, now: { now })
+        let second = CompanionClient(signer: secondSigner, transport: relay, now: { now })
+        let invitation = try owner.createInvite(inviteID: "one-use", validFor: 3_600, now: t,
+                                                nonce: Data(repeating: 6, count: 24))
+        let firstAcceptance = try first.accept(invitation, acceptanceID: "first-acceptance", now: t)
+        let secondAcceptance = try second.accept(invitation, acceptanceID: "second-acceptance", now: t)
+
+        XCTAssertNoThrow(try owner.confirm(firstAcceptance, verificationCode: firstAcceptance.verificationCode, now: t))
+        XCTAssertThrowsError(try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .replay)
+        }
+        // The competing acceptance was discarded atomically with invite use.
+        XCTAssertThrowsError(try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t))
+    }
+
+    func testSameIdentityPairingsAreExactPerTargetAndRevocationIsRechecked() throws {
+        let (relay, owner, approver, firstPairing, session) = try harness()
+        let secondInvite = try owner.createInvite(inviteID: "same-identity-invite", validFor: 3_600, now: t,
+                                                  nonce: Data(repeating: 10, count: 24))
+        let secondAcceptance = try approver.accept(secondInvite, acceptanceID: "same-identity-acceptance", now: t)
+        let secondPairing = try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try approver.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        XCTAssertNotEqual(firstPairing.pairingID, secondPairing.pairingID)
+
+        let request = try owner.requestUnlock(requestID: "exact-target", pairing: secondPairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        // The same identity is trusted through two pairings, but this request
+        // names only the second one.
+        XCTAssertThrowsError(try approver.submitApproval(request: request, pairing: firstPairing, decision: .approved)) {
+            XCTAssertEqual($0 as? CompanionError, .wrongTarget)
+        }
+        let accepted = try approver.submitApproval(request: request, pairing: secondPairing, decision: .approved,
+                                                   approvalID: "exact-target-approval")
+        try owner.revoke(secondPairing)
+        XCTAssertThrowsError(try owner.useApproval(accepted, request: request, useID: "revoked-exact-target")) {
+            XCTAssertEqual($0 as? CompanionError, .revokedPairing)
+        }
+        _ = relay
+    }
+
+    func testForgedInviteAndSwapReceiverIssuerFail() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let invite = try owner.createInvite(inviteID: "forged", validFor: 100, now: t, nonce: Data(repeating: 1, count: 24))
+        var badBytes = invite.signature
+        badBytes[0] ^= 1
+        let forged = try Invitation(payload: invite.payload, signature: badBytes)
+        XCTAssertThrowsError(try forged.validate(at: t)) { XCTAssertEqual($0 as? CompanionError, .invalidSignature) }
+
+        let approverKeys = InMemoryDeviceKeyStore()
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
+        let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        XCTAssertThrowsError(try approver.createInvite(inviteID: "swap", validFor: 100, now: t))
+        XCTAssertThrowsError(try owner.accept(invite, acceptanceID: "wrong-receiver", now: t))
+    }
+
+    func testAnchoredRestoreRejectsSameRevisionRequestExpiryAndReceiptForks() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "checkpoint-request", pairing: pairing,
+                                              session: session, target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 600)
+        _ = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                         approvalID: "checkpoint-approval")
+        let snapshot = try relay.snapshot()
+        let checkpoint = try relay.checkpoint()
+
+        let expiryFork = try alteredSnapshot(relay) { value in
+            var requests = value["requests"] as! [[String: Any]]
+            requests[0]["expiresAt"] = t.addingTimeInterval(3_600).timeIntervalSince1970
+            value["requests"] = requests
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: expiryFork, checkpoint: checkpoint))
+
+        let receiptFork = try alteredSnapshot(relay) { value in
+            var records = value["operationRecords"] as! [[String: Any]]
+            records[0]["response"] = ["acknowledgement": [:]]
+            value["operationRecords"] = records
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: receiptFork, checkpoint: checkpoint))
+
+        try owner.revoke(pairing)
+        let revokedCheckpoint = try relay.checkpoint()
+        let resurrection = try alteredSnapshot(relay) { value in
+            var pairings = value["pairings"] as! [[String: Any]]
+            pairings[0]["state"] = "active"
+            value["pairings"] = pairings
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: resurrection,
+                                                        checkpoint: revokedCheckpoint))
+
+        let lower = try CompanionCheckpoint(ownerIdentityID: checkpoint.ownerIdentityID,
+                                            revision: checkpoint.revision - 1,
+                                            stateRoot: checkpoint.stateRoot)
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: snapshot, checkpoint: lower))
+        let higher = try CompanionCheckpoint(ownerIdentityID: checkpoint.ownerIdentityID,
+                                             revision: checkpoint.revision + 1,
+                                             stateRoot: checkpoint.stateRoot)
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: snapshot, checkpoint: higher))
+    }
+
+    func testRequestCreationAtExactExpiryIsRejected() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        try relay.advance(to: t.addingTimeInterval(10))
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "exact-expiry", pairing: pairing,
+                                                     session: session,
+                                                     target: approver.signer.identity.identityID,
+                                                     message: nil, validFor: 10)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+    }
+
+    func testApprovalBindsPairingSessionAndRequestAndIsSingleUse() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "request-1", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
+        try approval.validateSignature()
+        let verification = try owner.useApproval(approval, request: request, useID: "use-1")
+        XCTAssertEqual(verification.approval.requestID, request.requestID)
+        // Retrying the exact same command returns its durable receipt rather
+        // than applying the approval a second time.
+        XCTAssertEqual(try owner.useApproval(approval, request: request, useID: "use-1"), verification)
+        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "use-2"))
+        _ = relay // keeps the test's ownership of the test backend explicit
+    }
+
+    func testOwnerCanCancelApprovedRequestBeforeConsumptionAndAfterRestart() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "approved-cancel", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "cancel-approval")
+        try owner.cancel(request)
+        XCTAssertEqual(try relay.request(id: request.requestID).status, .cancelled)
+        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "cancel-use"))
+
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), checkpoint: checkpoint)
+        let fixedNow = t
+        let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted, now: { fixedNow })
+        XCTAssertEqual(try restarted.request(id: request.requestID).status, .cancelled)
+        XCTAssertThrowsError(try restartedOwner.useApproval(approval, request: request, useID: "cancel-replay"))
+    }
+
+    func testApprovalUseRequiresTheAcceptedRecordAndExactRequestBindings() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "bound-use", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let accepted = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "accepted-approval")
+
+        let unsigned = Approval(approvalID: "unsubmitted-approval", requestID: request.requestID,
+                                    pairingID: pairing.pairingID, pairEpoch: pairing.epoch, sessionID: request.sessionID,
+                                    activeSetID: request.activeSetID, approver: approver.signer.identity,
+                                    decision: .approved, issuedAt: t, signature: Data())
+        let signature = try approver.signer.sign(domain: "\(CompanionCanonical.version).approval",
+                                                 fields: unsigned.signingFields())
+        let unsubmitted = Approval(approvalID: unsigned.approvalID, requestID: unsigned.requestID,
+                                       pairingID: unsigned.pairingID, pairEpoch: unsigned.pairEpoch,
+                                       sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
+                                       approver: unsigned.approver, decision: unsigned.decision,
+                                       issuedAt: unsigned.issuedAt, signature: signature)
+        XCTAssertThrowsError(try owner.useApproval(unsubmitted, request: request, useID: "unsubmitted-use"))
+
+        let sameIDStaleSession = try signedApproval(signer: approver.signer, approvalID: accepted.approvalID,
+                                                    request: request, pairing: pairing, sessionID: "old-session",
+                                                    activeSetID: request.activeSetID)
+        XCTAssertThrowsError(try owner.useApproval(sameIDStaleSession, request: request, useID: "same-id-stale-use"))
+
+        let staleSession = try signedApproval(signer: approver.signer, approvalID: "stale-approval",
+                                              request: request, pairing: pairing, sessionID: "old-session",
+                                              activeSetID: request.activeSetID)
+        XCTAssertThrowsError(try owner.useApproval(staleSession, request: request, useID: "stale-use"))
+
+        let wrongActiveSet = try signedApproval(signer: approver.signer, approvalID: "wrong-set-approval",
+                                                request: request, pairing: pairing, sessionID: request.sessionID,
+                                                activeSetID: "other-active-set")
+        XCTAssertThrowsError(try owner.useApproval(wrongActiveSet, request: request, useID: "wrong-set-use"))
+
+        XCTAssertNoThrow(try owner.useApproval(accepted, request: request, useID: "accepted-use"))
+        _ = relay
+    }
+
+    func testFirstValidApprovalWinsAcrossSelectedApprovers() throws {
+        let (relay, owner, first, firstPairing, session) = try harness()
+        let secondStore = InMemoryDeviceKeyStore()
+        let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondStore)
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let second = CompanionClient(signer: secondSigner, transport: relay, now: { fixedNow })
+        let invite = try owner.createInvite(inviteID: "first-valid-invite", validFor: 3_600, now: t,
+                                            nonce: Data(repeating: 11, count: 24))
+        let acceptance = try second.accept(invite, acceptanceID: "first-valid-accept", now: t)
+        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let request = try owner.requestUnlock(requestID: "first-valid-request",
+                                              pairings: [firstPairing, secondPairing], session: session,
+                                              targets: [first.signer.identity.identityID, second.signer.identity.identityID],
+                                              message: nil, validFor: 600)
+        _ = try first.submitApproval(request: request, pairing: firstPairing, decision: .approved,
+                                     approvalID: "first-wins", nonce: Data(repeating: 12, count: 24))
+        XCTAssertThrowsError(try second.submitApproval(request: request, pairing: secondPairing,
+                                                       decision: .approved,
+                                                       approvalID: "late-second", nonce: Data(repeating: 13, count: 24)))
+    }
+
+    func testApprovalNonceCannotBeReusedUnderAnotherApprovalID() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "nonce-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let nonce = Data(repeating: 14, count: 24)
+        _ = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                        approvalID: "nonce-first", nonce: nonce)
+        XCTAssertThrowsError(try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                         approvalID: "nonce-second", nonce: nonce))
+        _ = relay
+    }
+
+    func testDeclineByOneApproverDoesNotInvalidateAnotherTarget() throws {
+        let (relay, owner, first, firstPairing, session) = try harness()
+        let secondKeys = InMemoryDeviceKeyStore()
+        let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondKeys)
+        let second = CompanionClient(signer: secondSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let invite = try owner.createInvite(inviteID: "invite-2", validFor: 3_600, now: t, nonce: Data(repeating: 8, count: 24))
+        let acceptance = try second.accept(invite, acceptanceID: "accept-2", now: t)
+        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let targets = [first.signer.identity.identityID, second.signer.identity.identityID]
+        let multi = try owner.requestUnlock(requestID: "multi", pairings: [firstPairing, secondPairing], session: session,
+                                            targets: targets, message: nil, validFor: 600)
+        let declined = try first.submitApproval(request: multi, pairing: firstPairing, decision: .declined)
+        XCTAssertEqual(declined.decision, ApproverDecision.declined)
+        let approved = try second.submitApproval(request: multi, pairing: secondPairing, decision: .approved)
+        XCTAssertEqual(approved.decision, ApproverDecision.approved)
+        XCTAssertThrowsError(try owner.useApproval(declined, request: multi, useID: "declined-use"))
+    }
+
+    func testApprovalIDCollisionCannotOverwriteAnotherRequest() throws {
+        let (relay, owner, first, firstPairing, session) = try harness()
+        let firstRequest = try owner.requestUnlock(requestID: "collision-first", pairing: firstPairing, session: session,
+                                                   target: first.signer.identity.identityID, message: nil, validFor: 600)
+        let firstApproval = try first.submitApproval(request: firstRequest, pairing: firstPairing, decision: .approved,
+                                                      approvalID: "shared-approval-id")
+
+        let secondStore = InMemoryDeviceKeyStore()
+        let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondStore)
+        let fixedNow = t
+        let second = CompanionClient(signer: secondSigner, transport: relay, now: { fixedNow })
+        let invite = try owner.createInvite(inviteID: "collision-invite", validFor: 3_600, now: t,
+                                            nonce: Data(repeating: 9, count: 24))
+        let acceptance = try second.accept(invite, acceptanceID: "collision-acceptance", now: t)
+        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let secondRequest = try owner.requestUnlock(requestID: "collision-second", pairing: secondPairing, session: session,
+                                                    target: second.signer.identity.identityID, message: nil, validFor: 600)
+        XCTAssertThrowsError(try second.submitApproval(request: secondRequest, pairing: secondPairing, decision: .approved,
+                                                       approvalID: "shared-approval-id")) {
+            XCTAssertEqual($0 as? CompanionError, .replay)
+        }
+        XCTAssertEqual(try relay.request(id: secondRequest.requestID).status, .pending)
+        XCTAssertNoThrow(try owner.useApproval(firstApproval, request: firstRequest, useID: "collision-use"))
+    }
+
+    func testSnapshotRejectsOperationHistoryGap() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let fixedNow = t
+        _ = try CompanionClient(signer: signer, transport: relay, now: { fixedNow })
+            .createInvite(inviteID: "history-one", validFor: 600, now: t,
+                          nonce: Data(repeating: 41, count: 24))
+        _ = try CompanionClient(signer: signer, transport: relay, now: { fixedNow })
+            .createInvite(inviteID: "history-two", validFor: 600, now: t,
+                          nonce: Data(repeating: 42, count: 24))
+        let gap = try alteredSnapshot(relay) { snapshot in
+            var records = snapshot["operationRecords"] as! [[String: Any]]
+            records.removeFirst()
+            snapshot["operationRecords"] = records
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: gap))
+    }
+
+    func testSnapshotRejectsTamperedInviteSignatureAndCrossOwnerGraph() throws {
+        let (relay, owner, _, _, _) = try harness()
+        let tamperedInvite = try alteredSnapshot(relay) { snapshot in
+            var invitations = snapshot["invitations"] as! [[String: Any]]
+            let signature = invitations[0]["signature"] as! String
+            let replacement = (signature.first == "A" ? "B" : "A") + String(signature.dropFirst())
+            invitations[0]["signature"] = replacement
+            snapshot["invitations"] = invitations
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: tamperedInvite)) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
+
+        let otherOwnerKeys = InMemoryDeviceKeyStore()
+        let otherOwner = try DeviceSigner.create(role: .owner, keyStore: otherOwnerKeys)
+        let crossOwnerPairing = try alteredSnapshot(relay) { snapshot in
+            var pairings = snapshot["pairings"] as! [[String: Any]]
+            pairings[0]["owner"] = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(otherOwner.identity))
+            snapshot["pairings"] = pairings
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: crossOwnerPairing))
+
+        let crossOwnerSnapshot = try alteredSnapshot(relay) { snapshot in
+            snapshot["owner"] = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(otherOwner.identity))
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: crossOwnerSnapshot))
+        _ = owner
+    }
+
+    func testSnapshotRejectsMismatchedRequestTargetBinding() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "snapshot-binding", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let malformed = try alteredSnapshot(relay) { snapshot in
+            var requests = snapshot["requests"] as! [[String: Any]]
+            var bindings = requests[0]["targetBindings"] as! [[String: Any]]
+            bindings[0]["pairEpoch"] = pairing.epoch + 1
+            requests[0]["targetBindings"] = bindings
+            snapshot["requests"] = requests
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: malformed))
+        _ = request
+    }
+
+    func testSnapshotRejectsMalformedPairingMetadataAndReplayMarkers() throws {
+        let (relay, _, _, _, _) = try harness()
+
+        let malformedID = try alteredSnapshot(relay) { snapshot in
+            var pairings = snapshot["pairings"] as! [[String: Any]]
+            pairings[0]["pairingID"] = "invalid pairing id"
+            snapshot["pairings"] = pairings
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: malformedID))
+
+        let malformedDate = try alteredSnapshot(relay) { snapshot in
+            var pairings = snapshot["pairings"] as! [[String: Any]]
+            pairings[0]["createdAt"] = 10_000_000_000
+            snapshot["pairings"] = pairings
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: malformedDate))
+
+        let malformedMarker = try alteredSnapshot(relay) { snapshot in
+            snapshot["usedInviteIDs"] = ["invalid marker"]
+            snapshot["usedApprovalIDs"] = ["invalid marker"]
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: malformedMarker))
+
+        let oversizedMarkers = try alteredSnapshot(relay) { snapshot in
+            snapshot["usedInviteIDs"] = (0...CompanionLimits.maxSnapshotRecords).map { "invite-marker-\($0)" }
+            snapshot["usedApprovalIDs"] = (0...CompanionLimits.maxSnapshotRecords).map { "approval-marker-\($0)" }
+        }
+        XCTAssertThrowsError(try InMemoryCompanionRelay(testSnapshot: oversizedMarkers))
+    }
+
+    func testRevocationNewActiveSetExpiryAndCancellation() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "stale", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        try owner.revoke(pairing)
+        XCTAssertThrowsError(try approver.submitApproval(request: request, pairing: pairing, decision: .approved))
+
+        let freshPair = try makeFreshPair(owner: owner, relay: relay, suffix: "fresh")
+        let newer = try ActiveSession(owner: owner.signer.identity, sessionID: "session-2", activeSetID: "set-2",
+                                      startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(3_600))
+        _ = try owner.publishSession(newer)
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "old-session", pairing: freshPair, session: session,
+                                                      target: freshPair.approver.identityID, message: nil, validFor: 60))
+        let cancelled = try owner.requestUnlock(requestID: "cancel-me", pairing: freshPair, session: newer,
+                                                target: freshPair.approver.identityID, message: nil, validFor: 60)
+        try owner.cancel(cancelled)
+        XCTAssertEqual(try relay.request(id: cancelled.requestID).status, .cancelled)
+
+        let expirySession = try ActiveSession(owner: owner.signer.identity, sessionID: "session-3", activeSetID: "set-3",
+                                              startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(20))
+        _ = try owner.publishSession(expirySession)
+        let expiring = try owner.requestUnlock(requestID: "expires", pairing: freshPair, session: expirySession,
+                                               target: freshPair.approver.identityID, message: nil, validFor: 10)
+        try relay.advance(to: t.addingTimeInterval(11))
+        XCTAssertEqual(try relay.request(id: expiring.requestID).status, .expired)
+        XCTAssertEqual(try relay.request(id: expiring.requestID).status, .expired)
+    }
+
+    func testRestartPersistenceAndMissingKeyRequiresRepair() throws {
+        let (relay, owner, _, pairing, _) = try harness()
+        let data = try relay.snapshot()
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: data, checkpoint: checkpoint)
+        XCTAssertEqual(try restarted.pairing(id: pairing.pairingID), pairing)
+        let store = InMemoryDeviceKeyStore()
+        let identity = owner.signer.identity
+        let empty = try IdentityManager(keyStore: store).load(identity: identity)
+        XCTAssertEqual(empty.availability, .needsRepair)
+        XCTAssertThrowsError(try CompanionClient(identity: identity, keyStore: store, transport: restarted))
+    }
+
+    func testRateLimitAndIndependentDelayedRecovery() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let owner = CompanionClient(signer: signer, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        for index in 0..<CompanionLimits.maxRateOperations {
+            _ = try owner.createInvite(inviteID: "rate-\(index)", validFor: 100, now: t,
+                                       nonce: Data(repeating: UInt8(index), count: 24))
+        }
+        XCTAssertThrowsError(try owner.createInvite(inviteID: "rate-over", validFor: 100, now: t,
+                                                    nonce: Data(repeating: 9, count: 24))) { XCTAssertEqual($0 as? CompanionError, .rateLimited) }
+
+        let (recoveryRelay, ownerClient, _, _, session) = try harness()
+        let recovery = try LocalRecoveryRequest(recoveryID: "recovery-1", owner: ownerClient.signer.identity,
+                                                session: session, requestedAt: t)
+        XCTAssertEqual(recovery.status(at: t.addingTimeInterval(899)), .waiting)
+        XCTAssertThrowsError(try recovery.confirm(at: t.addingTimeInterval(899)))
+        let confirmed = try recovery.confirm(at: t.addingTimeInterval(900))
+        XCTAssertEqual(confirmed.status, .confirmed)
+        let lateSession = try ActiveSession(owner: ownerClient.signer.identity, sessionID: "short", activeSetID: "short-set",
+                                            startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(10))
+        let late = try LocalRecoveryRequest(recoveryID: "late", owner: ownerClient.signer.identity, session: lateSession, requestedAt: t)
+        XCTAssertThrowsError(try late.confirm(at: t.addingTimeInterval(10))) { XCTAssertEqual($0 as? CompanionError, .expired) }
+        _ = recoveryRelay
+    }
+
+    func testPactRequiresTwoIndependentFiniteCommitmentsAndCannotForceLock() throws {
+        let firstStore = InMemoryDeviceKeyStore(); let secondStore = InMemoryDeviceKeyStore()
+        let first = try DeviceSigner.create(role: .trustedApprover, keyStore: firstStore)
+        let second = try DeviceSigner.create(role: .trustedApprover, keyStore: secondStore)
+        let firstCommitment = try PactFactory.commitment(pactID: "pact-1", signer: first, periodStart: t,
+                                                         periodEnd: t.addingTimeInterval(3_600), profile: Data("first-only".utf8))
+        let pact = try BedtimePact(pactID: "pact-1", proposer: first.identity, participant: second.identity,
+                                  proposerCommitment: firstCommitment, expiresAt: t.addingTimeInterval(600))
+        let secondCommitment = try PactFactory.commitment(pactID: "pact-1", signer: second, periodStart: t,
+                                                          periodEnd: t.addingTimeInterval(3_600), profile: Data("second-only".utf8))
+        let accepted = try pact.accepting(secondCommitment, at: t)
+        XCTAssertEqual(accepted.status, .accepted)
+        XCTAssertNotEqual(firstCommitment.profileCommitment, secondCommitment.profileCommitment)
+        XCTAssertThrowsError(try accepted.cancelling(at: t))
+        XCTAssertEqual(pact.effectiveStatus(at: t.addingTimeInterval(601)), .expired)
+    }
+
+    func testRelayResponseRevisionAndExactRetryAreDurable() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let payload = try InvitePayload(inviteID: "revision-invite", owner: signer.identity,
+                                        issuedAt: t, expiresAt: t.addingTimeInterval(600),
+                                        nonce: Data(repeating: 4, count: 24))
+        let inviteSignature = try signer.sign(domain: "\(CompanionCanonical.version).invite",
+                                              fields: payload.signingFields())
+        let invitation = try Invitation(payload: payload, signature: inviteSignature)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let body = try encoder.encode(invitation)
+        let unsigned = try SignedOperation(operationID: "retry-operation", expectedRevision: 0,
+                                           kind: "invite", signer: signer.identity, body: body,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        let operation = try SignedOperation(operationID: unsigned.operationID,
+                                            expectedRevision: unsigned.expectedRevision,
+                                            kind: unsigned.kind, signer: unsigned.signer,
+                                            body: unsigned.body, signature: signature)
+
+        let first = try relay.submit(operation)
+        XCTAssertEqual(first.revision, 1)
+        XCTAssertEqual(try relay.submit(operation), first)
+        XCTAssertEqual(relay.currentRevision, 1)
+
+        let staleUnsigned = try SignedOperation(operationID: "stale-operation", expectedRevision: 0,
+                                                 kind: operation.kind, signer: operation.signer,
+                                                 body: operation.body, signature: Data(repeating: 0, count: 64))
+        let staleOperation = try SignedOperation(operationID: staleUnsigned.operationID,
+                                                 expectedRevision: staleUnsigned.expectedRevision,
+                                                 kind: staleUnsigned.kind, signer: staleUnsigned.signer,
+                                                 body: staleUnsigned.body,
+                                                 signature: try signer.sign(
+                                                    domain: "\(CompanionCanonical.version).operation",
+                                                    fields: staleUnsigned.signingFields()))
+        XCTAssertThrowsError(try relay.submit(staleOperation)) {
+            XCTAssertEqual($0 as? CompanionError, .staleRevision(expected: 0, actual: 1))
+        }
+
+        let changedExpectation = try SignedOperation(operationID: operation.operationID,
+                                                     expectedRevision: 1, kind: operation.kind,
+                                                     signer: operation.signer, body: operation.body,
+                                                     signature: try signer.sign(
+                                                        domain: "\(CompanionCanonical.version).operation",
+                                                        fields: [operation.operationID, "1", operation.kind,
+                                                                 signer.identity.identityID,
+                                                                 base64URL(signer.identity.publicKey),
+                                                                 base64URL(CompanionCanonical.digest(body))]))
+        XCTAssertThrowsError(try relay.submit(changedExpectation)) {
+            XCTAssertEqual($0 as? CompanionError, .operationConflict)
+        }
+
+        let inbox = try CompanionClient(signer: signer, transport: relay,
+                                        now: { Date(timeIntervalSince1970: 1_700_000_000) }).fetchInbox()
+        XCTAssertTrue(inbox.isEmpty)
+
+        let legacySignature = try signer.sign(
+            domain: "\(CompanionCanonical.version).operation",
+            fields: ["invite", signer.identity.identityID,
+                     base64URL(signer.identity.publicKey),
+                     base64URL(CompanionCanonical.digest(body))])
+        let legacyOperation = try SignedOperation(kind: "invite", signer: signer.identity,
+                                                  body: body, signature: legacySignature)
+        var legacyJSON = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(legacyOperation)) as! [String: Any]
+        legacyJSON.removeValue(forKey: "operationID")
+        legacyJSON.removeValue(forKey: "expectedRevision")
+        let decodedLegacy = try JSONDecoder().decode(
+            SignedOperation.self,
+            from: JSONSerialization.data(withJSONObject: legacyJSON))
+        XCTAssertEqual(decodedLegacy.operationID, legacyOperation.operationID)
+        XCTAssertNoThrow(try decodedLegacy.validateSignature())
+        legacyJSON["operationID"] = "substituted-legacy-id"
+        let substitutedLegacy = try JSONDecoder().decode(
+            SignedOperation.self,
+            from: JSONSerialization.data(withJSONObject: legacyJSON))
+        XCTAssertThrowsError(try substitutedLegacy.validateSignature()) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
+    }
+
+    func testRevisionExhaustionDoesNotApplyCommand() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let owner = CompanionClient(signer: signer, transport: relay,
+                                    now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        relay.setRevisionForTesting(UInt64.max)
+        XCTAssertThrowsError(try owner.createInvite(inviteID: "exhausted", validFor: 600,
+                                                    now: t, nonce: Data(repeating: 6, count: 24))) {
+            XCTAssertEqual($0 as? CompanionError,
+                           .malformed("revision exhausted"))
+        }
+        XCTAssertEqual(relay.currentRevision, UInt64.max)
+        relay.setRevisionForTesting(0)
+        XCTAssertNoThrow(try owner.createInvite(inviteID: "exhausted", validFor: 600,
+                                                 now: t, nonce: Data(repeating: 6, count: 24)))
+    }
+
+    func testSessionRotationRetainsHistoricalRequestsAcrossRestart() throws {
+        let (relay, owner, approver, pairing, sessionA) = try harness()
+        let requestA = try owner.requestUnlock(requestID: "historical-request",
+                                                pairing: pairing, session: sessionA,
+                                                target: approver.signer.identity.identityID,
+                                                message: nil, validFor: 600)
+        let approvalA = try approver.submitApproval(request: requestA, pairing: pairing,
+                                                    decision: .approved)
+        let sessionB = try ActiveSession(owner: owner.signer.identity,
+                                         sessionID: "session-B", activeSetID: "set-B",
+                                         startsAt: t.addingTimeInterval(-1),
+                                         endsAt: t.addingTimeInterval(3_600))
+        _ = try owner.publishSession(sessionB)
+        let data = try relay.snapshot()
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: data, checkpoint: checkpoint)
+        XCTAssertEqual(try restarted.request(id: requestA.requestID).status, .expired)
+        let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted,
+                                             now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        XCTAssertThrowsError(try restartedOwner.useApproval(approvalA, request: requestA,
+                                                            useID: "historical-use"))
+    }
+
+    func testAnchoredSnapshotRejectsRollback() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
+        let owner = CompanionClient(signer: signer, transport: relay,
+                                    now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        _ = try owner.createInvite(inviteID: "anchor-first", validFor: 600, now: t,
+                                   nonce: Data(repeating: 1, count: 24))
+        let olderSnapshot = try relay.snapshot()
+        let olderCheckpoint = try relay.checkpoint()
+        _ = try owner.createInvite(inviteID: "anchor-second", validFor: 600, now: t,
+                                   nonce: Data(repeating: 2, count: 24))
+        let newerCheckpoint = try relay.checkpoint()
+        XCTAssertThrowsError(try InMemoryCompanionRelay(snapshot: olderSnapshot,
+                                                        checkpoint: newerCheckpoint)) {
+            XCTAssertEqual($0 as? CompanionError,
+                           .staleRevision(expected: newerCheckpoint.revision,
+                                          actual: olderCheckpoint.revision))
+        }
+    }
+
+    func testExpiryReadsAndFailedCommandsDoNotAdvanceRevision() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "derived-expiry",
+                                              pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 10)
+        let beforeFailure = relay.currentRevision
+        try relay.advance(to: t.addingTimeInterval(11))
+        XCTAssertEqual(try relay.request(id: request.requestID).status, .expired)
+        XCTAssertEqual(relay.currentRevision, beforeFailure)
+        XCTAssertThrowsError(try approver.submitApproval(request: request,
+                                                         pairing: pairing, decision: .approved))
+        XCTAssertEqual(relay.currentRevision, beforeFailure)
+        let persisted = try JSONSerialization.jsonObject(with: relay.snapshot()) as! [String: Any]
+        let persistedRequest = (persisted["requests"] as! [[String: Any]])[0]
+        XCTAssertEqual(persistedRequest["status"] as? String, "expired")
+
+        let (secondRelay, secondOwner, secondApprover, secondPairing, secondSession) = try harness()
+        let secondRequest = try secondOwner.requestUnlock(requestID: "failed-use-expiry",
+                                                           pairing: secondPairing, session: secondSession,
+                                                           target: secondApprover.signer.identity.identityID,
+                                                           message: nil, validFor: 10)
+        let approval = try secondApprover.submitApproval(request: secondRequest,
+                                                         pairing: secondPairing, decision: .approved)
+        let beforeUseFailure = secondRelay.currentRevision
+        try secondRelay.advance(to: t.addingTimeInterval(11))
+        XCTAssertThrowsError(try secondOwner.useApproval(approval, request: secondRequest,
+                                                         useID: "expired-use"))
+        XCTAssertEqual(secondRelay.currentRevision, beforeUseFailure)
+        let secondPersisted = try JSONSerialization.jsonObject(with: secondRelay.snapshot()) as! [String: Any]
+        let secondPersistedRequest = (secondPersisted["requests"] as! [[String: Any]])[0]
+        XCTAssertEqual(secondPersistedRequest["status"] as? String, "expired")
+    }
+
+    func testPairingReplacementRevokesExactOldEpoch() throws {
+        let (relay, owner, approver, oldPairing, session) = try harness()
+        let oldRequest = try owner.requestUnlock(requestID: "replacement-old-request",
+                                                 pairing: oldPairing, session: session,
+                                                 target: approver.signer.identity.identityID,
+                                                 message: nil, validFor: 600)
+        let replacementStore = InMemoryDeviceKeyStore()
+        let replacementSigner = try DeviceSigner.create(role: .trustedApprover,
+                                                         keyStore: replacementStore)
+        let proposal = try PairingReplacement.propose(
+            replacementID: "replacement-1", previousPairing: oldPairing,
+            replacementPairingID: "replacement-pairing-1", signer: replacementSigner, issuedAt: t)
+        let newPairing = try owner.replacePairing(proposal)
+        _ = try owner.grantScopes(pairing: newPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        XCTAssertEqual(try relay.pairing(id: oldPairing.pairingID).state, .revoked)
+        XCTAssertEqual(try relay.pairing(id: newPairing.pairingID), newPairing)
+        XCTAssertEqual(newPairing.approver, replacementSigner.identity)
+        XCTAssertThrowsError(try approver.submitApproval(request: oldRequest,
+                                                          pairing: oldPairing, decision: .approved)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+
+        let replacement = CompanionClient(signer: replacementSigner, transport: relay,
+                                          now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        _ = try replacement.acceptScopes(pairing: newPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let newRequest = try owner.requestUnlock(requestID: "replacement-new-request",
+                                                 pairing: newPairing, session: session,
+                                                 target: replacementSigner.identity.identityID,
+                                                 message: nil, validFor: 600)
+        XCTAssertNoThrow(try replacement.submitApproval(request: newRequest,
+                                                         pairing: newPairing, decision: .approved))
+    }
+
+    func testScopeConsentIsBilateralAndRevocationInvalidatesApproval() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "consent-revoke-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "consent-revoke-approval")
+        _ = try approver.revokeScopes(pairing: pairing, scopes: [.approveEarlyEnd])
+        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "consent-revoke-use"))
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "consent-revoked-new", pairing: pairing, session: session,
+                                                     target: approver.signer.identity.identityID, message: nil, validFor: 600)) {
+            XCTAssertEqual($0 as? CompanionError, .consentRequired)
+        }
+        XCTAssertEqual(try relay.consent(relationshipID: pairing.pairingID).activeScopes(), [.receiveRequests])
+    }
+
+    func testR6ScopeCannotBeGrantedOrAuthorizeDelivery() throws {
+        let (relay, owner, approver, pairing, _) = try harness()
+        XCTAssertThrowsError(try owner.grantScopes(pairing: pairing, scopes: [.earlyEndNotices])) {
+            XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
+        }
+        XCTAssertThrowsError(try approver.acceptScopes(pairing: pairing, scopes: [.weeklySharedSummaries])) {
+            XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
+        }
+        XCTAssertThrowsError(try owner.grantScopes(pairing: pairing, scopes: [.mutualPact])) {
+            XCTAssertEqual($0 as? CompanionError, .unsupportedScope)
+        }
+        XCTAssertEqual(try relay.consent(relationshipID: pairing.pairingID).activeScopes(),
+                       [.approveEarlyEnd, .receiveRequests])
+    }
+
+    func testConsentIsNotCopiedToReplacementPairing() throws {
+        let (relay, owner, _, oldPairing, session) = try harness()
+        let replacementStore = InMemoryDeviceKeyStore()
+        let replacementSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: replacementStore)
+        let proposal = try PairingReplacement.propose(replacementID: "scope-replacement",
+                                                       previousPairing: oldPairing,
+                                                       replacementPairingID: "scope-replacement-pairing",
+                                                       signer: replacementSigner, issuedAt: t)
+        let replacementPairing = try owner.replacePairing(proposal)
+        XCTAssertThrowsError(try owner.requestUnlock(requestID: "stale-consent", pairing: replacementPairing,
+                                                     session: session,
+                                                     target: replacementSigner.identity.identityID,
+                                                     message: nil, validFor: 600)) {
+            XCTAssertEqual($0 as? CompanionError, .consentRequired)
+        }
+        _ = relay
+    }
+
+    func testPreScopeApprovedRequestMigratesTerminalAndCannotBeUsed() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "legacy-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let legacyUnsigned = Approval(approvalID: "legacy-approval", requestID: request.requestID,
+                                      pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                      sessionID: request.sessionID, activeSetID: request.activeSetID,
+                                      approver: approver.signer.identity, decision: .approved,
+                                      issuedAt: t, signature: Data())
+        let legacySignature = try approver.signer.sign(
+            domain: "\(CompanionCanonical.version).approval", fields: legacyUnsigned.signingFields())
+        let legacyApproval = Approval(approvalID: legacyUnsigned.approvalID, requestID: legacyUnsigned.requestID,
+                                      pairingID: legacyUnsigned.pairingID, pairEpoch: legacyUnsigned.pairEpoch,
+                                      sessionID: legacyUnsigned.sessionID, activeSetID: legacyUnsigned.activeSetID,
+                                      approver: legacyUnsigned.approver, decision: legacyUnsigned.decision,
+                                      issuedAt: legacyUnsigned.issuedAt, signature: legacySignature)
+        var object = try JSONSerialization.jsonObject(with: relay.snapshot()) as! [String: Any]
+        var requests = object["requests"] as! [[String: Any]]
+        requests[0].removeValue(forKey: "consentGeneration")
+        var bindings = requests[0]["targetBindings"] as! [[String: Any]]
+        bindings[0].removeValue(forKey: "consentGeneration")
+        requests[0]["targetBindings"] = bindings
+        requests[0]["status"] = "approved"
+        var decisions = requests[0]["decisions"] as! [String: String]
+        decisions[approver.signer.identity.identityID] = "approved"
+        requests[0]["decisions"] = decisions
+        object["requests"] = requests
+        object["approvals"] = [try JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyApproval))]
+        let migratedRelay = try InMemoryCompanionRelay(testSnapshot: JSONSerialization.data(withJSONObject: object))
+        let migratedRequest = try migratedRelay.request(id: request.requestID)
+        XCTAssertEqual(migratedRequest.status, .expired)
+        XCTAssertEqual(migratedRequest.consentGeneration, 0)
+        let fixedNow = t
+        let migratedOwner = CompanionClient(signer: owner.signer, transport: migratedRelay, now: { fixedNow })
+        XCTAssertThrowsError(try migratedOwner.useApproval(legacyApproval, request: migratedRequest,
+                                                            useID: "legacy-use"))
+    }
+
+    func testConsentGenerationInvalidatesApprovalAcrossRegrantAndRestart() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "generation-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "generation-approval")
+        let firstGeneration = try relay.consent(relationshipID: pairing.pairingID).generation
+        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let second = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        XCTAssertGreaterThan(second.generation, firstGeneration)
+        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        XCTAssertEqual(try relay.request(id: request.requestID).status, .expired)
+        XCTAssertThrowsError(try owner.useApproval(approval, request: request, useID: "generation-use"))
+        let checkpoint = try relay.checkpoint()
+        let restarted = try InMemoryCompanionRelay(snapshot: relay.snapshot(), checkpoint: checkpoint)
+        let fixedNow = t
+        let restartedOwner = CompanionClient(signer: owner.signer, transport: restarted, now: { fixedNow })
+        XCTAssertThrowsError(try restartedOwner.useApproval(approval, request: request, useID: "generation-restart-use"))
+    }
+
+    func testApprovalSignatureBindsConsentGeneration() throws {
+        let (_, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "generation-signature-request", pairing: pairing,
+                                              session: session, target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
+                                                   approvalID: "generation-signature-approval")
+        let altered = Approval(approvalID: approval.approvalID, requestID: approval.requestID,
+                               pairingID: approval.pairingID, pairEpoch: approval.pairEpoch,
+                               sessionID: approval.sessionID, activeSetID: approval.activeSetID,
+                               approver: approval.approver, decision: approval.decision,
+                               issuedAt: approval.issuedAt,
+                               consentGeneration: approval.consentGeneration + 1,
+                               nonce: approval.nonce, signature: approval.signature)
+        XCTAssertThrowsError(try altered.validateSignature()) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
+    }
+
+    func testMismatchedApprovalGenerationLeavesRequestPending() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "generation-mismatch-request", pairing: pairing,
+                                              session: session, target: approver.signer.identity.identityID,
+                                              message: nil, validFor: 600)
+        let generation = request.consentGeneration + 1
+        let unsigned = Approval(approvalID: "generation-mismatch-approval", requestID: request.requestID,
+                                pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+                                sessionID: request.sessionID, activeSetID: request.activeSetID,
+                                approver: approver.signer.identity, decision: .approved, issuedAt: t,
+                                consentGeneration: generation, nonce: Data(repeating: 21, count: 24),
+                                signature: Data())
+        let signature = try approver.signer.sign(domain: "\(CompanionCanonical.version).approval",
+                                                  fields: unsigned.signingFields())
+        let mismatched = Approval(approvalID: unsigned.approvalID, requestID: unsigned.requestID,
+                                 pairingID: unsigned.pairingID, pairEpoch: unsigned.pairEpoch,
+                                 sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
+                                 approver: unsigned.approver, decision: unsigned.decision,
+                                 issuedAt: unsigned.issuedAt, consentGeneration: generation,
+                                 nonce: unsigned.nonce, signature: signature)
+        XCTAssertThrowsError(try approver.transport.submit(
+            try signedOperation(kind: "approval", signer: approver.signer,
+                                body: mismatched, operationID: "generation-mismatch-op")))
+        XCTAssertEqual(try relay.request(id: request.requestID).status, .pending)
+    }
+
+    func testEpochOverflowIsRejectedWithoutArithmeticTrap() throws {
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        XCTAssertThrowsError(try IdentityReplacement(replacementID: "identity-overflow",
+                                                      previous: ownerSigner.identity,
+                                                      replacement: approverSigner.identity,
+                                                      previousEpoch: UInt64.max,
+                                                      replacementEpoch: UInt64.max,
+                                                      issuedAt: t, signature: Data()))
+        let pairing = try Pairing(pairingID: "pairing-overflow", owner: ownerSigner.identity,
+                                  approver: approverSigner.identity, epoch: UInt64.max,
+                                  createdAt: t, state: .active)
+        XCTAssertThrowsError(try PairingReplacement.propose(replacementID: "pairing-overflow-replacement",
+                                                            previousPairing: pairing,
+                                                            replacementPairingID: "replacement",
+                                                            signer: try DeviceSigner.create(
+                                                                role: .trustedApprover,
+                                                                keyStore: InMemoryDeviceKeyStore()),
+                                                            issuedAt: t))
+    }
+
+    func testQuietHoursArePrivateLocalNotificationPolicy() throws {
+        let policy = try QuietHoursPolicy(startMinute: 22 * 60, endMinute: 7 * 60, suppressApproverNotifications: true)
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let night = calendar.date(from: DateComponents(timeZone: calendar.timeZone, year: 2023, month: 11, day: 14, hour: 23))!
+        let day = calendar.date(from: DateComponents(timeZone: calendar.timeZone, year: 2023, month: 11, day: 14, hour: 12))!
+        XCTAssertTrue(policy.suppressesNotifications(at: night, calendar: calendar))
+        XCTAssertFalse(policy.suppressesNotifications(at: day, calendar: calendar))
+        XCTAssertNil(policy.score)
+    }
+
+    private func signedOperation<T: Encodable>(kind: String, signer: DeviceSigner,
+                                               body: T, operationID: String) throws -> SignedOperation {
+        let data = try JSONEncoder().encode(body)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: kind, signer: signer.identity, body: data,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        return try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                   kind: kind, signer: signer.identity, body: data,
+                                   signature: signature)
+    }
+
+    private func signedApproval(signer: DeviceSigner, approvalID: String, request: TrustedRequest,
+                                pairing: Pairing, sessionID: String, activeSetID: String) throws -> Approval {
+        let unsigned = Approval(approvalID: approvalID, requestID: request.requestID,
+                                    pairingID: pairing.pairingID, pairEpoch: pairing.epoch, sessionID: sessionID,
+                                    activeSetID: activeSetID, approver: signer.identity, decision: .approved,
+                                    issuedAt: t, signature: Data())
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).approval",
+                                        fields: unsigned.signingFields())
+        return Approval(approvalID: unsigned.approvalID, requestID: unsigned.requestID,
+                            pairingID: unsigned.pairingID, pairEpoch: unsigned.pairEpoch,
+                            sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
+                            approver: unsigned.approver, decision: unsigned.decision,
+                            issuedAt: unsigned.issuedAt, signature: signature)
+    }
+
+    private func alteredSnapshot(_ relay: InMemoryCompanionRelay,
+                                 mutate: (inout [String: Any]) -> Void) throws -> Data {
+        var snapshot = try JSONSerialization.jsonObject(with: relay.snapshot()) as! [String: Any]
+        mutate(&snapshot)
+        return try JSONSerialization.data(withJSONObject: snapshot)
+    }
+
+    private func makeFreshPair(owner: CompanionClient, relay: InMemoryCompanionRelay, suffix: String) throws -> Pairing {
+        let store = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .trustedApprover, keyStore: store)
+        let approver = CompanionClient(signer: signer, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let invitation = try owner.createInvite(inviteID: "invite-\(suffix)", validFor: 3_600, now: t,
+                                                nonce: Data(repeating: 3, count: 24))
+        let acceptance = try approver.accept(invitation, acceptanceID: "accept-\(suffix)", now: t)
+        let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
+        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        return pairing
+    }
+}
