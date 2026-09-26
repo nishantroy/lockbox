@@ -2,13 +2,14 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var coordinator = ScreenTimeCoordinator()
+    @StateObject private var companion = CompanionCoordinator()
     @State private var selectedTab = 0
     @State private var lockboxPath: [QuickActionRoute.Destination] = []
 
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack(path: $lockboxPath) {
-                LockboxTabView(coordinator: coordinator, navigationPath: $lockboxPath)
+                LockboxTabView(coordinator: coordinator, companion: companion, navigationPath: $lockboxPath)
                     .navigationDestination(for: QuickActionRoute.Destination.self) { destination in
                         switch destination {
                         case .recovery:
@@ -36,7 +37,7 @@ struct ContentView: View {
             // This tab intentionally has no authorization gate. A companion
             // user can read the recovery explanation without Screen Time.
             NavigationStack {
-                PeopleView()
+                PeopleView(coordinator: coordinator, companion: companion)
             }
             .tabItem {
                 Label("People", systemImage: "person.2")
@@ -44,7 +45,7 @@ struct ContentView: View {
             .tag(1)
 
             NavigationStack {
-                SettingsView(coordinator: coordinator)
+                SettingsView(coordinator: coordinator, companion: companion)
             }
             .tabItem {
                 Label("Settings", systemImage: "gearshape")

@@ -65,13 +65,28 @@ public struct RelayResponse: Codable, Hashable, Sendable {
     public let operationID: String
     public let revision: UInt64
     public let result: RelayResult
+    /// Owner-scoped identity the response's revision/state root apply to.
+    /// Added additively (R5 relay plan, Slice B1) for the on-device rollback
+    /// anchor (`RollbackAnchor` in `HTTPTransport.swift`); optional so the
+    /// in-memory relay and every existing test keep decoding/encoding
+    /// unchanged. A hosted relay (Slice A) should populate it.
+    public let ownerIdentityID: String?
+    /// Canonical state-root digest (32 bytes) for `revision`, as described in
+    /// `docs/companion-security.md`. Optional for the same back-compat
+    /// reason as `ownerIdentityID`.
+    public let stateRoot: Data?
 
-    public init(operationID: String, revision: UInt64, result: RelayResult) throws {
+    public init(operationID: String, revision: UInt64, result: RelayResult,
+                ownerIdentityID: String? = nil, stateRoot: Data? = nil) throws {
         try requireIdentifier(operationID, name: "operation ID")
         guard revision > 0 else { throw CompanionError.malformed("invalid response revision") }
+        if let ownerIdentityID { try requireIdentifier(ownerIdentityID, name: "response owner ID") }
+        if let stateRoot { guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid response state root") } }
         self.operationID = operationID
         self.revision = revision
         self.result = result
+        self.ownerIdentityID = ownerIdentityID
+        self.stateRoot = stateRoot
     }
 }
 
@@ -79,12 +94,16 @@ public struct InboxResponse: Codable, Hashable, Sendable {
     public let ownerIdentityID: String
     public let revision: UInt64
     public let requests: [TrustedRequest]
+    /// Same additive anchoring field as `RelayResponse.stateRoot`.
+    public let stateRoot: Data?
 
-    public init(ownerIdentityID: String, revision: UInt64, requests: [TrustedRequest]) throws {
+    public init(ownerIdentityID: String, revision: UInt64, requests: [TrustedRequest], stateRoot: Data? = nil) throws {
         try requireIdentifier(ownerIdentityID, name: "identity ID")
+        if let stateRoot { guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid response state root") } }
         self.ownerIdentityID = ownerIdentityID
         self.revision = revision
         self.requests = requests
+        self.stateRoot = stateRoot
     }
 }
 

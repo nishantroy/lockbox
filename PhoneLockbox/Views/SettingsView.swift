@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
     @State private var showingDeveloperUnlock = false
     @State private var showingEmergencyReset = false
     @State private var showingDesignGallery = false
@@ -151,6 +152,7 @@ struct SettingsView: View {
 
             DeveloperToolsSection(
                 coordinator: coordinator,
+                companion: companion,
                 showingDeveloperUnlock: $showingDeveloperUnlock,
                 showingEmergencyReset: $showingEmergencyReset,
                 showingDesignGallery: $showingDesignGallery
@@ -205,14 +207,39 @@ private enum NotificationAccessPresentation {
 
 private struct DeveloperToolsSection: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
     @Binding var showingDeveloperUnlock: Bool
     @Binding var showingEmergencyReset: Bool
     @Binding var showingDesignGallery: Bool
+    @State private var relayURLDraft = ""
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 14) {
                 LockboxSectionLabel("Developer", systemImage: "wrench.and.screwdriver")
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Companion relay address")
+                        .font(.subheadline.weight(.semibold))
+                    TextField(CompanionCoordinator.defaultRelayBaseURLString, text: $relayURLDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        #endif
+                        .onAppear { relayURLDraft = companion.relayBaseURLString }
+                        .onSubmit { applyRelayURL() }
+                        .accessibilityLabel("Companion relay address")
+                        .accessibilityHint("Defaults to the local relay at 127.0.0.1 port 8002")
+                    Button("Save relay address") { applyRelayURL() }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                    Text("Prototype — local relay only. On a device, set this to your Mac's LAN address so the People tab can reach it.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                }
+
+                Divider().overlay(LockboxTheme.border)
 
                 Button {
                     showingDesignGallery = true
@@ -296,5 +323,14 @@ private struct DeveloperToolsSection: View {
                 DiagnosticsSection(coordinator: coordinator)
             }
         }
+    }
+
+    private func applyRelayURL() {
+        let trimmed = relayURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, URL(string: trimmed) != nil else {
+            relayURLDraft = companion.relayBaseURLString
+            return
+        }
+        companion.relayBaseURLString = trimmed
     }
 }

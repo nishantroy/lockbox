@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import DeviceActivity
 import FamilyControls
 import ManagedSettings
@@ -172,6 +173,21 @@ final class ScreenTimeCoordinator: ObservableObject {
 
     var activeLockOriginSummary: String {
         RuntimeLockPresentation.originSummary(for: enforcementSessions(at: currentDate()))
+    }
+
+    /// Read-only identity for the trusted-person companion prototype (R5,
+    /// Slice B1). It never mutates coordinator state and is `nil` unless
+    /// there is exactly one active enforcement session, since a companion
+    /// "ask to end early" request targets one exact current session only.
+    /// `activeSetID` is a stable digest of the session's restricted-app
+    /// selection so a later approval binds to the set that was actually
+    /// active, not merely to a session identifier.
+    var companionActiveSessionIdentity: (sessionID: String, activeSetID: String, start: Date, end: Date)? {
+        let sessions = enforcementSessions(at: currentDate())
+        guard sessions.count == 1, let session = sessions.first else { return nil }
+        let digest = SHA256.hash(data: session.policy.selectionData)
+        let activeSetID = digest.map { String(format: "%02x", $0) }.joined()
+        return (session.id.uuidString, activeSetID, session.start, session.end)
     }
 
     var nextScheduledStart: Date? {

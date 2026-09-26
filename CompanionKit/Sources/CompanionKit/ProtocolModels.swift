@@ -882,11 +882,14 @@ public struct CompanionClient: Sendable {
     }
 }
 
-private func randomNonce() -> Data {
+/// Shared with `AsyncCompanionClient` in `HTTPTransport.swift`. Widened from
+/// `private` to file-module visibility only for that reuse; behavior is
+/// unchanged.
+func randomNonce() -> Data {
     Data((0..<24).map { _ in UInt8.random(in: 0...255) })
 }
 
-private func operationIdentifier(kind: String, signer: DeviceIdentity, body: Data) -> String {
+func operationIdentifier(kind: String, signer: DeviceIdentity, body: Data) -> String {
     let digest = SHA256.hash(data: CompanionCanonical.bytes(
         domain: "\(CompanionCanonical.version).operation-id",
         fields: [kind, signer.identityID, base64URL(CompanionCanonical.digest(body))]))
