@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16.9-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: companion_relay
+    ports:
+      # Loopback-only, per /Users/nishantroy/code/AGENTS.md's port registry:
+      # phone-lockbox relay Postgres is reserved at 127.0.0.1:56330.
+      - "127.0.0.1:56330:5432"
+    volumes:
+      - phone_lockbox_relay_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d companion_relay"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  phone_lockbox_relay_pgdata:

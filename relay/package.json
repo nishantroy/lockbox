@@ -1,0 +1,29 @@
+{
+  "name": "lockbox-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "R5 companion relay: TypeScript port of CompanionKit/CompanionRelayService, deployable as Vercel Node functions with Neon/Postgres.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=.env scripts/dev-server.ts",
+    "db:start": "docker compose up -d postgres",
+    "db:stop": "docker compose down",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "retention:purge": "tsx --env-file-if-exists=.env scripts/retention-purge.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

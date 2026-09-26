@@ -1,0 +1,113 @@
+{
+  "notes": "Generated from relay/src/errors.ts's STATUS_BY_CODE. All relay error bodies are exactly { \"error\": \"<code>\" } with no other fields.",
+  "codes": [
+    {
+      "code": "already_paired",
+      "httpStatus": 409
+    },
+    {
+      "code": "consent_required",
+      "httpStatus": 403
+    },
+    {
+      "code": "expired",
+      "httpStatus": 409
+    },
+    {
+      "code": "idempotency_conflict",
+      "httpStatus": 409
+    },
+    {
+      "code": "integrity_error",
+      "httpStatus": 500
+    },
+    {
+      "code": "internal",
+      "httpStatus": 500
+    },
+    {
+      "code": "invalid_envelope",
+      "httpStatus": 400
+    },
+    {
+      "code": "invalid_signature",
+      "httpStatus": 401
+    },
+    {
+      "code": "invalid_transition",
+      "httpStatus": 409
+    },
+    {
+      "code": "malformed",
+      "httpStatus": 400
+    },
+    {
+      "code": "not_found",
+      "httpStatus": 404
+    },
+    {
+      "code": "operation_conflict",
+      "httpStatus": 409
+    },
+    {
+      "code": "pairing_conflict",
+      "httpStatus": 409
+    },
+    {
+      "code": "payload_too_large",
+      "httpStatus": 413
+    },
+    {
+      "code": "rate_limited",
+      "httpStatus": 429
+    },
+    {
+      "code": "replay",
+      "httpStatus": 409
+    },
+    {
+      "code": "revision_overflow",
+      "httpStatus": 409
+    },
+    {
+      "code": "revoked_pairing",
+      "httpStatus": 403
+    },
+    {
+      "code": "stale_revision",
+      "httpStatus": 409
+    },
+    {
+      "code": "stale_session",
+      "httpStatus": 409
+    },
+    {
+      "code": "unauthorized",
+      "httpStatus": 403
+    },
+    {
+      "code": "unknown_identity",
+      "httpStatus": 401
+    },
+    {
+      "code": "unknown_owner",
+      "httpStatus": 403
+    },
+    {
+      "code": "unsupported_operation",
+      "httpStatus": 403
+    },
+    {
+      "code": "unsupported_scope",
+      "httpStatus": 403
+    },
+    {
+      "code": "wrong_target",
+      "httpStatus": 403
+    },
+    {
+      "code": "wrong_verification_code",
+      "httpStatus": 403
+    }
+  ]
+}
