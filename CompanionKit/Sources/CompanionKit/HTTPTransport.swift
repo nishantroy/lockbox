@@ -199,6 +199,14 @@ public struct RollbackAnchor: Sendable {
         "\(relayBaseURL)#\(ownerIdentityID)"
     }
 
+    /// Reads the current checkpoint for `(relayBaseURL, ownerIdentityID)`
+    /// without mutating it. Uses the same atomic, fail-closed-on-corruption
+    /// path as `accept`.
+    public func currentCheckpoint(relayBaseURL: String, ownerIdentityID: String) throws -> CompanionCheckpoint? {
+        let key = Self.storageKey(relayBaseURL: relayBaseURL, ownerIdentityID: ownerIdentityID)
+        return try store.withCheckpoint(forKey: key) { current in (current, nil) }
+    }
+
     /// - Parameter enforceIfNoCheckpoint: Governs behavior only when there is
     ///   **no existing checkpoint** for this key yet. Once a checkpoint
     ///   exists, a missing state root is always rejected and the revision may
@@ -233,6 +241,23 @@ public struct RollbackAnchor: Sendable {
 
     public func resetAll() throws {
         try store.resetAll()
+    }
+}
+
+/// Normalizes a relay base URL for anchor keying: lowercases the scheme and
+/// host, makes the port explicit (falling back to the scheme's conventional
+/// default when absent), and drops a trailing slash. Without this,
+/// `http://Host:8002/`, `http://host:8002`, and `HTTP://host:8002` would
+/// anchor as three different keys for what is really one relay.
+extension URL {
+    var companionAnchorKey: String {
+        let components = URLComponents(url: self, resolvingAgainstBaseURL: false)
+        let scheme = (components?.scheme ?? "http").lowercased()
+        let host = (components?.host ?? "").lowercased()
+        let port = components?.port ?? (scheme == "https" ? 443 : 80)
+        var path = components?.path ?? ""
+        while path.hasSuffix("/") { path.removeLast() }
+        return "\(scheme)://\(host):\(port)\(path)"
     }
 }
 
@@ -314,9 +339,22 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
                                 ownerIdentityID: String?) throws {
         guard let anchor else { return }
         guard operation.signer.role == .owner else { return }
+        let anchorKey = baseURL.companionAnchorKey
         guard let ownerIdentityID else {
             if enforceStateRoot {
                 throw CompanionTransportError.server(.malformed("relay response for an owner-signed operation is missing its owner identity"))
+            }
+            // Even when first-use enforcement is relaxed, an owner-signed
+            // operation whose response omits its own identity must still
+            // respect an anchor already established for this exact owner —
+            // otherwise a compromised relay could dodge anchoring simply by
+            // omitting the field on later responses.
+            do {
+                if try anchor.currentCheckpoint(relayBaseURL: anchorKey, ownerIdentityID: operation.signer.identityID) != nil {
+                    throw CompanionTransportError.server(.malformed("relay response for an owner-signed operation is missing its owner identity, but an anchor is already established"))
+                }
+            } catch let error as CompanionError {
+                throw CompanionTransportError.server(error)
             }
             return
         }
@@ -327,7 +365,7 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         }
         try operation.signer.validate()
         do {
-            try anchor.accept(relayBaseURL: baseURL.absoluteString, ownerIdentityID: ownerIdentityID,
+            try anchor.accept(relayBaseURL: anchorKey, ownerIdentityID: ownerIdentityID,
                               revision: revision, stateRoot: stateRoot, enforceIfNoCheckpoint: enforceStateRoot)
         } catch let error as CompanionError {
             throw CompanionTransportError.server(error)

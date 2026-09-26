@@ -467,6 +467,112 @@ final class HTTPTransportTests: XCTestCase {
         XCTAssertEqual(try loadCheckpoint(store, relayBaseURL: "http://staging.example:8002", ownerIdentityID: "owner-1")?.revision, 1)
     }
 
+    // MARK: - Anchor key URL normalization
+
+    func testAnchorKeyNormalizesSchemeHostPortAndTrailingSlash() {
+        let variants = [
+            "http://127.0.0.1:8002",
+            "http://127.0.0.1:8002/",
+            "HTTP://127.0.0.1:8002",
+            "http://127.0.0.1:8002",
+        ]
+        let keys = Set(variants.map { URL(string: $0)!.companionAnchorKey })
+        XCTAssertEqual(keys.count, 1, "expected every variant to normalize to the same key, got \(keys)")
+    }
+
+    func testAnchorKeyMakesTheDefaultPortExplicit() {
+        XCTAssertEqual(URL(string: "http://example.com")!.companionAnchorKey, "http://example.com:80")
+        XCTAssertEqual(URL(string: "https://example.com")!.companionAnchorKey, "https://example.com:443")
+        XCTAssertEqual(URL(string: "https://example.com:8443")!.companionAnchorKey, "https://example.com:8443")
+    }
+
+    func testAnchorKeyLowercasesSchemeAndHostButKeepsCasedPathSegmentsUntouched() {
+        XCTAssertEqual(URL(string: "HTTP://Example.COM:8002/Relay")!.companionAnchorKey, "http://example.com:8002/Relay")
+    }
+
+    func testDifferentlyFormattedEquivalentBaseURLsShareOneAnchor() async throws {
+        let (ownerSigner, invitation) = try makeInvite()
+        let anchorStore = InMemoryRollbackAnchorStore()
+        let ownerIdentityID = ownerSigner.identity.identityID
+        let transport1 = HTTPCompanionTransport(baseURL: URL(string: "http://127.0.0.1:8002")!,
+                                                session: StubURLProtocol.makeSession(), anchorStore: anchorStore)
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 4,
+                                                 ownerIdentityID: ownerIdentityID, stateRoot: Data(repeating: 1, count: 32))
+            return .init(status: 200, body: body)
+        }
+        _ = try await AsyncCompanionClient(signer: ownerSigner, transport: transport1, now: { fixedTime })
+            .createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime, nonce: invitation.payload.nonce)
+
+        // A trailing slash and different casing describe the same relay.
+        let transport2 = HTTPCompanionTransport(baseURL: URL(string: "HTTP://127.0.0.1:8002/")!,
+                                                session: StubURLProtocol.makeSession(), anchorStore: anchorStore)
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            // A lower revision than transport1 already anchored — must be
+            // rejected as a regression if the two transports share one key.
+            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 2,
+                                                 ownerIdentityID: ownerIdentityID, stateRoot: Data(repeating: 2, count: 32))
+            return .init(status: 200, body: body)
+        }
+        let (_, invitation2) = try makeInvite()
+        do {
+            _ = try await AsyncCompanionClient(signer: ownerSigner, transport: transport2, now: { fixedTime })
+                .createInvite(inviteID: invitation2.payload.inviteID, validFor: 3_600, now: fixedTime, nonce: invitation2.payload.nonce)
+            XCTFail("expected the two differently-formatted base URLs to share one anchor and reject the regression")
+        } catch CompanionTransportError.server(.staleRevision(let expected, let actual)) {
+            XCTAssertEqual(expected, 4)
+            XCTAssertEqual(actual, 2)
+        }
+    }
+
+    // MARK: - Missing owner identity with an existing checkpoint
+
+    func testMissingOwnerIdentityIsRejectedWhenACheckpointAlreadyExistsEvenWithEnforcementRelaxed() async throws {
+        let (ownerSigner, invitation) = try makeInvite()
+        let anchorStore = InMemoryRollbackAnchorStore()
+        let ownerIdentityID = ownerSigner.identity.identityID
+        let anchor = RollbackAnchor(store: anchorStore)
+        try anchor.accept(relayBaseURL: URL(string: "http://127.0.0.1:8002")!.companionAnchorKey, ownerIdentityID: ownerIdentityID,
+                          revision: 2, stateRoot: Data(repeating: 1, count: 32), enforceIfNoCheckpoint: true)
+        let transport = HTTPCompanionTransport(baseURL: URL(string: "http://127.0.0.1:8002")!,
+                                               session: StubURLProtocol.makeSession(), anchorStore: anchorStore,
+                                               enforceStateRoot: false)
+        let client = AsyncCompanionClient(signer: ownerSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            // No ownerIdentityID at all this time, from an owner-signed op.
+            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 3)
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client.createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime,
+                                              nonce: invitation.payload.nonce)
+            XCTFail("expected rejection: a checkpoint already exists for this owner")
+        } catch CompanionTransportError.server(.malformed) {
+            // expected
+        }
+    }
+
+    func testMissingOwnerIdentityIsAllowedWhenNoCheckpointExistsAndEnforcementIsRelaxed() async throws {
+        let (ownerSigner, invitation) = try makeInvite()
+        let anchorStore = InMemoryRollbackAnchorStore()
+        let transport = HTTPCompanionTransport(baseURL: URL(string: "http://127.0.0.1:8002")!,
+                                               session: StubURLProtocol.makeSession(), anchorStore: anchorStore,
+                                               enforceStateRoot: false)
+        let client = AsyncCompanionClient(signer: ownerSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 1)
+            return .init(status: 200, body: body)
+        }
+        _ = try await client.createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime,
+                                          nonce: invitation.payload.nonce)
+        XCTAssertNil(try loadCheckpoint(anchorStore, relayBaseURL: URL(string: "http://127.0.0.1:8002")!.companionAnchorKey,
+                                        ownerIdentityID: ownerSigner.identity.identityID))
+    }
+
     func testResetAllClearsEveryStoredCheckpoint() throws {
         let store = InMemoryRollbackAnchorStore()
         let anchor = RollbackAnchor(store: store)

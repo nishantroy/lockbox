@@ -13,16 +13,26 @@ struct PeopleView: View {
             PrototypeLabelCard()
 
 #if canImport(CompanionKit)
-            IntroCard()
-            InviteSomeoneCard(companion: companion)
-            AcceptInviteCard(companion: companion)
-            if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
-                AskToEndEarlyCard(coordinator: coordinator, companion: companion)
+            if companion.isAvailable {
+                IntroCard()
+                InviteSomeoneCard(companion: companion)
+                AcceptInviteCard(companion: companion)
+                if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
+                    AskToEndEarlyCard(coordinator: coordinator, companion: companion)
+                }
+                if !companion.people.isEmpty {
+                    PeopleListCard(companion: companion)
+                }
+                InboxCard(companion: companion)
+                if let notice = companion.inboxDataNotice {
+                    LockboxCard {
+                        Label(notice, systemImage: "info.circle")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityElement(children: .combine)
+                    }
+                }
             }
-            if !companion.people.isEmpty {
-                PeopleListCard(companion: companion)
-            }
-            InboxCard(companion: companion)
             if let error = companion.lastError {
                 LockboxCard {
                     VStack(alignment: .leading, spacing: 8) {
@@ -212,8 +222,10 @@ private struct AcceptInviteCard: View {
 private struct PeopleListCard: View {
     @ObservedObject var companion: CompanionCoordinator
 
-    private var owners: [CompanionPerson] { companion.people.filter { $0.localRole == .iAmOwner } }
-    private var approving: [CompanionPerson] { companion.people.filter { $0.localRole == .iAmApprover } }
+    // Revoked pairings are kept in storage (so a relay that keeps reporting
+    // them can never resurrect a fresh-looking entry) but never shown here.
+    private var owners: [CompanionPerson] { companion.people.filter { $0.localRole == .iAmOwner && $0.pairing.state == .active } }
+    private var approving: [CompanionPerson] { companion.people.filter { $0.localRole == .iAmApprover && $0.pairing.state == .active } }
 
     var body: some View {
         if !owners.isEmpty {
