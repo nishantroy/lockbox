@@ -1,6 +1,6 @@
 # Phone Lockbox — execution roadmap
 
-Updated: 2026-09-17. **Current milestone: build-15 focused QA and the R4 reliability gate.** R1–R3 source integration is complete and has automated coverage; physical-device acceptance is still required for the remaining lifecycle, accessibility and seven-night evidence. Build 15 integrates independently reviewed source foundations for Safety Assistant, weekday/weekend scheduling, confirmation-only Quick Actions and task commitments; it installed and launched successfully, but this is not a feature or reliability device pass. The weekend and task cores remain disconnected from production enforcement. The earlier custom-end and Live Activity migration changes still need focused post-install QA. Its Live Activity correction makes presentation opt-in and default-off. Build-13 device evidence still records natural enforcement end and recurrence, while a host-created Live Activity stayed stale until foreground cleanup; dependable host-closed ending requires unprovisioned ActivityKit push infrastructure. See [status and QA evidence](status-and-qa.md), [R2/R3 checklist](r2-r3-qa.md), and [R1 progress](r1-progress.md).
+Updated: 2026-09-26. **Current milestone: close the R4 reliability gate.** R1–R3 source integration is complete and has automated coverage. Owner-reported build-15 QA passes custom end, default-off Live Activity, overnight reboot, force-quit, critical-app reachability and the seven-night trial; manual/scheduled overlap remains untested and the accessibility review is owner-deprioritized but still open (see [status and QA evidence](status-and-qa.md)). Build 15 integrates independently reviewed source foundations for Safety Assistant, weekday/weekend scheduling, confirmation-only Quick Actions and task commitments. The weekend and task cores remain disconnected from production enforcement. Live Activity presentation is opt-in and default-off. Build-13 device evidence still records natural enforcement end and recurrence, while a host-created Live Activity stayed stale until foreground cleanup; dependable host-closed ending requires unprovisioned ActivityKit push infrastructure. See [status and QA evidence](status-and-qa.md), [R2/R3 checklist](r2-r3-qa.md), and [R1 progress](r1-progress.md).
 
 This document is the authoritative execution sequence. Product specifications describe intended behavior; they do not certify implementation or device reliability.
 
@@ -39,6 +39,8 @@ Finite Lock now, delayed explicit recovery, immutable active-session behavior, p
 ## R4 — Build-14 reliability, accessibility and seven-night gate (current)
 
 **Depends on:** R1–R3 source integration. **Blocks:** all ordinary exposure of R5 and later features.
+
+**Status (2026-09-26, build 15, owner-reported):** R4.1 custom end, default-off Live Activity, overnight reboot, force-quit and critical-app checks pass; overlap, authorization revoke/restore, time zone/DST and browser/category coverage are not yet reported. R4.2 accessibility is deferred as lower priority but remains a gate item. R4.3 seven-night trial passes.
 
 ### R4.1 Focused build-14 QA
 

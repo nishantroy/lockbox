@@ -1,6 +1,24 @@
 # Status and QA evidence
 
-Updated: 2026-09-17. **Latest installed candidate is build 15: the signed build, installation and launch succeeded on the paired iPhone 15 Pro. No schedule was changed, and no focused feature, migration, custom-end or reliability QA has run yet.** Build 15 contains the reviewed source integrations for Safety Assistant, weekday/weekend pure scheduling, confirmation-only Quick Actions and a pure task-commitment core. Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat source changes as a device pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+Updated: 2026-09-26. **Latest installed candidate is build 15. Owner-reported build-15 R4 QA (below) passes custom end, default-off Live Activity, overnight reboot, force-quit, critical-app reachability and the seven-night trial. Overlap is untested and accessibility is owner-deprioritized, so the R4 gate is not yet fully closed.** Build 15 contains the reviewed source integrations for Safety Assistant, weekday/weekend pure scheduling, confirmation-only Quick Actions and a pure task-commitment core. Automated validation and physical-device observations are recorded separately. This page preserves earlier build evidence as historical baseline and does not treat source changes as a device pass. Read with [roadmap](roadmap.md), [R1 progress](r1-progress.md), [R2/R3 QA](r2-r3-qa.md) and [safety follow-up](reviews/2026-09-10-r2-r3-safety-followup.md).
+
+## Build-15 owner-reported R4 QA — 2026-09-26
+
+Owner reports on installed build 15:
+
+| Case | Result |
+| --- | --- |
+| Custom Lock now end (build-14 fix) | **PASS** — custom end times work. |
+| Live Activity default-off migration | **PASS** — off by default. |
+| Overnight with reboot | **PASS** |
+| Force-quit during a lock | **PASS** |
+| Critical apps reachable during a lock | **PASS** |
+| Seven-night personal trial (R4.3) | **PASS** — "works great". |
+| Manual/scheduled overlap | **NOT RUN** — Lock now is correctly unavailable during an active lock; only the pre-window case below is reachable. |
+| Accessibility review (R4.2) | **DEFERRED** — owner marked lower priority; still an open R4 gate item, not waived. |
+| Authorization revoke/restore, time zone/DST, browser/category coverage, Quick Actions/Siri | **NOT REPORTED** |
+
+Overlap procedure: an active lock replaces the Lockbox home content (layout v1 contract), so Lock now cannot be started while bedtime or another lock is running—owner confirmed this on device. The only reachable overlap is a custom Lock now started **before** a 20-minute scheduled window that ends **after** it: restrictions must persist through the scheduled end and release at the later manual end. Open the blocked test app before opening Phone Lockbox at each end.
 
 ## Build-15 reviewed source integration — installed, not device-qualified
 
