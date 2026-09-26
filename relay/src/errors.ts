@@ -33,6 +33,8 @@ export type RelayErrorCode =
   | "unsupported_operation"
   | "revision_overflow"
   | "payload_too_large"
+  | "pairing_conflict"
+  | "integrity_error"
   | "internal";
 
 export class RelayError extends Error {
@@ -73,6 +75,12 @@ export const STATUS_BY_CODE: Record<RelayErrorCode, number> = {
   rate_limited: 429,
   payload_too_large: 413,
   revision_overflow: 409,
+  pairing_conflict: 409,
+  // A stored state-root mismatch means the durable record itself may be
+  // corrupt/tampered, not that the caller's request was malformed -- a
+  // 500-class status so it is never confused with a client error the caller
+  // could "fix" by resubmitting differently.
+  integrity_error: 500,
   internal: 500
 };
 

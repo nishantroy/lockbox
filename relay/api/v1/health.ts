@@ -1,11 +1,12 @@
-// Vercel Node function (Web `Request -> Response` signature). See
-// relay/src/handlers.ts for the shared implementation and
+// Vercel Node function using named HTTP-method exports with the Web
+// `Request -> Response` signature (current Vercel Node runtime convention).
+// See relay/src/handlers.ts for the shared implementation and
 // docs/r5-relay-plan.md's HTTP API table for the contract.
 
 import { handleHealth } from "../../src/handlers.js";
 
 export const config = { runtime: "nodejs" };
 
-export default function handler(request: Request): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
   return handleHealth(request);
 }

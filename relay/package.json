@@ -8,13 +8,13 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "tsx scripts/dev-server.ts",
+    "dev": "tsx --env-file-if-exists=.env scripts/dev-server.ts",
     "db:start": "docker compose up -d postgres",
     "db:stop": "docker compose down",
-    "db:migrate": "tsx scripts/migrate.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "retention:purge": "tsx scripts/retention-purge.ts"
+    "retention:purge": "tsx --env-file-if-exists=.env scripts/retention-purge.ts"
   },
   "dependencies": {
     "pg": "^8.13.1"

@@ -18,6 +18,10 @@
       "httpStatus": 409
     },
     {
+      "code": "integrity_error",
+      "httpStatus": 500
+    },
+    {
       "code": "internal",
       "httpStatus": 500
     },
@@ -43,6 +47,10 @@
     },
     {
       "code": "operation_conflict",
+      "httpStatus": 409
+    },
+    {
+      "code": "pairing_conflict",
       "httpStatus": 409
     },
     {

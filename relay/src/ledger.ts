@@ -43,6 +43,15 @@ export interface LedgerRequest {
   request: TrustedRequest;
   cancelledAt: number | null;
   expiredAt: number | null;
+  /**
+   * When the request's status became "declined", set once by the reducer.
+   * Without this, a terminal-marker recomputation (src/service.ts's
+   * `recordTerminalMarkers`, run after every unrelated commit for the same
+   * owner) would have to guess a declined request's terminal time from
+   * current wall-clock `now` each time, continually pushing its retention
+   * clock forward and letting it dodge purge indefinitely.
+   */
+  declinedAt: number | null;
 }
 
 export interface LedgerApproval {
@@ -81,23 +90,43 @@ export interface Ledger {
   rateLimits: Record<string, number[]>;
 }
 
+/**
+ * A prototype-less dictionary. Every ID-keyed ledger map uses this instead of
+ * `{}` because every key is at least partly attacker/client-chosen (request,
+ * approval, use, session, pairing, invitation, acceptance IDs are free-form
+ * strings from a signed payload, only length/whitespace-validated). On a
+ * normal `{}` object, `map[key] = value` for `key === "__proto__"` invokes
+ * `Object.prototype`'s special `__proto__` setter instead of creating an own
+ * property, which can silently repoint the object's prototype. A
+ * null-prototype object has no such accessor, so bracket assignment with any
+ * string key -- including `__proto__`, `constructor`, `toString` -- always
+ * behaves as a plain own-property write.
+ */
+export function nullProtoMap<T>(source?: Record<string, T>): Record<string, T> {
+  const map: Record<string, T> = Object.create(null);
+  if (source) {
+    for (const key of Object.keys(source)) map[key] = source[key] as T;
+  }
+  return map;
+}
+
 export function emptyLedger(owner: DeviceIdentity): Ledger {
   return {
     owner,
-    invitations: {},
-    pendingAcceptances: {},
-    pairings: {},
-    pairingEpochs: {},
-    sessions: {},
+    invitations: nullProtoMap(),
+    pendingAcceptances: nullProtoMap(),
+    pairings: nullProtoMap(),
+    pairingEpochs: nullProtoMap(),
+    sessions: nullProtoMap(),
     currentSessionID: null,
-    requests: {},
-    approvals: {},
-    approvalUses: {},
-    relationshipConsents: {},
-    usedConsentNonces: {},
-    usedApprovalIDs: {},
-    usedApprovalNonces: {},
-    rateLimits: {}
+    requests: nullProtoMap(),
+    approvals: nullProtoMap(),
+    approvalUses: nullProtoMap(),
+    relationshipConsents: nullProtoMap(),
+    usedConsentNonces: nullProtoMap(),
+    usedApprovalIDs: nullProtoMap(),
+    usedApprovalNonces: nullProtoMap(),
+    rateLimits: nullProtoMap()
   };
 }
 
@@ -137,6 +166,36 @@ export function serializeLedger(ledger: Ledger): string {
   return JSON.stringify(ledger, ledgerReplacer);
 }
 
+const MAP_FIELDS: Array<keyof Ledger> = [
+  "invitations",
+  "pendingAcceptances",
+  "pairings",
+  "pairingEpochs",
+  "sessions",
+  "requests",
+  "approvals",
+  "approvalUses",
+  "relationshipConsents",
+  "usedConsentNonces",
+  "usedApprovalIDs",
+  "usedApprovalNonces",
+  "rateLimits"
+];
+
 export function deserializeLedger(text: string): Ledger {
-  return JSON.parse(text, ledgerReviver) as Ledger;
+  const parsed = JSON.parse(text, ledgerReviver) as Ledger;
+  // `JSON.parse` itself is safe from `__proto__` pollution (it defines own
+  // properties rather than assigning through `[[Set]]`), but the resulting
+  // objects still have the ordinary `Object.prototype` -- convert each
+  // ID-keyed map to the same null-prototype shape `emptyLedger`/the reducer
+  // use, so later `map[key] = value` bracket assignments elsewhere in this
+  // ledger's lifetime stay safe too.
+  for (const field of MAP_FIELDS) {
+    (parsed as unknown as Record<string, unknown>)[field] = nullProtoMap(parsed[field] as Record<string, unknown>);
+  }
+  for (const record of Object.values(parsed.requests)) {
+    record.request.decisions = nullProtoMap(record.request.decisions);
+    if (record.declinedAt === undefined) record.declinedAt = null;
+  }
+  return parsed;
 }

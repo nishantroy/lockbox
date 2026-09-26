@@ -79,6 +79,27 @@ func makeInboxOperation(signer: DeviceSigner) throws -> SignedOperation {
     return try SignedOperation(kind: "inbox", signer: signer.identity, body: body, signature: signature)
 }
 
+/// Builds an "inbox" operation whose body includes the optional freshness
+/// field: `{"identityID":"...","issuedAt":<double>}`. `InboxQuery` does not
+/// yet declare `issuedAt` in this worktree's CompanionKit (it is being added
+/// on a sibling branch), so this constructs the body directly with a local
+/// Codable struct rather than depending on that type -- the wire shape is
+/// otherwise identical to `makeInboxOperation`'s legacy (no-`issuedAt`) form,
+/// including the same legacy operation-ID/signing-field derivation.
+struct VGInboxQueryWithFreshness: Codable {
+    let identityID: String
+    let issuedAt: Date
+}
+
+func makeInboxOperationWithFreshness(signer: DeviceSigner, issuedAt: Date) throws -> SignedOperation {
+    let query = VGInboxQueryWithFreshness(identityID: signer.identity.identityID, issuedAt: issuedAt)
+    let body = try encodeSorted(query)
+    let fields = ["inbox", signer.identity.identityID, b64url(signer.identity.publicKey),
+                  b64url(CompanionCanonical.digest(body))]
+    let signature = try signer.sign(domain: "\(version).operation", fields: fields)
+    return try SignedOperation(kind: "inbox", signer: signer.identity, body: body, signature: signature)
+}
+
 func jsonText(_ operation: SignedOperation) throws -> String {
     let data = try encodeSorted(operation)
     return String(decoding: data, as: UTF8.self)
@@ -446,10 +467,22 @@ try addOperation(name: "replace_pairing", kind: "replace_pairing",
                                                        signer: ownerSigner),
                  decoded: ["operationID": "op-replace-01", "expectedRevisionInEnvelope": 13, "signerRole": "owner"])
 
-// inbox (non-enveloped, legacy-derived operation ID)
+// inbox (non-enveloped, legacy-derived operation ID), legacy form: the
+// `issuedAt` freshness field is omitted entirely (not null) when absent.
 try addOperation(name: "inbox", kind: "inbox",
                  operation: try makeInboxOperation(signer: approverSigner),
                  decoded: ["signerRole": "approver", "identityID": approverSigner.identity.identityID])
+
+// inbox with the optional freshness field: `{"identityID":"...","issuedAt":<double>}`,
+// `issuedAt` encoded exactly like every other Date field (seconds since the
+// 2001-01-01 reference date). InboxQuery does not yet declare this field in
+// CompanionKit itself (it lives on a sibling branch this generator cannot
+// see), so this constructs the body JSON directly to match the documented
+// shape rather than depending on that type.
+try addOperation(name: "inbox_with_issued_at", kind: "inbox",
+                 operation: try makeInboxOperationWithFreshness(signer: approverSigner, issuedAt: base.addingTimeInterval(50)),
+                 decoded: ["signerRole": "approver", "identityID": approverSigner.identity.identityID,
+                          "issuedAtUnixSeconds": base.addingTimeInterval(50).timeIntervalSince1970])
 
 out["operations"] = operations
 

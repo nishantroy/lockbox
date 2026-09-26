@@ -74,9 +74,14 @@ export function requireSafeUint(value: unknown): number {
 
 export function decodeData(value: unknown): Buffer {
   if (typeof value !== "string") throw relayError("malformed");
+  // Standard base64 only (Swift `Data(base64Encoded:)`'s default behavior):
+  // correctly padded, no embedded whitespace. Node's `Buffer.from` silently
+  // tolerates junk (missing padding, stray characters), so re-encoding the
+  // decoded bytes and comparing byte-for-byte against the original string
+  // (padding included) is what actually rejects non-canonical input.
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) throw relayError("malformed");
   const buffer = Buffer.from(value, "base64");
-  // Buffer.from silently tolerates junk; round-trip check catches malformed base64.
-  if (buffer.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")) throw relayError("malformed");
+  if (buffer.toString("base64") !== value) throw relayError("malformed");
   return buffer;
 }
 
@@ -577,7 +582,13 @@ export function decodeTrustedRequest(value: unknown): TrustedRequest {
   const statuses: TrustedRequestStatus[] = ["pending", "approved", "declined", "cancelled", "expired"];
   if (typeof v.status !== "string" || !statuses.includes(v.status as TrustedRequestStatus)) throw relayError("malformed");
   if (typeof v.decisions !== "object" || v.decisions === null) throw relayError("malformed");
-  const decisions: Record<string, ApproverDecision> = {};
+  // Null-prototype: `targetedApproverIDs` (and thus decision keys) are
+  // free-form client-chosen identifiers, so a normal `{}` here would let a
+  // key like "__proto__" reach a bracket assignment below and repoint this
+  // object's prototype instead of creating an ordinary own property, and
+  // would let the `in` check further down give a false positive for
+  // inherited names like "toString"/"constructor" it never actually stored.
+  const decisions: Record<string, ApproverDecision> = Object.create(null);
   const decisionValues: ApproverDecision[] = ["pending", "approved", "declined"];
   for (const [key, val] of Object.entries(v.decisions as Record<string, unknown>)) {
     if (typeof val !== "string" || !decisionValues.includes(val as ApproverDecision)) throw relayError("malformed");
@@ -863,6 +874,23 @@ export function verifyPairingReplacementSignature(p: PairingReplacement): boolea
 
 export interface InboxQuery {
   identityID: string;
+  /**
+   * Optional freshness timestamp. The inbox fetch operation otherwise has no
+   * freshness check at all (no expiry, no nonce); when present, the relay
+   * enforces a 5-minute window around it (src/service.ts). Not yet sent by
+   * either Swift client; accepted as optional so it can be adopted without a
+   * wire break, and can be made mandatory later behind the
+   * `REQUIRE_FRESH_INBOX` config flag.
+   */
+  issuedAt?: number;
+}
+
+export function decodeInboxQuery(value: unknown): InboxQuery {
+  if (typeof value !== "object" || value === null) throw relayError("malformed");
+  const v = value as Record<string, unknown>;
+  const identityID = requireIdentifier(v.identityID, "identityID");
+  if (v.issuedAt === undefined || v.issuedAt === null) return { identityID };
+  return { identityID, issuedAt: requireTimestampSeconds(v.issuedAt) };
 }
 
 // ---------------------------------------------------------------------------
@@ -929,10 +957,18 @@ function legacySigningFields(kind: string, signer: DeviceIdentity, body: Buffer)
 export function verifySignedOperationSignature(op: SignedOperation): boolean {
   const bytes = canonicalBytes(`${COMPANION_VERSION}.operation`, signedOperationSigningFields(op));
   if (ed25519Verify(bytes, op.signature, op.signer.publicKey)) return true;
-  // Legacy un-enveloped operations (currently only "inbox") sign a smaller,
-  // operationID-independent field list and derive their operationID from the
-  // command content. Mirrors `SignedOperation.validateSignature()`'s
-  // `hasDerivedLegacyID` fallback.
+  // Legacy un-enveloped operations sign a smaller, operationID-independent
+  // field list and derive their operationID from the command content.
+  // Mirrors `SignedOperation.validateSignature()`'s `hasDerivedLegacyID`
+  // fallback in CompanionKit/Sources/CompanionKit/ProtocolModels.swift --
+  // deliberately *not* restricted to kind == "inbox" here, because Swift's
+  // own check isn't restricted by kind either: it is gated only on
+  // `expectedRevision == nil && operationID == legacyOperationID(...)`,
+  // for any kind. In practice only "inbox" is ever produced this way today
+  // (`DurableOperationFactory.makeInbox`/`CompanionClient.fetchInbox`), but
+  // this relay intentionally matches Swift's actual (kind-independent) gate
+  // rather than narrowing it, so a client behavior change here would not
+  // silently start rejecting a legacy-signed operation of some other kind.
   if (op.expectedRevision !== null) return false;
   if (op.operationID !== legacyOperationID(op.kind, op.signer, op.body)) return false;
   const legacyBytes = canonicalBytes(`${COMPANION_VERSION}.operation`, legacySigningFields(op.kind, op.signer, op.body));

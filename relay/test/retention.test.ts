@@ -62,7 +62,8 @@ describe("retention purge boundaries", () => {
           decisions: { x: "declined" }
         },
         cancelledAt: now - 30 * DAY + 1, // just inside the 30-day retention window
-        expiredAt: null
+        expiredAt: null,
+        declinedAt: null
       };
     });
 
@@ -98,7 +99,8 @@ describe("retention purge boundaries", () => {
           decisions: { x: "pending" }
         },
         cancelledAt: null,
-        expiredAt: now - 30 * DAY - 1 // one second past the 30-day retention window
+        expiredAt: now - 30 * DAY - 1, // one second past the 30-day retention window
+        declinedAt: null
       };
     });
 
@@ -166,7 +168,7 @@ describe("retention purge boundaries", () => {
     expect(remaining.rowCount).toBe(0);
   });
 
-  it("never advances the owner's protocol revision as a side effect of purging", async () => {
+  it("advances the owner's protocol revision by exactly one, with a system operation receipt, when a purge mutates the ledger -- and never advances it when nothing changed", async () => {
     const owner = makeIdentity("owner");
     await submitOperation(toRequest(buildOperation({ kind: "ack", payload: {}, signer: owner, expectedRevision: null })));
     const before = await readLedgerText(owner.identity.identityID);
@@ -180,9 +182,25 @@ describe("retention purge boundaries", () => {
         consumedAt: null
       };
     });
-    await purgeExpiredRecords(testPool(), 30, now);
+
+    // A no-op purge run first (nothing yet old enough) must not touch the revision.
+    const noopSummary = await purgeExpiredRecords(testPool(), 3650, now);
+    expect(noopSummary.ownersTouched).toBe(0);
+    const stillBefore = await readLedgerText(owner.identity.identityID);
+    expect(stillBefore.revision).toBe(before.revision);
+
+    // The mutating purge (30-day window, and the invitation is 60 days old) must advance the revision by exactly one.
+    const summary = await purgeExpiredRecords(testPool(), 30, now);
+    expect(summary.ownersTouched).toBe(1);
     const after = await readLedgerText(owner.identity.identityID);
-    expect(after.revision).toBe(before.revision);
+    expect(after.revision).toBe(before.revision + 1);
+
+    // ...and it must be recorded with a durable receipt in the operation log,
+    // exactly like any client-submitted mutation, so a client anchoring on
+    // (revision, stateRoot) sees this revision accounted for.
+    const receipt = await testPool().query(`SELECT kind, committed_revision FROM companion_operation WHERE owner_id = $1 AND committed_revision = $2`, [owner.identity.identityID, after.revision]);
+    expect(receipt.rowCount).toBe(1);
+    expect(receipt.rows[0].kind).toBe("retention_purge");
   });
 
   it("swiftDate helper round-trips (sanity check used across test fixtures)", () => {

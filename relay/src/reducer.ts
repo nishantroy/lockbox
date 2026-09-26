@@ -80,6 +80,23 @@ function fail(code: RelayErrorCode): never {
 }
 
 /**
+ * Port of `checkedIncrement`/`checkedPairingEpoch`
+ * (CompanionKit/Sources/CompanionKit/CompanionKit.swift,
+ * CompanionRelayService/Sources/CompanionRelayService/DurableOperation.swift):
+ * every durable epoch/generation/revision counter is incremented through a
+ * checked helper rather than a raw `+ 1`, so an exhausted counter fails
+ * closed (`revision_overflow`) instead of silently wrapping or, in
+ * JavaScript's case, silently losing precision past `Number.MAX_SAFE_INTEGER`.
+ */
+export function checkedIncrement(value: number): number {
+  if (!Number.isSafeInteger(value) || value >= Number.MAX_SAFE_INTEGER) fail("revision_overflow");
+  return value + 1;
+}
+
+/** Consent mutations have no independent expiry field, unlike invites/sessions/requests, so a captured old signed mutation must be rejected purely by age -- see the "consent" case below and docs in retention.ts. */
+export const CONSENT_MAX_AGE_SECONDS = 24 * 60 * 60;
+
+/**
  * Closed default-deny authorization gate, ported from
  * `DurableAuthorizationPolicy.authorize` / `.ownerAndActivePairing`. Runs
  * before the reducer mutates any state. An unmodeled kind, or a signer that
@@ -223,7 +240,7 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       }
       const pairingID = derivedPairingID(acceptance.inviteID, acceptance.approver.identityID);
       if (ledger.pairings[pairingID]) fail("replay");
-      const epoch = (ledger.pairingEpochs[pairingID] ?? 0) + 1;
+      const epoch = checkedIncrement(ledger.pairingEpochs[pairingID] ?? 0);
       const pairing = { pairingID, owner, approver: acceptance.approver, epoch, createdAt: now, state: "active" as const };
       ledger.pairings[pairingID] = { pairing, revokedAt: null };
       ledger.pairingEpochs[pairingID] = epoch;
@@ -245,6 +262,14 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       ) {
         fail("wrong_target");
       }
+      // Consent has no independent expiry field to bound a captured old
+      // signed mutation the way an invite/session/request does, and its
+      // replay-nonce marker is eventually purged by retention -- so a
+      // maximum age is the only thing standing between an attacker replaying
+      // an old (since-superseded) grant/accept/revoke and the relay applying
+      // it again after the marker is gone. See docs/r5-relay-plan.md fix and
+      // src/retention.ts's header comment.
+      if (mutation.issuedAt < now - CONSENT_MAX_AGE_SECONDS) fail("expired");
       const ownerAction = mutation.action === "ownerGrant" || mutation.action === "ownerRevoke";
       const signerIsOwner = identitiesEqual(signer, owner);
       const signerIsApprover = identitiesEqual(signer, pairingRecord.pairing.approver);
@@ -294,7 +319,7 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
           consent.approverState = consent.approverScopes.length === 0 ? "revoked" : "active";
           break;
       }
-      consent.generation += 1;
+      consent.generation = checkedIncrement(consent.generation);
       consent.updatedAt = now;
       ledger.usedConsentNonces[nonceKey] = { createdAt: now };
       ledger.relationshipConsents[mutation.relationshipID] = consent;
@@ -325,7 +350,7 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       if (request.createdAt > now + 60 || now >= request.expiresAt) fail("expired");
       validateRequestAuthorization(ledger, request, session, owner);
       if (ledger.requests[request.requestID]) fail("replay");
-      ledger.requests[request.requestID] = { request, cancelledAt: null, expiredAt: null };
+      ledger.requests[request.requestID] = { request, cancelledAt: null, expiredAt: null, declinedAt: null };
       return { kind: "request", value: request };
     }
 
@@ -372,9 +397,13 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       ledger.approvals[approval.approvalID] = { approval, acceptedAt: now };
       ledger.usedApprovalNonces[approval.nonce.toString("base64")] = { createdAt: now };
       const updated = { ...record.request, decisions: { ...record.request.decisions, [approval.approver.identityID]: approval.decision } };
+      let declinedAt = record.declinedAt;
       if (approval.decision === "approved") updated.status = "approved";
-      else if (Object.values(updated.decisions).every((d) => d === "declined")) updated.status = "declined";
-      ledger.requests[approval.requestID] = { ...record, request: updated };
+      else if (Object.values(updated.decisions).every((d) => d === "declined")) {
+        updated.status = "declined";
+        declinedAt = now;
+      }
+      ledger.requests[approval.requestID] = { ...record, request: updated, declinedAt };
       return { kind: "approval", value: approval };
     }
 
@@ -477,6 +506,13 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
         fail("revoked_pairing");
       }
       if (!verifyPairingReplacementSignature(proposal)) fail("invalid_signature");
+      // `decodePairingReplacement` already checked `replacementEpoch ===
+      // previousEpoch + 1` against the client-supplied values; this
+      // independently re-derives the expected next epoch from the ledger's
+      // own current epoch through the checked helper, so an exhausted epoch
+      // fails closed rather than the client's arithmetic silently agreeing
+      // with a wrapped/imprecise value.
+      if (checkedIncrement(previous.epoch) !== proposal.replacementEpoch) fail("malformed");
       if (ledger.pairings[proposal.replacementPairingID]) fail("replay");
       ledger.pairings[proposal.previousPairingID] = { pairing: { ...previous, state: "revoked" }, revokedAt: now };
       revokeConsent(ledger, previous.pairingID, now);
@@ -562,7 +598,7 @@ function revokeConsent(ledger: Ledger, pairingID: string, now: number): void {
   consent.approverScopes = [];
   consent.ownerState = "revoked";
   consent.approverState = "revoked";
-  consent.generation += 1;
+  consent.generation = checkedIncrement(consent.generation);
   consent.updatedAt = now;
 }
 

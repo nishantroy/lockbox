@@ -10,6 +10,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { handleOperations, handleInbox, handleHealth } from "../src/handlers.js";
 import { closePool } from "../src/db.js";
+import { MAX_RAW_BODY_BYTES } from "../src/protocol.js";
+
+/** Thrown by `toWebRequest` when a request body exceeds the size limit while still streaming in, so the caller can answer 413 without ever buffering the full (oversized) body. */
+class PayloadTooLargeError extends Error {}
 
 const HOST = process.env.RELAY_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.RELAY_PORT ?? "8002");
@@ -32,7 +36,20 @@ async function toWebRequest(req: IncomingMessage, url: string): Promise<Request>
   let body: Buffer | undefined;
   if (hasBody) {
     const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
+    let total = 0;
+    for await (const chunk of req) {
+      total += (chunk as Buffer).length;
+      // Enforced while still streaming in, not after buffering the whole
+      // body: an oversized (or effectively unbounded) request body must
+      // never be fully accumulated in memory first just to then be rejected.
+      // Deliberately does not destroy `req`/the socket here: it shares the
+      // connection with `res`, and destroying it would prevent the 413
+      // response below from ever reaching the client.
+      if (total > MAX_RAW_BODY_BYTES) {
+        throw new PayloadTooLargeError();
+      }
+      chunks.push(chunk as Buffer);
+    }
     body = Buffer.concat(chunks);
   }
   const webBody = body && body.length > 0 ? new Uint8Array(body) : undefined;
@@ -62,6 +79,12 @@ const server = createServer((req, res) => {
       const response = await route(request);
       await writeWebResponse(response, res);
     } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        res.statusCode = 413;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ error: "payload_too_large" }));
+        return;
+      }
       // Never echo internals; this path only handles adapter-level failures
       // (the handlers themselves already return typed error JSON).
       console.error("dev-server: unhandled adapter error");

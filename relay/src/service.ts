@@ -13,6 +13,7 @@ import type pg from "pg";
 import {
   decodeSignedOperation,
   verifySignedOperationSignature,
+  decodeInboxQuery,
   type SignedOperation,
   type RelayResult,
   type RelayResponse,
@@ -46,11 +47,20 @@ import {
   readOwnerLedger,
   withTransaction,
   upsertRetentionMarkers,
+  chargeGlobalRateLimit,
   AmbiguousOwnerError,
   OwnerRowConflictError,
+  PairingRoutingConflictError,
   type StoredOperation
 } from "./db.js";
 import { canonicalFramed, digest, COMPANION_VERSION } from "./canonical.js";
+
+/** 5-minute freshness window for an inbox query that supplies `issuedAt` (see `decodeInboxQuery`). */
+const INBOX_FRESHNESS_WINDOW_SECONDS = 5 * 60;
+
+/** Global per-signer request budget, charged before any owner row is touched -- see `chargeGlobalRateLimit` in db.ts. */
+const GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 60;
+const GLOBAL_RATE_LIMIT_MAX = 60;
 
 /**
  * Canonical root of *one owner's* ledger state only (never the whole
@@ -114,20 +124,31 @@ interface TransactionOutcome {
   surfaceExpired: boolean;
 }
 
-export async function submitOperation(rawBody: Buffer): Promise<RelayResponse> {
+export async function submitOperation(rawBody: Buffer, now: number = nowSeconds()): Promise<RelayResponse> {
   if (rawBody.length > MAX_RAW_BODY_BYTES) throw relayError("malformed");
   let operation: SignedOperation;
   try {
-    operation = decodeSignedOperation(JSON.parse(rawBody.toString("utf8")));
+    const parsedBody = safeJSONParse(rawBody);
+    operation = decodeSignedOperation(parsedBody);
   } catch (error) {
     throw error instanceof RelayError ? error : relayError("malformed");
   }
   if (!verifySignedOperationSignature(operation)) throw relayError("invalid_signature");
 
+  const pool = getPool();
+  // Global, DB-backed, per-signer rate limit charged *before* any owner
+  // partition is resolved or locked (P2: "count failed attempts and inbox
+  // fetches, and bound approver-signed ops aimed at arbitrary owners").
+  // Unlike src/reducer.ts's `chargeRateLimit` (scoped to one already-open
+  // owner transaction), this also bounds e.g. a flood of `ack`s from fresh
+  // random identities, each of which would otherwise unconditionally create
+  // a new `companion_owner` row before any per-owner limiter ever runs.
+  const allowed = await chargeGlobalRateLimit(pool, `signer:${operation.signer.identityID}`, now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
+  if (!allowed) throw relayError("rate_limited");
+
   const resolved = await resolveOwner(operation);
   if (!resolved) throw relayError("unauthorized");
 
-  const pool = getPool();
   const bodyDigest = digest(operation.body);
 
   const outcome = await withTransaction(pool, async (client): Promise<TransactionOutcome> => {
@@ -144,14 +165,20 @@ export async function submitOperation(rawBody: Buffer): Promise<RelayResponse> {
     // Fail closed if the stored root doesn't verify against the loaded state
     // (docs/r5-relay-plan.md: "Fail closed if the stored root doesn't
     // verify"), e.g. after any out-of-band edit to the `state`/`revision`
-    // columns.
+    // columns. This indicates the durable record may itself be corrupt, not
+    // that the caller's request was malformed, so it is a 500-class error.
     if (!computeStateRoot(ownerRow.ledger, ownerRow.revision).equals(ownerRow.storedStateRoot)) {
-      throw relayError("malformed");
+      throw relayError("integrity_error");
     }
 
     const prior = await findOperation(client, ownerRow.ownerID, operation.operationID);
     if (prior) {
-      if (prior.signerIdentityID !== operation.signer.identityID || prior.kind !== operation.kind || !prior.bodyDigest.equals(bodyDigest)) {
+      if (
+        prior.signerIdentityID !== operation.signer.identityID ||
+        prior.kind !== operation.kind ||
+        !prior.bodyDigest.equals(bodyDigest) ||
+        prior.expectedRevision !== operation.expectedRevision
+      ) {
         throw relayError("idempotency_conflict");
       }
       const result = prior.disposition === "rejectedExpiredRequest" ? ({ kind: "acknowledgement" } as const) : decodeStoredResult(prior.responseKind, prior.responseBody);
@@ -174,14 +201,27 @@ export async function submitOperation(rawBody: Buffer): Promise<RelayResponse> {
     if (operation.expectedRevision !== null && operation.expectedRevision !== ownerRow.revision) {
       throw relayError("stale_revision");
     }
-    const now = nowSeconds();
     chargeRateLimit(ownerRow.ledger, operation.signer.identityID, now);
 
-    const reduced = reduce(operation.kind, operation.body, operation.signer, ownerRow.ledger.owner, ownerRow.ledger, now);
+    let reduced;
+    try {
+      reduced = reduce(operation.kind, operation.body, operation.signer, ownerRow.ledger.owner, ownerRow.ledger, now);
+    } catch (error) {
+      // A malformed/unparseable/null/non-object payload for this kind must
+      // surface as 400 malformed, never leak out as an uncaught exception
+      // that the HTTP layer would otherwise turn into a 500.
+      throw error instanceof RelayError ? error : relayError("malformed");
+    }
+    if (ownerRow.revision >= Number.MAX_SAFE_INTEGER) throw relayError("revision_overflow");
     const committedRevision = ownerRow.revision + 1;
 
     if (reduced.result.kind === "pairing") {
-      await recordApproverPairing(client, ownerRow.ownerID, reduced.result.value.pairingID, reduced.result.value.approver.identityID);
+      try {
+        await recordApproverPairing(client, ownerRow.ownerID, reduced.result.value.pairingID, reduced.result.value.approver.identityID);
+      } catch (error) {
+        if (error instanceof PairingRoutingConflictError) throw relayError("pairing_conflict");
+        throw error;
+      }
     }
     if (reduced.result.kind === "verification") {
       // Patch in the committed revision the reducer could not know yet.
@@ -202,6 +242,7 @@ export async function submitOperation(rawBody: Buffer): Promise<RelayResponse> {
       signerIdentityID: operation.signer.identityID,
       signerRole: operation.signer.role,
       signerPublicKey: operation.signer.publicKey,
+      expectedRevision: operation.expectedRevision,
       bodyDigest,
       signedOperation: Buffer.from(JSON.stringify(encodeOperationForStorage(operation)), "utf8"),
       responseKind: resultKind(reduced.result),
@@ -236,26 +277,47 @@ export async function submitOperation(rawBody: Buffer): Promise<RelayResponse> {
   return outcome.response;
 }
 
-export async function fetchInboxOperation(rawBody: Buffer): Promise<InboxResponse> {
+export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeconds()): Promise<InboxResponse> {
   if (rawBody.length > MAX_RAW_BODY_BYTES) throw relayError("malformed");
   let operation: SignedOperation;
   try {
-    operation = decodeSignedOperation(JSON.parse(rawBody.toString("utf8")));
+    operation = decodeSignedOperation(safeJSONParse(rawBody));
   } catch (error) {
     throw error instanceof RelayError ? error : relayError("malformed");
   }
   if (operation.kind !== "inbox") throw relayError("malformed");
   if (!verifySignedOperationSignature(operation)) throw relayError("invalid_signature");
-  const query = JSON.parse(operation.body.toString("utf8")) as { identityID?: unknown };
-  if (query.identityID !== operation.signer.identityID) throw relayError("unauthorized");
 
   const pool = getPool();
+  const allowed = await chargeGlobalRateLimit(pool, `signer:${operation.signer.identityID}`, now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
+  if (!allowed) throw relayError("rate_limited");
+
+  let query;
+  try {
+    query = decodeInboxQuery(safeJSONParse(operation.body));
+  } catch (error) {
+    throw error instanceof RelayError ? error : relayError("malformed");
+  }
+  if (query.identityID !== operation.signer.identityID) throw relayError("unauthorized");
+  // Inbox fetch otherwise has no freshness/replay protection at all (no
+  // expiry, no nonce -- it is a read, not a state mutation). When the caller
+  // supplies a signed `issuedAt`, enforce the same pattern every other
+  // `issuedAt` field in this protocol uses: up to 60s of future clock skew,
+  // and (per this fetch's own 5-minute freshness contract) no more than 5
+  // minutes stale. `REQUIRE_FRESH_INBOX=true` makes the field mandatory
+  // once a client reliably sends it (docs/r5-relay-plan.md review fix); the
+  // legacy `{"identityID":...}` form (key omitted, not null) is then rejected.
+  if (query.issuedAt !== undefined) {
+    if (query.issuedAt > now + 60 || query.issuedAt < now - INBOX_FRESHNESS_WINDOW_SECONDS) throw relayError("expired");
+  } else if (process.env.REQUIRE_FRESH_INBOX === "true") {
+    throw relayError("malformed");
+  }
+
   const identityID = operation.signer.identityID;
   const requests: TrustedRequest[] = [];
   const pairings: Pairing[] = [];
   const consents: RelationshipConsent[] = [];
   let maxRevision = 0;
-  const now = nowSeconds();
   let ownerAnchor: { ownerIdentityID: string; stateRoot: Buffer } | undefined;
 
   if (operation.signer.role === "owner") {
@@ -264,8 +326,13 @@ export async function fetchInboxOperation(rawBody: Buffer): Promise<InboxRespons
       maxRevision = row.revision;
       // Anchoring only makes sense for an owner reading their own single
       // ledger (contract item 4: "set ownerIdentityID and stateRoot only
-      // when the signer is an owner fetching their own ledger").
-      ownerAnchor = { ownerIdentityID: row.ownerID, stateRoot: computeStateRoot(row.ledger, row.revision) };
+      // when the signer is an owner fetching their own ledger"). Verified
+      // against the stored column, fail-closed, the same way the mutation
+      // path (`submitOperation`) verifies it, rather than only trusting a
+      // fresh recomputation of the ledger just read.
+      const freshRoot = computeStateRoot(row.ledger, row.revision);
+      if (!freshRoot.equals(row.storedStateRoot)) throw relayError("integrity_error");
+      ownerAnchor = { ownerIdentityID: row.ownerID, stateRoot: freshRoot };
       for (const record of Object.values(row.ledger.requests)) requests.push(applyExpiry(record.request, row.ledger, now));
       for (const record of Object.values(row.ledger.pairings)) pairings.push(record.pairing);
       for (const consent of Object.values(row.ledger.relationshipConsents)) consents.push(consent);
@@ -384,4 +451,21 @@ async function recordTerminalMarkers(client: pg.PoolClient, ownerID: string, led
 
 function nowSeconds(): number {
   return Date.now() / 1000;
+}
+
+/**
+ * `JSON.parse` throws a raw `SyntaxError` for unparseable input, which the
+ * various decode functions (protocol.ts) never see because they always
+ * receive an already-parsed value; without this wrapper, unparseable, empty,
+ * or otherwise not-even-JSON bodies would escape as an uncaught exception
+ * and surface as a 500 rather than a 400 `malformed`. Every call site here
+ * re-wraps a non-`RelayError` catch into `malformed`, so this exists mainly
+ * to give unparseable JSON the same treatment before decoding even starts.
+ */
+function safeJSONParse(data: Buffer): unknown {
+  try {
+    return JSON.parse(data.toString("utf8"));
+  } catch {
+    throw relayError("malformed");
+  }
 }

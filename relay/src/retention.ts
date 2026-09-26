@@ -17,11 +17,20 @@
 // retention window is no longer idempotency-checked; 30 days is long enough
 // relative to this protocol's request/session lifetimes (at most 7 days)
 // that this is an accepted prototype trade-off, called out in the README.
+//
+// A purge that mutates a ledger commits a *system* operation record and
+// advances the owner's `revision`, exactly like any client-submitted
+// mutation. The client-side rollback anchor treats the same revision
+// reported twice with two different `stateRoot`s as a fork/rollback; purging
+// content changes the root without this, so it must advance the revision to
+// stay honest about "this owner's state changed".
 
 import type pg from "pg";
-import { lockOwnerRow, saveOwnerRow, deleteRetentionMarker, readOwnerLedger } from "./db.js";
-import { emptyLedger } from "./ledger.js";
+import { lockOwnerRow, saveOwnerRow, deleteRetentionMarker, deleteApproverPairing, readOwnerLedger, insertOperation, purgeStaleRateLimits, type StoredOperation } from "./db.js";
+import { emptyLedger, type Marker } from "./ledger.js";
 import { computeStateRoot } from "./service.js";
+import { digest } from "./canonical.js";
+import { randomUUID } from "node:crypto";
 
 export interface RetentionSummary {
   purgedRequests: number;
@@ -32,8 +41,13 @@ export interface RetentionSummary {
   purgedInvitations: number;
   purgedPendingAcceptances: number;
   purgedNonceMarkers: number;
+  purgedSessions: number;
+  purgedRateLimitSignerEntries: number;
   purgedOperationRows: number;
+  purgedRateLimitRows: number;
   ownersTouched: number;
+  ownersScanned: number;
+  ownersRemaining: number;
 }
 
 function empty(): RetentionSummary {
@@ -46,22 +60,49 @@ function empty(): RetentionSummary {
     purgedInvitations: 0,
     purgedPendingAcceptances: 0,
     purgedNonceMarkers: 0,
+    purgedSessions: 0,
+    purgedRateLimitSignerEntries: 0,
     purgedOperationRows: 0,
-    ownersTouched: 0
+    purgedRateLimitRows: 0,
+    ownersTouched: 0,
+    ownersScanned: 0,
+    ownersRemaining: 0
   };
 }
 
-export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, nowSeconds: number): Promise<RetentionSummary> {
+export interface PurgeOptions {
+  /** Caps how many owners one invocation processes, so a single Vercel Hobby cron invocation (with its execution-time limit) cannot be starved by an unbounded owner count. Defaults to processing all owners found within `maxDurationMs`. */
+  maxOwners?: number;
+  /** Wall-clock budget for the owner loop; once exceeded, the function returns a partial summary (`ownersRemaining` tells the caller more owners are left for the next run). */
+  maxDurationMs?: number;
+}
+
+const DEFAULT_MAX_DURATION_MS = 8_000; // leaves headroom under Vercel Hobby's default 10s function timeout
+
+export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, nowSeconds: number, options: PurgeOptions = {}): Promise<RetentionSummary> {
+  if (!Number.isFinite(retentionDays) || retentionDays < 1) {
+    throw new Error(`invalid retentionDays: ${retentionDays} (must be a finite number >= 1)`);
+  }
   const cutoff = nowSeconds - retentionDays * 86_400;
   const summary = empty();
+  const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
+  const started = Date.now();
 
-  const ownerRows = await pool.query<{ owner_id: string }>(`SELECT owner_id FROM companion_owner`);
-  for (const { owner_id } of ownerRows.rows) {
+  const ownerRows = await pool.query<{ owner_id: string }>(
+    options.maxOwners !== undefined ? `SELECT owner_id FROM companion_owner ORDER BY owner_id LIMIT $1` : `SELECT owner_id FROM companion_owner ORDER BY owner_id`,
+    options.maxOwners !== undefined ? [options.maxOwners] : []
+  );
+
+  let index = 0;
+  for (; index < ownerRows.rows.length; index += 1) {
+    if (Date.now() - started > maxDurationMs) break;
+    const { owner_id } = ownerRows.rows[index]!;
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const touched = await purgeOwner(client, owner_id, cutoff, summary);
+      const touched = await purgeOwner(client, owner_id, cutoff, nowSeconds, summary);
       await client.query("COMMIT");
+      summary.ownersScanned += 1;
       if (touched) summary.ownersTouched += 1;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -70,14 +111,27 @@ export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, 
       client.release();
     }
   }
+  summary.ownersRemaining = ownerRows.rows.length - index;
 
   const purgedOperations = await pool.query(`DELETE FROM companion_operation WHERE committed_at < to_timestamp($1)`, [cutoff]);
   summary.purgedOperationRows = purgedOperations.rowCount ?? 0;
+  summary.purgedRateLimitRows = await purgeStaleRateLimits(pool, cutoff);
 
   return summary;
 }
 
-async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number, summary: RetentionSummary): Promise<boolean> {
+function pruneMarkers(map: Record<string, Marker>, cutoff: number): number {
+  let removed = 0;
+  for (const key of Object.keys(map)) {
+    if (map[key]!.createdAt < cutoff) {
+      delete map[key];
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number, now: number, summary: RetentionSummary): Promise<boolean> {
   // Read the owner's real identity first (outside the row lock) so
   // `lockOwnerRow`'s ambiguous-owner check compares against the actual
   // stored public key rather than a placeholder.
@@ -87,9 +141,25 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
   const ledger = row.ledger;
   let changed = false;
 
+  // Requests that lapsed without any later activity are only lazily marked
+  // "expired" when something touches them (approval/use/cancel/session
+  // publish); the purge job computes expiry itself for anything still
+  // "pending"/"approved" whose own expiry (or session end) is already well
+  // within the retention window, rather than waiting for that lazy touch.
+  for (const record of Object.values(ledger.requests)) {
+    if (record.request.status !== "pending" && record.request.status !== "approved") continue;
+    const session = ledger.sessions[record.request.sessionID]?.session;
+    const sessionEnded = session ? session.endsAt < cutoff : false;
+    if (record.request.expiresAt < cutoff || sessionEnded) {
+      record.request = { ...record.request, status: "expired" };
+      record.expiredAt = record.request.expiresAt < cutoff ? record.request.expiresAt : session!.endsAt;
+      changed = true;
+    }
+  }
+
   const purgedRequestIDs: string[] = [];
   for (const [requestID, record] of Object.entries(ledger.requests)) {
-    const terminalAt = record.cancelledAt ?? record.expiredAt ?? (record.request.status === "declined" ? record.request.expiresAt : null);
+    const terminalAt = record.cancelledAt ?? record.expiredAt ?? record.declinedAt;
     if (terminalAt !== null && terminalAt < cutoff) {
       delete ledger.requests[requestID];
       purgedRequestIDs.push(requestID);
@@ -122,7 +192,10 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
         summary.purgedConsents += 1;
       }
       await deleteRetentionMarker(client, ownerID, "pairing", pairingID);
-      await client.query(`DELETE FROM companion_approver_pairing WHERE pairing_id = $1`, [pairingID]);
+      // Scoped by owner: recordApproverPairing (db.ts) now refuses to let a
+      // different owner ever claim this pairing_id while this row exists, so
+      // it is safe to delete only *this* owner's row for it.
+      await deleteApproverPairing(client, ownerID, pairingID);
     }
   }
 
@@ -144,24 +217,33 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
     }
   }
 
-  for (const [key, marker] of Object.entries(ledger.usedConsentNonces)) {
-    if (marker.createdAt < cutoff) {
-      delete ledger.usedConsentNonces[key];
-      summary.purgedNonceMarkers += 1;
+  // Ended sessions: any request still referencing one is, by construction
+  // (`request.expiresAt <= session.endsAt` is enforced at creation), at
+  // least as old, so it is already resolved as terminal above by the time
+  // its session is old enough to purge here.
+  for (const [sessionID, record] of Object.entries(ledger.sessions)) {
+    if (record.session.endsAt < cutoff) {
+      delete ledger.sessions[sessionID];
+      summary.purgedSessions += 1;
       changed = true;
+      if (ledger.currentSessionID === sessionID) ledger.currentSessionID = null;
     }
   }
-  for (const [key, marker] of Object.entries(ledger.usedApprovalNonces)) {
-    if (marker.createdAt < cutoff) {
-      delete ledger.usedApprovalNonces[key];
-      summary.purgedNonceMarkers += 1;
-      changed = true;
-    }
+
+  const noncesPurged = pruneMarkers(ledger.usedConsentNonces, cutoff) + pruneMarkers(ledger.usedApprovalNonces, cutoff) + pruneMarkers(ledger.usedApprovalIDs, cutoff);
+  if (noncesPurged > 0) {
+    summary.purgedNonceMarkers += noncesPurged;
+    changed = true;
   }
-  for (const [key, marker] of Object.entries(ledger.usedApprovalIDs)) {
-    if (marker.createdAt < cutoff) {
-      delete ledger.usedApprovalIDs[key];
-      summary.purgedNonceMarkers += 1;
+
+  // Per-owner-ledger rate-limit timestamps (src/reducer.ts's `chargeRateLimit`)
+  // are already self-pruning on every charge for an identity that keeps
+  // submitting, but an identity that never submits again leaves its (small)
+  // entry behind forever; drop entries wholly older than the window.
+  for (const [identityID, timestamps] of Object.entries(ledger.rateLimits)) {
+    if (timestamps.length === 0 || timestamps.every((t) => t < cutoff)) {
+      delete ledger.rateLimits[identityID];
+      summary.purgedRateLimitSignerEntries += 1;
       changed = true;
     }
   }
@@ -171,13 +253,52 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
   }
 
   if (changed) {
-    // Retention purge mutates ledger *content* but must never advance the
-    // protocol revision counter (revision is an append-only ordering/
-    // idempotency invariant tied to the operation log, not to what content
-    // retention has chosen to keep). The state root is recomputed over the
-    // pruned content at the *same* revision.
-    const newRoot = computeStateRoot(ledger, row.revision);
-    await saveOwnerRow(client, ownerID, row.revision, row.revision, ledger, newRoot);
+    const committedRevision = row.revision + 1;
+    const newRoot = computeStateRoot(ledger, committedRevision);
+    await saveOwnerRow(client, ownerID, row.revision, committedRevision, ledger, newRoot);
+    await insertOperation(client, systemPurgeOperation(ownerID, committedRevision, now));
   }
   return changed;
+}
+
+/**
+ * A synthetic operation-log receipt for a retention purge, so the append-only
+ * operation log (and the `(revision, stateRoot)` a client anchors on)
+ * accounts for every revision advance, including this system-initiated one
+ * -- not just client-submitted mutations. It is not (and does not claim to
+ * be) a signed client operation: `signer` is the ledger's own owner identity
+ * (a purge is an owner-partition-local, not third-party, event), and
+ * `signedOperation`/digests are internally-consistent placeholders, never
+ * independently re-verified as a real signature anywhere in this codebase.
+ */
+function systemPurgeOperation(ownerID: string, committedRevision: number, now: number): StoredOperation {
+  const marker = Buffer.from(JSON.stringify({ system: "retention_purge", ownerID, committedRevision }), "utf8");
+  const responseBody = Buffer.from("{}", "utf8");
+  return {
+    operationID: `retention-purge:${randomUUID()}`,
+    ownerID,
+    kind: "retention_purge",
+    signerIdentityID: ownerID,
+    signerRole: "owner",
+    signerPublicKey: Buffer.alloc(32),
+    expectedRevision: null,
+    bodyDigest: digest(marker),
+    signedOperation: marker,
+    responseKind: "acknowledgement",
+    responseBody,
+    responseDigest: digest(responseBody),
+    disposition: "accepted",
+    stateRootAfter: computeStateRootPlaceholder(),
+    committedRevision,
+    committedAt: now
+  };
+}
+
+// `stateRootAfter` on the operation row exists so an idempotent *client*
+// replay can report the exact root as of that commit; a system purge
+// operation is never replayed by a client (its operationID is a fresh UUID
+// each time, never reused), so this value is only ever read back as an
+// opaque 32-byte placeholder, never compared against a fresh computation.
+function computeStateRootPlaceholder(): Buffer {
+  return digest(Buffer.from("retention-purge-receipt", "utf8"));
 }

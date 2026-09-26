@@ -37,7 +37,8 @@ import {
   decodeApprovalUse,
   decodeRequestReference,
   decodePairingReference,
-  decodeNaturalEnd
+  decodeNaturalEnd,
+  decodeInboxQuery
 } from "../src/protocol.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -156,12 +157,21 @@ const payloadDecoders: Record<string, (payload: unknown) => void> = {
 };
 
 describe("every operation kind: enveloped reference form decodes and verifies", () => {
-  for (const op of vectors.operations as Array<{ name: string; kind: string; signedOperationJSON: string }>) {
+  for (const op of vectors.operations as Array<{ name: string; kind: string; signedOperationJSON: string; decoded?: Record<string, unknown> }>) {
     it(op.name, () => {
       const json = JSON.parse(op.signedOperationJSON);
       const operation = decodeSignedOperation(json);
       expect(verifySignedOperationSignature(operation)).toBe(true);
-      if (op.kind === "inbox") return;
+      if (op.kind === "inbox") {
+        const query = decodeInboxQuery(JSON.parse(operation.body.toString("utf8")));
+        expect(query.identityID).toBe(op.decoded?.identityID);
+        if (op.name === "inbox") {
+          expect(query.issuedAt).toBeUndefined();
+        } else if (op.name === "inbox_with_issued_at") {
+          expect(query.issuedAt).toBeCloseTo(op.decoded?.issuedAtUnixSeconds as number, 3);
+        }
+        return;
+      }
       const envelope = JSON.parse(operation.body.toString("utf8"));
       const payload = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8"));
       payloadDecoders[op.kind]?.(payload);
@@ -205,6 +215,68 @@ describe("tampered/cross-domain/wrong-key operations are rejected", () => {
       expect(valid).toBe(t.expectValid);
     });
   }
+});
+
+describe("Ed25519 signature malleability / non-canonical encodings are rejected", () => {
+  // Ed25519 signatures are `R || S` (32 + 32 bytes). A naive verifier that
+  // only checks `[8][L]S = [8]R + [8][k]A` without also requiring `S < L`
+  // (the group order) accepts an infinite family of malleable signatures
+  // (S, S+L, S+2L, ...) for the same message/key -- a real (if here
+  // low-impact, since nothing in this protocol keys off signature bytes)
+  // class of Ed25519 implementation bugs. These vectors are generated here
+  // rather than by CompanionVectorGen because malleability is a property of
+  // the *verifier*, not something a well-formed Swift-signed vector would
+  // ever exercise; what matters is proving Node's `crypto.verify` (which
+  // this relay's Ed25519 verification is built on) rejects them.
+  const L = Buffer.from("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010", "hex").subarray(0, 32);
+
+  function addLittleEndian(a: Buffer, b: Buffer): Buffer {
+    const out = Buffer.alloc(32);
+    let carry = 0;
+    for (let i = 0; i < 32; i += 1) {
+      const sum = a[i]! + b[i]! + carry;
+      out[i] = sum & 0xff;
+      carry = sum >> 8;
+    }
+    return out;
+  }
+
+  it("rejects a signature with S replaced by S+L (non-canonical scalar)", async () => {
+    const { generateEd25519KeyPair, sign, verify } = await import("../src/crypto.js");
+    const kp = generateEd25519KeyPair();
+    const message = Buffer.from("malleability-check", "utf8");
+    const signature = sign(message, kp.privateKeySeed, kp.publicKey);
+    expect(verify(message, signature, kp.publicKey)).toBe(true);
+
+    const nonCanonicalS = addLittleEndian(signature.subarray(32, 64), L);
+    const malleableSignature = Buffer.concat([signature.subarray(0, 32), nonCanonicalS]);
+    expect(verify(message, malleableSignature, kp.publicKey)).toBe(false);
+  });
+
+  it("rejects a signature with an arbitrary out-of-range S", async () => {
+    const { generateEd25519KeyPair, sign, verify } = await import("../src/crypto.js");
+    const kp = generateEd25519KeyPair();
+    const message = Buffer.from("malleability-check-2", "utf8");
+    const signature = sign(message, kp.privateKeySeed, kp.publicKey);
+    const garbageSignature = Buffer.concat([signature.subarray(0, 32), Buffer.alloc(32, 0xff)]);
+    expect(verify(message, garbageSignature, kp.publicKey)).toBe(false);
+  });
+});
+
+describe("decodeData rejects non-canonical base64", () => {
+  it("rejects an unpadded base64 string that Swift's Data(base64Encoded:) would also reject", async () => {
+    const { decodeData } = await import("../src/protocol.js");
+    const properlyPadded = Buffer.from("hi", "utf8").toString("base64"); // "aGk="
+    expect(properlyPadded.endsWith("=")).toBe(true);
+    const unpadded = properlyPadded.replace(/=+$/, "");
+    expect(() => decodeData(unpadded)).toThrow();
+    expect(decodeData(properlyPadded).toString("utf8")).toBe("hi");
+  });
+
+  it("rejects a base64 string with stray characters", async () => {
+    const { decodeData } = await import("../src/protocol.js");
+    expect(() => decodeData("not base64!! @@")).toThrow();
+  });
 });
 
 describe("RelayResult wire shape matches Swift's synthesized enum Codable", () => {

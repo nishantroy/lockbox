@@ -17,11 +17,24 @@ export const MIGRATIONS_DIR = join(__dirname, "..", "migrations");
 
 let pool: pg.Pool | undefined;
 
+/**
+ * Pool size and idle timeout are configurable via env vars because the right
+ * values differ sharply between local dev/tests (many short-lived
+ * connections are fine and even useful, e.g. test/race.test.ts's genuinely
+ * concurrent DB-level race) and a Vercel serverless deployment, where each
+ * function instance should hold only 1-2 connections and release them
+ * quickly -- a serverless deployment should point `DATABASE_URL` at Neon's
+ * *pooled* connection string (the one with `-pooler` in the hostname, which
+ * routes through PgBouncer) and set `PGPOOL_MAX=2`, `PGPOOL_IDLE_TIMEOUT_MS`
+ * to a few seconds. See relay/README.md.
+ */
 export function getPool(): pg.Pool {
   if (!pool) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error("DATABASE_URL is not set");
-    pool = new pg.Pool({ connectionString, max: 10 });
+    const max = Number(process.env.PGPOOL_MAX ?? "10");
+    const idleTimeoutMillis = Number(process.env.PGPOOL_IDLE_TIMEOUT_MS ?? "30000");
+    pool = new pg.Pool({ connectionString, max, idleTimeoutMillis });
   }
   return pool;
 }
@@ -131,6 +144,7 @@ export interface StoredOperation {
   signerIdentityID: string;
   signerRole: string;
   signerPublicKey: Buffer;
+  expectedRevision: number | null;
   bodyDigest: Buffer;
   signedOperation: Buffer;
   responseKind: string;
@@ -144,7 +158,7 @@ export interface StoredOperation {
 
 export async function findOperation(client: pg.PoolClient, ownerID: string, operationID: string): Promise<StoredOperation | null> {
   const result = await client.query(
-    `SELECT operation_id, owner_id, kind, signer_identity_id, signer_role, signer_public_key,
+    `SELECT operation_id, owner_id, kind, signer_identity_id, signer_role, signer_public_key, expected_revision,
             body_digest, signed_operation, response_kind, response_body, response_digest,
             disposition, state_root_after, committed_revision, extract(epoch from committed_at) as committed_at
        FROM companion_operation WHERE owner_id = $1 AND operation_id = $2`,
@@ -159,6 +173,7 @@ export async function findOperation(client: pg.PoolClient, ownerID: string, oper
     signerIdentityID: row.signer_identity_id,
     signerRole: row.signer_role,
     signerPublicKey: row.signer_public_key,
+    expectedRevision: row.expected_revision === null ? null : Number(row.expected_revision),
     bodyDigest: row.body_digest,
     signedOperation: row.signed_operation,
     responseKind: row.response_kind,
@@ -174,10 +189,10 @@ export async function findOperation(client: pg.PoolClient, ownerID: string, oper
 export async function insertOperation(client: pg.PoolClient, op: StoredOperation): Promise<void> {
   await client.query(
     `INSERT INTO companion_operation
-       (owner_id, operation_id, kind, signer_identity_id, signer_role, signer_public_key,
+       (owner_id, operation_id, kind, signer_identity_id, signer_role, signer_public_key, expected_revision,
         body_digest, signed_operation, response_kind, response_body, response_digest,
         disposition, state_root_after, committed_revision, committed_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, to_timestamp($15))`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, to_timestamp($16))`,
     [
       op.ownerID,
       op.operationID,
@@ -185,6 +200,7 @@ export async function insertOperation(client: pg.PoolClient, op: StoredOperation
       op.signerIdentityID,
       op.signerRole,
       op.signerPublicKey,
+      op.expectedRevision,
       op.bodyDigest,
       op.signedOperation,
       op.responseKind,
@@ -219,19 +235,82 @@ export async function resolveOwnerForPairing(client: pg.Pool | pg.PoolClient, pa
   return result.rows[0]?.owner_id ?? null;
 }
 
-/** Records a newly created pairing (from "confirm" or "replace_pairing") so it can be found by approver identity across owners. */
+export class PairingRoutingConflictError extends Error {
+  constructor() {
+    super("pairing_routing_conflict");
+  }
+}
+
+/**
+ * Records a newly created pairing (from "confirm" or "replace_pairing") so
+ * it can be found by approver identity across owners. `pairing_id` is the
+ * sole routing key a bare `Approval` (or an approver's inbox fetch) can use
+ * to find its owner, so it must stay globally unique. A caller-chosen
+ * `replacementPairingID` (from `replace_pairing`, proposed by the
+ * *replacement approver's* device) could otherwise collide with a value
+ * already claimed by an unrelated owner -- either pre-claimed by an
+ * attacker before the victim uses it, or claimed by the attacker to shadow
+ * a victim's ID. Rather than silently ignoring the conflict (which used to
+ * leave the index pointing at whichever owner claimed it first, silently
+ * misrouting the other owner's approvals/inbox), a same-owner re-insert is
+ * a harmless no-op (e.g. a partially-applied prior attempt) but a
+ * different-owner conflict fails the whole transaction, so the "confirm"/
+ * "replace_pairing" operation that tried to claim it is rejected outright
+ * and nothing commits.
+ */
 export async function recordApproverPairing(client: pg.PoolClient, ownerID: string, pairingID: string, approverIdentityID: string): Promise<void> {
-  await client.query(
+  const inserted = await client.query(
     `INSERT INTO companion_approver_pairing (pairing_id, approver_identity_id, owner_id) VALUES ($1, $2, $3)
-     ON CONFLICT (pairing_id) DO NOTHING`,
+     ON CONFLICT (pairing_id) DO NOTHING
+     RETURNING owner_id`,
     [pairingID, approverIdentityID, ownerID]
   );
+  if ((inserted.rowCount ?? 0) === 1) return;
+  const existing = await client.query<{ owner_id: string }>(`SELECT owner_id FROM companion_approver_pairing WHERE pairing_id = $1`, [pairingID]);
+  if (existing.rows[0]?.owner_id !== ownerID) {
+    throw new PairingRoutingConflictError();
+  }
+}
+
+/** Deletes an owner's approver-pairing routing row, scoped by owner so an unrelated colliding row (which recordApproverPairing now prevents from ever being created) can never be deleted out from under a different owner. */
+export async function deleteApproverPairing(client: pg.Pool | pg.PoolClient, ownerID: string, pairingID: string): Promise<void> {
+  await client.query(`DELETE FROM companion_approver_pairing WHERE pairing_id = $1 AND owner_id = $2`, [pairingID, ownerID]);
 }
 
 /** Returns the distinct set of owner IDs paired with `approverIdentityID`. */
 export async function ownersForApprover(client: pg.Pool | pg.PoolClient, approverIdentityID: string): Promise<string[]> {
   const result = await client.query<{ owner_id: string }>(`SELECT DISTINCT owner_id FROM companion_approver_pairing WHERE approver_identity_id = $1`, [approverIdentityID]);
   return result.rows.map((r) => r.owner_id);
+}
+
+/**
+ * Global, DB-backed, fixed-window rate limiter keyed by `subject` (typically
+ * `signer:<identityID>`, optionally combined with a client IP when one is
+ * available). Charged in its own implicit single-statement transaction
+ * *before* any owner row is resolved/locked, so it bounds every request
+ * regardless of whether it succeeds, fails, targets an owner that doesn't
+ * exist, or is an inbox fetch (none of which reach the per-owner-ledger rate
+ * limiter in src/reducer.ts, which only runs once inside an already-open
+ * owner transaction). Returns `true` if the request should be allowed.
+ */
+export async function chargeGlobalRateLimit(pool: pg.Pool, subject: string, nowSeconds: number, windowSeconds: number, maxCount: number): Promise<boolean> {
+  const result = await pool.query<{ count: number }>(
+    `INSERT INTO companion_rate_limit (subject, window_start, count)
+     VALUES ($1, to_timestamp($2), 1)
+     ON CONFLICT (subject) DO UPDATE SET
+       window_start = CASE WHEN companion_rate_limit.window_start < to_timestamp($2) - make_interval(secs => $3) THEN to_timestamp($2) ELSE companion_rate_limit.window_start END,
+       count = CASE WHEN companion_rate_limit.window_start < to_timestamp($2) - make_interval(secs => $3) THEN 1 ELSE companion_rate_limit.count + 1 END
+     RETURNING count`,
+    [subject, nowSeconds, windowSeconds]
+  );
+  const count = result.rows[0]?.count ?? 0;
+  return count <= maxCount;
+}
+
+/** Deletes rate-limit rows whose window has been stale for at least `windowSeconds` past `cutoffSeconds`; used by retention. */
+export async function purgeStaleRateLimits(pool: pg.Pool, cutoffSeconds: number): Promise<number> {
+  const result = await pool.query(`DELETE FROM companion_rate_limit WHERE window_start < to_timestamp($1)`, [cutoffSeconds]);
+  return result.rowCount ?? 0;
 }
 
 export async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
