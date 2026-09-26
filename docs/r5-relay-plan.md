@@ -1,6 +1,6 @@
 # R5 relay build plan — local-first, Vercel-ready
 
-Status: **approved by owner 2026-09-26; in progress.** This is an implementation plan, not evidence. Nothing here is deployed.
+Status: **Slices A and B1 integrated on `r5-relay` (2026-09-26); B2 and deployment not started.** Nothing here is deployed. See [integration results](#integration-results-2026-09-26).
 
 ## Owner decisions (2026-09-26)
 
@@ -122,3 +122,62 @@ This touches the R2/R3 safety core and gets its own plan and an Opus high review
 ## Out of scope for this phase
 
 Vercel deployment (needs the owner's account; the target is Hobby plus Neon), APNs, R6 notices and summaries, mutual pact, quorum beyond one-of-N, the independent key authority beyond the owner-device anchor, and B2 lifecycle release.
+
+## Integration results (2026-09-26)
+
+**Delegation actually used:**
+- Slice A (relay) and Slice B1 (iOS) were built by Claude **Sonnet** subagents in isolated worktrees.
+- Each slice was independently reviewed by a separate Claude **Opus** subagent. No Luna/Terra models were used.
+  - B1 went through three fix rounds and was approved.
+  - A went through two fix rounds and was approved with minor fixes. The final P2 round was applied, then verified by the parent's tests; it was not re-reviewed.
+
+**Contract v1.1**, which supersedes the API table above where they differ:
+- `/v1/inbox` also returns `pairings` and `consents` for pairings the signer is part of.
+- `stateRoot` is per owner.
+- `ownerIdentityID` on `/v1/operations` is the owner of the ledger that was mutated.
+- An inbox response is anchored only when an owner fetches their own ledger.
+- Raw `SignedOperation` with `expectedRevision: null` is accepted.
+- Error codes are snake_case (`relay/test/fixtures/error-codes.json`).
+- The inbox query signs `issuedAt` (seconds since 2001-01-01) inside a 5-minute window. It is required by default (`REQUIRE_FRESH_INBOX`).
+- Consent mutations expire 24h after `issuedAt`.
+- Retention purges advance the owner revision.
+
+**Security properties added during review:**
+- The client never trusts relay pairing or consent data blindly. Identities are field-locked, epochs and generations only move forward, and helper pairings are bound to a specific accepted invite.
+- The confirm response must name the verified approver.
+- Rollback anchors are keyed by normalized relay URL and owner, and enforced once established.
+- `activeSetID` is derived from session IDs only.
+- The relay rejects pairing-ID collisions across owners.
+- Rate limits are DB-backed per signer and per IP.
+- Maps use null prototypes and base64 decoding is strict.
+- The stored root is verified on the mutation, inbox and purge paths.
+- `CRON_SECRET` is compared in constant time.
+
+**Parent validation on the merged branch:**
+- `swift test --package-path CompanionKit`: 95 passed.
+- `swift test --package-path CompanionRelayService`: 18 passed.
+- Root `swift test`: 150 passed.
+- Relay `npm run typecheck`, and `npm test` against Docker Postgres 16: 127 passed. The inbox vector is now captured from the real `CompanionClient`. CryptoKit Ed25519 signatures are randomized, so regenerated vectors differ only in signatures.
+- `xcodegen generate` produced no diff, and the iOS simulator build succeeded.
+- End-to-end smoke run: two fresh Swift identities using `AsyncCompanionClient` over HTTP to `127.0.0.1:8002`, with anchors enabled. The flow covered:
+  1. health check
+  2. invite, then accept
+  3. confirm with a wrong code (rejected), then with the correct code
+  4. the helper learns the pairing from an unanchored inbox
+  5. consent from both sides, visible in the owner's anchored inbox
+  6. the owner publishes an exact session and requests an early end
+  7. the helper receives the request and approves; a duplicate approval is rejected
+  8. the owner sees the request as approved
+  9. the owner revokes, and the helper sees the pairing as revoked
+
+  **All steps passed.** The script was a throwaway in the parent's scratch directory and is not committed.
+- No physical-device, Vercel or Neon run has happened.
+
+**Known gaps:**
+- Learning of `replace_pairing` (device replacement) is deferred to B2.
+- The relay could fabricate one unconfirmed helper pairing per pending acceptance for up to 7 days, affecting the UI only. The fix is for the relay to return an owner-signed `PairingConfirmation`.
+- The sync `CompanionClient.fetchInbox` still requires `ownerIdentityID`, so it fails against the relay for a pure helper inbox. It is used only with the in-memory relay; the app uses the async client.
+- A consent that stays queued offline for more than 24h returns `expired` and must be re-signed. The UI should present this as "try again".
+- `CompanionCoordinator` has no unit tests of its own; its merge and anchor logic is tested in CompanionKit.
+- The Vercel runtime behaviour (named exports, rewrites, cron) has not been checked with `vercel dev` or a deployment.
+- Postgres is pinned to `16.9-alpine`.

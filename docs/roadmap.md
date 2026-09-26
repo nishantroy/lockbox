@@ -63,7 +63,7 @@ Begin only after automatic release and cleanup are demonstrated under the record
 
 **Depends on:** R4 gate for ordinary exposure. This is two sequential subphases under one production prerequisite; the local companion/pairing and relay simulations remain developer-only.
 
-**Status (2026-09-26):** owner approved starting R5 before the remaining R4 items (accessibility deferred, pre-window overlap case not run). Implementation plan: [R5 relay plan](r5-relay-plan.md) — TypeScript relay targeting Vercel Hobby + Neon Postgres, local-first; 30-day retention of terminal records.
+**Status (2026-09-26):** owner approved starting R5 before the remaining R4 items (accessibility deferred, pre-window overlap case not run). Implementation plan: [R5 relay plan](r5-relay-plan.md) — TypeScript relay targeting Vercel Hobby + Neon Postgres, local-first; 30-day retention of terminal records. Slices A (relay) and B1 (iOS transport + People tab) are integrated on `r5-relay` with independent review and a passing local HTTP end-to-end smoke; approvals are not yet consumed by the lock lifecycle (B2), and nothing is deployed or device-tested.
 
 ### R5.1 Durable relay and identity lifecycle
 

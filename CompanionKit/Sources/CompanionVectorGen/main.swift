@@ -79,25 +79,25 @@ func makeInboxOperation(signer: DeviceSigner) throws -> SignedOperation {
     return try SignedOperation(kind: "inbox", signer: signer.identity, body: body, signature: signature)
 }
 
-/// Builds an "inbox" operation whose body includes the optional freshness
-/// field: `{"identityID":"...","issuedAt":<double>}`. `InboxQuery` does not
-/// yet declare `issuedAt` in this worktree's CompanionKit (it is being added
-/// on a sibling branch), so this constructs the body directly with a local
-/// Codable struct rather than depending on that type -- the wire shape is
-/// otherwise identical to `makeInboxOperation`'s legacy (no-`issuedAt`) form,
-/// including the same legacy operation-ID/signing-field derivation.
-struct VGInboxQueryWithFreshness: Codable {
-    let identityID: String
-    let issuedAt: Date
+/// Captures the exact inbox operation the real `CompanionClient.fetchInbox`
+/// signs (body `{"identityID":"...","issuedAt":<double>}`, explicit operation
+/// ID), so the relay's vectors track the shipping client rather than a copy.
+final class VGCapturingTransport: CompanionTransport, @unchecked Sendable {
+    struct Captured: Error {}
+    private(set) var inbox: SignedOperation?
+    func submit(_ operation: SignedOperation) throws -> RelayResponse { throw Captured() }
+    func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
+        inbox = operation
+        throw Captured()
+    }
 }
 
 func makeInboxOperationWithFreshness(signer: DeviceSigner, issuedAt: Date) throws -> SignedOperation {
-    let query = VGInboxQueryWithFreshness(identityID: signer.identity.identityID, issuedAt: issuedAt)
-    let body = try encodeSorted(query)
-    let fields = ["inbox", signer.identity.identityID, b64url(signer.identity.publicKey),
-                  b64url(CompanionCanonical.digest(body))]
-    let signature = try signer.sign(domain: "\(version).operation", fields: fields)
-    return try SignedOperation(kind: "inbox", signer: signer.identity, body: body, signature: signature)
+    let transport = VGCapturingTransport()
+    let client = CompanionClient(signer: signer, transport: transport, now: { issuedAt })
+    _ = try? client.fetchInbox()
+    guard let operation = transport.inbox else { fatalError("client did not produce an inbox operation") }
+    return operation
 }
 
 func jsonText(_ operation: SignedOperation) throws -> String {
@@ -473,12 +473,8 @@ try addOperation(name: "inbox", kind: "inbox",
                  operation: try makeInboxOperation(signer: approverSigner),
                  decoded: ["signerRole": "approver", "identityID": approverSigner.identity.identityID])
 
-// inbox with the optional freshness field: `{"identityID":"...","issuedAt":<double>}`,
-// `issuedAt` encoded exactly like every other Date field (seconds since the
-// 2001-01-01 reference date). InboxQuery does not yet declare this field in
-// CompanionKit itself (it lives on a sibling branch this generator cannot
-// see), so this constructs the body JSON directly to match the documented
-// shape rather than depending on that type.
+// inbox with the freshness field, captured from the real CompanionClient
+// (`issuedAt` is seconds since the 2001-01-01 reference date).
 try addOperation(name: "inbox_with_issued_at", kind: "inbox",
                  operation: try makeInboxOperationWithFreshness(signer: approverSigner, issuedAt: base.addingTimeInterval(50)),
                  decoded: ["signerRole": "approver", "identityID": approverSigner.identity.identityID,
