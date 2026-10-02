@@ -17,17 +17,20 @@ struct PeopleView: View {
 
 #if canImport(CompanionKit)
             if companion.isAvailable {
-                // R5 pairing v2 UX fix item 7: placed first, directly under
-                // the page header, so the prompt is visible without
-                // scrolling the moment an invite link is opened.
+                // R5 pairing v2 UX fix item 7, and the owner-review
+                // follow-up: both placed first, directly under the
+                // Prototype label, so each is visible without scrolling —
+                // the incoming-invite prompt the moment a friend opens a
+                // link, and a pending acceptance the moment the owner
+                // learns someone accepted theirs.
                 if let invitation = companion.incomingInvite {
                     IncomingInviteCard(companion: companion, invitation: invitation)
                 }
-                IntroCard()
-                InviteSomeoneCard(companion: companion)
                 ForEach(companion.pendingOwnerAcceptances) { item in
                     PendingAcceptanceCard(companion: companion, item: item)
                 }
+                IntroCard()
+                InviteSomeoneCard(companion: companion)
                 AcceptInviteCard(companion: companion)
                 if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
                     AskToEndEarlyCard(coordinator: coordinator, companion: companion)
@@ -254,6 +257,14 @@ private struct PendingAcceptanceCard: View {
     @ObservedObject var companion: CompanionCoordinator
     let item: VerifiedPendingAcceptance
     @State private var nickname = ""
+    /// Owner-review follow-up (2026-10-02): on by default. If still on when
+    /// Confirm is tapped, `confirmPendingAcceptance` grants this device's
+    /// own `approveEarlyEnd`/`receiveRequests` scopes immediately after the
+    /// pairing confirms — the same grant the person row's own toggles
+    /// perform, just without an extra trip back to this screen. The friend
+    /// still has to accept those scopes themselves (consent stays
+    /// bilateral); this never grants anything on their behalf.
+    @State private var grantEarlyEndTrust = true
     @State private var isBusy = false
 
     var body: some View {
@@ -266,11 +277,14 @@ private struct PendingAcceptanceCard: View {
                 TextField("Name for this person", text: $nickname)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("pendingAcceptance.nameField")
+                Toggle("Let them approve ending my locks early", isOn: $grantEarlyEndTrust)
+                    .tint(LockboxTheme.accent)
+                    .accessibilityIdentifier("pendingAcceptance.grantEarlyEndToggle")
                 HStack(spacing: 10) {
                     Button(isBusy ? "Confirming…" : "Confirm") {
                         isBusy = true
                         Task {
-                            await companion.confirmPendingAcceptance(item, nickname: nickname)
+                            await companion.confirmPendingAcceptance(item, nickname: nickname, grantEarlyEndTrust: grantEarlyEndTrust)
                             isBusy = false
                         }
                     }
@@ -444,12 +458,20 @@ private struct OwnerPersonRow: View {
         person.isFullyTrustedForEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary
     }
 
+    /// Owner-review follow-up (2026-10-02): names the person once this
+    /// device has granted its own side (whether from the person row's own
+    /// toggles, or from the pending-acceptance card's "Let them approve
+    /// ending my locks early" toggle at confirm time) — reusing the same
+    /// `hasGrantedApproveEarlyEnd`/`isFullyTrustedForEarlyEnd` state either
+    /// path already produces, not a new tracking mechanism. Still names
+    /// only the *owner's own* grant; the friend's acceptance remains a
+    /// separate, bilateral step this device cannot see or perform for them.
     private var statusDetail: String {
         if person.isFullyTrustedForEarlyEnd {
             return "They can approve one exact session's early end when you ask."
         }
         if person.hasGrantedApproveEarlyEnd {
-            return "You've allowed this; waiting for them to accept on their device."
+            return "Waiting for \(person.nickname) to agree before they can approve early ends."
         }
         return "Not asked to help with early-end requests yet."
     }

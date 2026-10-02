@@ -636,12 +636,24 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     /// The owner taps **Confirm** on a verified pending-acceptance card,
-    /// after optionally naming the person. No code is read or typed — the
-    /// code `item` carries is the one this device itself derived while
-    /// verifying it (`OwnerAcceptanceCheck`). On success, the invite is
-    /// discarded (consumed) and the card removed immediately, without
-    /// waiting for the next refresh.
-    func confirmPendingAcceptance(_ item: VerifiedPendingAcceptance, nickname: String) async {
+    /// after optionally naming the person and choosing whether to grant
+    /// early-end trust immediately. No code is read or typed — the code
+    /// `item` carries is the one this device itself derived while verifying
+    /// it (`OwnerAcceptanceCheck`). On success, the invite is discarded
+    /// (consumed) and the card removed immediately, without waiting for the
+    /// next refresh.
+    ///
+    /// `grantEarlyEndTrust`, when true (the pending-acceptance card's
+    /// default), immediately performs the same owner-side consent grant the
+    /// person row's "Can approve early end"/"Receives my requests" toggles
+    /// do — both scopes, in one round trip — right after `confirm` succeeds.
+    /// This never makes the friend fully trusted by itself: `authorizes`
+    /// requires the scope on **both** sides, and the friend still has to
+    /// separately accept on their own device (consent stays bilateral; see
+    /// `docs/r5-pairing-v2-plan.md`'s P2b follow-up). A failed grant never
+    /// un-confirms the pairing — it only surfaces `lastError`, and the
+    /// per-scope toggles on the person row remain the fallback path.
+    func confirmPendingAcceptance(_ item: VerifiedPendingAcceptance, nickname: String, grantEarlyEndTrust: Bool) async {
         guard isAvailable else { return }
         do {
             let identity = try ensureIdentity(role: .owner)
@@ -651,7 +663,35 @@ final class CompanionCoordinator: ObservableObject {
             discardStoredInvite(inviteID: item.acceptance.inviteID)
             pendingOwnerAcceptances.removeAll { $0.id == item.id }
             lastError = nil; needsRepair = false
+            if grantEarlyEndTrust {
+                await grantOwnerTrustAfterConfirm(pairingID: pairing.pairingID)
+            }
         } catch { fail(error) }
+    }
+
+    /// Follow-up to `confirmPendingAcceptance`: grants both owner scopes
+    /// (`approveEarlyEnd`, `receiveRequests`) for the just-confirmed pairing
+    /// in one round trip. Mirrors `setOwnerGrant`'s shape (read the current
+    /// owner scope set, union in what's wanted, resubmit the full set) but
+    /// grants both at once rather than one at a time, since this always
+    /// runs immediately after a fresh `confirm` with no existing consent to
+    /// race against. A failure here is reported through `fail(error)` like
+    /// any other action — it never reverts the pairing confirm that already
+    /// succeeded, and the person row's own toggles remain available to grant
+    /// (or retry) afterward regardless of how this ends.
+    private func grantOwnerTrustAfterConfirm(pairingID: String) async {
+        guard let person = people.first(where: { $0.pairing.pairingID == pairingID }) else { return }
+        do {
+            let identity = try ensureIdentity(role: .owner)
+            let client = makeClient(signer: try signer(for: identity))
+            var scopes = Set(person.consent?.ownerScopes ?? [])
+            scopes.formUnion([.approveEarlyEnd, .receiveRequests])
+            let consent = try await client.grantScopes(pairing: person.pairing, scopes: Array(scopes))
+            applyOwnConsentUpdate(consent, forPairingID: pairingID)
+            lastError = nil; needsRepair = false
+        } catch {
+            fail(error)
+        }
     }
 
     /// The owner taps **Not them**: hides this acceptance locally (removed

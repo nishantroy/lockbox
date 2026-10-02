@@ -172,6 +172,11 @@ final class CompanionPairingUITests: XCTestCase {
             XCTFail("'Someone accepted your invite' card never appeared after the friend accepted and a refresh")
             return
         }
+        // Owner-review follow-up: the pending-acceptance card is placed
+        // directly under the Prototype label (same priority as the
+        // incoming-invite prompt), so it must be visible without scrolling —
+        // not merely present in the hierarchy.
+        XCTAssertTrue(confirmButton.isHittable, "the pending-acceptance card's Confirm button must be visible without scrolling")
         attachScreenshot(named: "04-pending-acceptance-card-visible")
 
         let nameField = app.textFields["pendingAcceptance.nameField"]
@@ -179,10 +184,26 @@ final class CompanionPairingUITests: XCTestCase {
         nameField.tap()
         nameField.typeText("Ari")
 
+        // "Let them approve ending my locks early" defaults on; leave it
+        // alone so Confirm exercises the owner-side grant-at-confirm path.
+        let grantToggle = app.switches["pendingAcceptance.grantEarlyEndToggle"]
+        XCTAssertTrue(grantToggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(grantToggle.value as? String, "1", "the early-end grant toggle should default on")
+
         confirmButton.tap()
 
         let pairedName = app.staticTexts["Ari"]
         XCTAssertTrue(pairedName.waitForExistence(timeout: 30), "confirmed person 'Ari' never appeared in 'Your trusted people'")
+
+        // Owner-review follow-up: confirming with the toggle left on must
+        // immediately grant this device's own early-end scopes — surfaced
+        // as the person row's "waiting on the friend" state, which is only
+        // reachable once `hasGrantedApproveEarlyEnd` is true. The friend
+        // still has to accept separately (consent stays bilateral), so this
+        // is the furthest state reachable from the owner side alone.
+        let waitingForFriend = app.staticTexts["Waiting for Ari to agree before they can approve early ends."]
+        XCTAssertTrue(waitingForFriend.waitForExistence(timeout: 15),
+                      "the owner-side grant-at-confirm never took effect — person row should read 'Waiting for Ari to agree…'")
         attachScreenshot(named: "05-person-confirmed-as-paired")
 
         // The card is removed immediately on a successful confirm — not
@@ -214,6 +235,7 @@ final class CompanionPairingUITests: XCTestCase {
             XCTFail("'Someone accepted your invite' card never appeared after the friend accepted and a refresh")
             return
         }
+        XCTAssertTrue(notThemButton.isHittable, "the pending-acceptance card's Not them button must be visible without scrolling")
         attachScreenshot(named: "06-pending-acceptance-before-not-them")
 
         notThemButton.tap()
