@@ -318,10 +318,32 @@ final class CompanionPairingUITests: XCTestCase {
         // Now tap Accept explicitly and confirm the friend side shows the
         // new waiting state (R5 pairing v2, Slice P2b item 5) — no code to
         // read aloud or share back.
-        acceptButton.tap()
-
+        //
+        // Owner-review follow-up: a parent run saw this synthesized tap
+        // produce no observable effect at all for a full 30s — no error
+        // banner, no "Accepting…", no waiting state, the prompt completely
+        // unchanged. `CompanionCoordinator.acceptInvite` has no code path
+        // that leaves every one of those signals untouched (every path
+        // either sets `lastError` or, on success, clears `incomingInvite`
+        // — see its new DEBUG entry/exit log), so a synthesized tap lost
+        // before it ever reached the button is the only explanation
+        // consistent with all of it. Retrying the tap itself (not just
+        // re-polling) is what closes that gap — mirrors
+        // `waitForElementAfterRepeatedRefresh`'s rationale.
         let waitingLabel = app.staticTexts["acceptInvite.waitingLabel"]
-        XCTAssertTrue(waitingLabel.waitForExistence(timeout: 30), "'Waiting for the person who invited you to confirm' never appeared after tapping Accept")
+        var waitingLabelAppeared = false
+        for attempt in 1...3 {
+            // A disabled "Accepting…" button still accepts a synthesized
+            // tap harmlessly (SwiftUI's `.disabled` ignores the action), so
+            // retapping while a prior attempt is still in flight is safe —
+            // it never double-submits `acceptInvite`.
+            if acceptButton.exists { acceptButton.tap() }
+            if waitingLabel.waitForExistence(timeout: attempt == 1 ? 15 : 10) {
+                waitingLabelAppeared = true
+                break
+            }
+        }
+        XCTAssertTrue(waitingLabelAppeared, "'Waiting for the person who invited you to confirm' never appeared after tapping Accept (tried 3 times)")
         attachScreenshot(named: "03-friend-side-waiting-for-confirmation")
 
         // The prompt itself is dismissed once accepted.
