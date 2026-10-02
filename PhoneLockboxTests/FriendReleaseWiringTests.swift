@@ -317,6 +317,42 @@ final class FriendReleaseWiringTests: XCTestCase {
         }
     }
 
+    /// R2-5: a given `approvalID` must pin selection to that exact approval,
+    /// never merely the first one found for the request — proven here by
+    /// putting the pinned approval *second* in the array.
+    func testSelectFriendReleasePinsToTheGivenApprovalIDEvenWhenItSortsSecond() throws {
+        let fixture = try makeFixture()
+        let firstApproval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                             approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let secondApproval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                              approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        XCTAssertNotEqual(firstApproval.approvalID, secondApproval.approvalID)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [firstApproval, secondApproval])
+
+        let (_, selected, _) = try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, approvalID: secondApproval.approvalID,
+            people: [person(for: fixture)], ownerIdentity: fixture.ownerSigner.identity
+        )
+
+        XCTAssertEqual(selected.approvalID, secondApproval.approvalID)
+    }
+
+    func testSelectFriendReleaseRejectsAMissingPinnedApprovalIDEvenWhenAnotherApprovalExistsForTheRequest() throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [approval])
+
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, approvalID: "does-not-exist",
+            people: [person(for: fixture)], ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .notFound)
+        }
+    }
+
     // MARK: - P1-3: finishFriendRelease branching, against a fake ScreenTimeCoordinator seam
 
     /// A test double for `FriendReleaseLifecycle` (R5 Slice B2c review,
@@ -454,11 +490,12 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertEqual(companion.lastError, "Your locks changed; ask again.")
     }
 
-    /// Review P1-1 (second half): a verified `use` followed by
-    /// `.noMatchingPendingIntent` is reported as success, not "already
-    /// ended", once the durable released marker confirms this exact use
-    /// actually completed the release.
-    func testFinishFriendReleaseTreatsANoMatchingPendingIntentAsSuccessWhenTheMarkerConfirmsIt() async throws {
+    /// Review P1-1 (second half), tightened by R2-1: a verified `use`
+    /// followed by `.noMatchingPendingIntent` is reported as success, not
+    /// "already ended", only once the durable released marker confirms
+    /// *this exact `useID`* actually completed the release — not merely
+    /// that *some* friend approval released the session.
+    func testFinishFriendReleaseTreatsANoMatchingPendingIntentAsSuccessWhenTheMarkerConfirmsTheExactUseID() async throws {
         let fixture = try makeFixture()
         let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
                                         approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
@@ -467,13 +504,14 @@ final class FriendReleaseWiringTests: XCTestCase {
         let fake = FakeFriendReleaseLifecycle()
         fake.applyResult = .success(.noOp(.noMatchingPendingIntent))
         fake.sessionStatesByID[fixture.request.sessionID] = .usedToEnd
+        fake.useIDsBySessionID[fixture.request.sessionID] = "use-1"
         companion.useApprovalOverride = { approval, request, useID in
             ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
         }
 
         await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
 
-        XCTAssertNil(companion.lastError, "the marker confirms this use already succeeded")
+        XCTAssertNil(companion.lastError, "the marker confirms this exact use already succeeded")
     }
 
     func testFinishFriendReleaseNoMatchingPendingIntentWithoutAMarkerIsStillAlreadyEnded() async throws {
@@ -485,6 +523,29 @@ final class FriendReleaseWiringTests: XCTestCase {
         let fake = FakeFriendReleaseLifecycle()
         fake.applyResult = .success(.noOp(.noMatchingPendingIntent))
         // No marker recorded for this session: unrelated/unconfirmed.
+        companion.useApprovalOverride = { approval, request, useID in
+            ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
+        }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertEqual(companion.lastError, "This lock already ended.")
+    }
+
+    /// R2-1: `.usedToEnd` alone is not enough — a *different* request's
+    /// approval could have released the same session. The marker's own
+    /// `useID` must match the one this `finishFriendRelease` call just
+    /// submitted.
+    func testFinishFriendReleaseNoMatchingPendingIntentWithUsedToEndButADifferentUseIDIsStillAlreadyEnded() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.applyResult = .success(.noOp(.noMatchingPendingIntent))
+        fake.sessionStatesByID[fixture.request.sessionID] = .usedToEnd
+        fake.useIDsBySessionID[fixture.request.sessionID] = "use-from-a-different-request"
         companion.useApprovalOverride = { approval, request, useID in
             ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
         }
@@ -514,6 +575,12 @@ final class FriendReleaseWiringTests: XCTestCase {
         }
     }
 
+    /// Deterministic (no fixed-yield assumption): the first flight is held
+    /// open on `gate` until the second call is *known* to have joined it —
+    /// signaled by `friendReleaseFlightJoinCount`, which
+    /// `runSingleFlightFriendRelease` increments synchronously, before any
+    /// suspension point, the instant a caller takes the join branch — only
+    /// then is the gate released (R5 Slice B2c review, determinism fix).
     func testSingleFlightJoinsAnInFlightCallInsteadOfSubmittingASecondUse() async throws {
         let fixture = try makeFixture()
         let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
@@ -542,13 +609,49 @@ final class FriendReleaseWiringTests: XCTestCase {
         async let second: Void = companion.runSingleFlightFriendRelease {
             await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-2", coordinator: fake)
         }
-        // Give the second call a chance to reach (and return from) its
-        // early-join path before releasing the first.
-        await Task.yield()
+        // Wait until the second call has *actually* taken the join branch —
+        // never assume any fixed number of yields is "enough" — before
+        // releasing the first.
+        while companion.friendReleaseFlightJoinCount == 0 {
+            await Task.yield()
+        }
         await gate.open()
         _ = await (first, second)
 
         XCTAssertEqual(useCallCount, 1, "the second call must join the in-flight work, not submit its own use")
+        XCTAssertEqual(companion.friendReleaseFlightJoinCount, 1)
+    }
+
+    // MARK: - R2-3: endLockNow reports a conflict rather than joining an unrelated flight
+
+    func testEndLockNowReportsAConflictWhenAFlightForADifferentRequestIsInProgress() async throws {
+        let fixture = try makeFixture()
+        var approved = fixture.request
+        approved.status = .approved
+        let item = CompanionInboxItem(request: approved, viewerIdentityID: fixture.ownerSigner.identity.identityID)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        companion.friendApprovalCanEndLocksEnabled = true
+        let gate = Gate()
+
+        // An unrelated flight for a different request, held open.
+        async let other: Void = companion.runSingleFlightFriendRelease(requestID: "some-other-request-id") {
+            await gate.wait()
+        }
+        while !companion.hasFriendReleaseFlightInFlight {
+            await Task.yield()
+        }
+
+        // `endLockNow` must detect the mismatch and return without ever
+        // reaching the network (no `useApprovalOverride` is even set here —
+        // if it tried to fetch the inbox for real, this test would hang or
+        // fail with a transport error instead of asserting the message).
+        await companion.endLockNow(item, coordinator: FakeFriendReleaseLifecycle())
+
+        XCTAssertEqual(companion.lastError, "Another end-lock request is already in progress.")
+
+        await gate.open()
+        _ = await other
     }
 #endif
 }

@@ -231,7 +231,12 @@ private struct DeveloperToolsSection: View {
                             showingDiscardFriendReleaseConfirmation = true
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-                        Text("Clears a durably pending end-lock request without ever using it. Use only if it stays stuck (for example the request or approval disappeared from the inbox).")
+                        // R5 Slice B2c review (R2-2): never discard out from
+                        // under an in-progress `use` attempt.
+                        .disabled(companion.hasFriendReleaseFlightInFlight)
+                        Text(companion.hasFriendReleaseFlightInFlight
+                             ? "A friend-release attempt is in progress; wait for it to finish before discarding."
+                             : "Clears a durably pending end-lock request without ever using it. Use only if it stays stuck (for example the request or approval disappeared from the inbox).")
                             .font(.footnote)
                             .foregroundStyle(LockboxTheme.secondary)
                     }

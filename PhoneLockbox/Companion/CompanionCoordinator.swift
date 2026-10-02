@@ -147,6 +147,10 @@ final class CompanionCoordinator: ObservableObject {
     /// R5 Slice B2c review, P1-1: the single in-flight friend-release
     /// `Task`, shared by `endLockNow` and `replayPendingFriendRelease`.
     private var friendReleaseFlight: Task<Void, Never>?
+    /// R5 Slice B2c review, R2-3: the `requestID` the current
+    /// `friendReleaseFlight` is actually working on, set only by the call
+    /// that *starts* the flight (never by one that joins it).
+    private var friendReleaseFlightRequestID: String?
     /// R5 Slice B2c review, P2-6: the `useID` this coordinator generated for
     /// each `requestID` it has attempted `endLockNow` for, so a later
     /// released marker can be attributed to the exact request that caused
@@ -263,6 +267,29 @@ final class CompanionCoordinator: ObservableObject {
     private func recordUseID(_ useID: String, forRequestID requestID: String) {
         useIDsByRequestID[requestID] = useID
         saveUseIDsByRequestID()
+    }
+
+    /// Keeps `useIDsByRequestID` from growing unboundedly and drops entries
+    /// for requests this device's owner identity no longer sees in its own
+    /// ledger at all (R5 Slice B2c review, R2-4). Called after every
+    /// successful owner-anchored inbox fetch with that fetch's own
+    /// `response.requests`, never with a helper-side listing.
+    private func pruneUseIDsByRequestID(presentRequestIDs: Set<String>) {
+        let before = useIDsByRequestID
+        useIDsByRequestID = useIDsByRequestID.filter { presentRequestIDs.contains($0.key) }
+        if useIDsByRequestID.count > 64 {
+            // Dictionaries carry no reliable ordering, so this is a
+            // defensive cap on pathological growth, not a precise
+            // least-recently-used eviction; the filter above already
+            // handles the common case of stale/purged requests.
+            let overflow = useIDsByRequestID.count - 64
+            for key in useIDsByRequestID.keys.prefix(overflow) {
+                useIDsByRequestID.removeValue(forKey: key)
+            }
+        }
+        if useIDsByRequestID != before {
+            saveUseIDsByRequestID()
+        }
     }
 
     /// Looks up a known person's display name for `identityID`, wherever it
@@ -637,16 +664,29 @@ final class CompanionCoordinator: ObservableObject {
     /// call. No I/O — every input is already in hand. `internal` (not
     /// `private`) so `PhoneLockboxTests` can exercise it directly (R5 Slice
     /// B2c review, P1-3).
+    ///
+    /// `approvalID`, when given, pins selection to that *exact* approval
+    /// rather than merely the first one found for `requestID` (R5 Slice B2c
+    /// review, R2-5) — required for a foreground replay, which must never
+    /// silently substitute a newer approval for the one a pending intent
+    /// was actually prepared against.
     static func selectFriendRelease(
         response: InboxResponse,
         requestID: String,
+        approvalID: String? = nil,
         people: [CompanionPerson],
         ownerIdentity: DeviceIdentity
     ) throws -> (request: TrustedRequest, approval: Approval, trustedApprover: OwnerApprovalCheck.TrustedApprover) {
         guard let request = response.requests.first(where: { $0.requestID == requestID }) else {
             throw CompanionError.notFound
         }
-        guard let approval = response.approvals?.first(where: { $0.requestID == requestID }) else {
+        let matchedApproval: Approval?
+        if let approvalID {
+            matchedApproval = response.approvals?.first(where: { $0.requestID == requestID && $0.approvalID == approvalID })
+        } else {
+            matchedApproval = response.approvals?.first(where: { $0.requestID == requestID })
+        }
+        guard let approval = matchedApproval else {
             throw CompanionError.notFound
         }
         guard let targetBinding = request.binding(for: approval.approver.identityID),
@@ -670,7 +710,16 @@ final class CompanionCoordinator: ObservableObject {
     /// one is already running joins it instead of starting a duplicate.
     func endLockNow(_ item: CompanionInboxItem, coordinator: any FriendReleaseLifecycle) async {
         guard isAvailable, friendApprovalCanEndLocksEnabled else { return }
-        await runSingleFlightFriendRelease { [weak self] in
+        if friendReleaseFlight != nil, friendReleaseFlightRequestID != item.request.requestID {
+            // R5 Slice B2c review (R2-3): joining another request's
+            // in-flight work would silently wait and then surface whatever
+            // error that unrelated flight produces. Say so plainly instead
+            // of joining — only a flight for this *same* request is worth
+            // waiting on.
+            lastError = Self.prepareNoOpMessage(.conflictingPendingIntent)
+            return
+        }
+        await runSingleFlightFriendRelease(requestID: item.request.requestID) { [weak self] in
             await self?.performEndLockNow(item, coordinator: coordinator)
         }
     }
@@ -690,6 +739,7 @@ final class CompanionCoordinator: ObservableObject {
             let response = try await client.fetchInboxResponse()
             for approval in response.approvals ?? [] { approvalsByRequestID[approval.requestID] = approval }
             _ = applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
+            pruneUseIDsByRequestID(presentRequestIDs: Set(response.requests.map(\.requestID)))
             let (request, approval, _) = try Self.selectFriendRelease(
                 response: response, requestID: item.request.requestID, people: people, ownerIdentity: ownerIdentity
             )
@@ -736,8 +786,8 @@ final class CompanionCoordinator: ObservableObject {
     /// flight with `endLockNow` (P1-1): joins an in-flight call instead of
     /// racing it into a second `use` submission.
     func replayPendingFriendRelease(coordinator: any FriendReleaseLifecycle) async {
-        guard isAvailable, coordinator.pendingFriendReleaseIntent != nil, ownerIdentity != nil else { return }
-        await runSingleFlightFriendRelease { [weak self] in
+        guard isAvailable, let pending = coordinator.pendingFriendReleaseIntent, ownerIdentity != nil else { return }
+        await runSingleFlightFriendRelease(requestID: pending.requestID) { [weak self] in
             await self?.performReplayPendingFriendRelease(coordinator: coordinator)
         }
     }
@@ -760,16 +810,18 @@ final class CompanionCoordinator: ObservableObject {
         }
         for approval in response.approvals ?? [] { approvalsByRequestID[approval.requestID] = approval }
         _ = applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
-        // R5 Slice B2c review (P2-2): re-select and re-verify from scratch
-        // (never trust the approval cached when this intent was first
-        // prepared), and additionally pin the result to the *exact*
-        // approval/approver this intent was prepared against -- a request
-        // can in principle carry a newer approval by the time of a replay,
-        // and that must never be substituted in silently.
+        pruneUseIDsByRequestID(presentRequestIDs: Set(response.requests.map(\.requestID)))
+        // R5 Slice B2c review (P2-2, pinned precisely by R2-5): re-select
+        // and re-verify from scratch (never trust the approval cached when
+        // this intent was first prepared), pinning selection itself to the
+        // *exact* `approvalID` this intent was prepared against — never
+        // just the first approval found for the request, which could by
+        // then be a newer, different approval. `approver.identityID` is
+        // checked too, as defense in depth.
         guard let (request, approval, _) = try? Self.selectFriendRelease(
-            response: response, requestID: pending.requestID, people: people, ownerIdentity: ownerIdentity
-        ), approval.approvalID == pending.approvalID,
-              approval.approver.identityID == pending.approverIdentityID else {
+            response: response, requestID: pending.requestID, approvalID: pending.approvalID,
+            people: people, ownerIdentity: ownerIdentity
+        ), approval.approver.identityID == pending.approverIdentityID else {
             // R5 Slice B2c review (P2-5): calm, explicit status rather than
             // silence, since this can otherwise look like nothing is
             // happening indefinitely. Never abandons automatically --
@@ -785,8 +837,13 @@ final class CompanionCoordinator: ObservableObject {
     /// durably pending friend-release intent without ever submitting `use`.
     /// For the case where the request/approval it depends on will never
     /// reappear in the inbox (declined elsewhere, expired, purged). Never
-    /// releases anything by itself.
+    /// releases anything by itself. Refuses while a friend-release flight is
+    /// in progress (R5 Slice B2c review, R2-2) — `hasFriendReleaseFlightInFlight`
+    /// also disables the Settings button for the same reason, but this guard
+    /// keeps the method itself safe even if called directly (for example a
+    /// confirmation dialog that was already showing when a flight started).
     func discardPendingFriendRelease(coordinator: any FriendReleaseLifecycle) {
+        guard !hasFriendReleaseFlightInFlight else { return }
         guard let pending = coordinator.pendingFriendReleaseIntent else { return }
         do {
             _ = try coordinator.abandonFriendRelease(useID: pending.useID)
@@ -814,14 +871,19 @@ final class CompanionCoordinator: ObservableObject {
                 case .released:
                     lastError = nil
                 case .noOp(let reason):
-                    // R5 Slice B2c review (P1-1): a verified `use` followed
-                    // by `.noMatchingPendingIntent` most often means a
-                    // concurrent flight already applied this exact release
-                    // (the intent it was keyed on is already gone) --
-                    // confirm via the durable released marker and report
-                    // success, not a confusing "already ended".
+                    // R5 Slice B2c review (P1-1, tightened by R2-1): a
+                    // verified `use` followed by `.noMatchingPendingIntent`
+                    // most often means a concurrent flight already applied
+                    // this exact release (the intent it was keyed on is
+                    // already gone). Confirm via the durable released
+                    // marker's cause *and* its exact `useID` -- `.usedToEnd`
+                    // alone only proves *some* friend approval released this
+                    // session, not that it was *this* `useID` -- before
+                    // reporting success instead of a confusing "already
+                    // ended".
                     if reason == .noMatchingPendingIntent,
-                       coordinator.friendReleaseSessionState(sessionID: request.sessionID) == .usedToEnd {
+                       coordinator.friendReleaseSessionState(sessionID: request.sessionID) == .usedToEnd,
+                       coordinator.friendReleaseUseID(forSessionID: request.sessionID) == useID {
                         lastError = nil
                     } else {
                         lastError = Self.applyNoOpMessage(reason)
@@ -873,20 +935,42 @@ final class CompanionCoordinator: ObservableObject {
     /// runs at a time, and a second caller awaits the one already running
     /// instead of starting its own (R5 Slice B2c review, P1-1). `internal`
     /// (not `private`) so `PhoneLockboxTests` can exercise it directly.
-    func runSingleFlightFriendRelease(_ work: @escaping () async -> Void) async {
+    /// `requestID`, when given, tags the flight this call *starts* (a
+    /// caller that instead *joins* an existing flight does not change its
+    /// tag) — `endLockNow` reads `friendReleaseFlightRequestID` to tell
+    /// "the same request is already in flight" from "a different one is"
+    /// (R2-3).
+    func runSingleFlightFriendRelease(requestID: String? = nil, _ work: @escaping () async -> Void) async {
         if let inFlight = friendReleaseFlight {
+            // R5 Slice B2c review (R2-3/determinism): incremented
+            // synchronously, before any suspension point, so a caller
+            // waiting on this count (tests) sees it the instant a joiner
+            // commits to waiting rather than starting its own flight.
+            friendReleaseFlightJoinCount += 1
             await inFlight.value
             return
         }
+        friendReleaseFlightRequestID = requestID
         let task = Task { await work() }
         friendReleaseFlight = task
+        hasFriendReleaseFlightInFlight = true
         await task.value
         friendReleaseFlight = nil
+        friendReleaseFlightRequestID = nil
+        hasFriendReleaseFlightInFlight = false
     }
 
-    /// Test-only visibility into whether a friend-release flight is
-    /// currently running.
-    var hasFriendReleaseFlightInFlight: Bool { friendReleaseFlight != nil }
+    /// `true` while a friend-release flight (`endLockNow`/the foreground
+    /// replay) is running. `@Published` so the Settings "Discard pending
+    /// friend release" button can disable itself while one is in flight
+    /// (R5 Slice B2c review, R2-2); also used directly by
+    /// `PhoneLockboxTests`.
+    @Published private(set) var hasFriendReleaseFlightInFlight = false
+
+    /// Test-only: incremented each time a caller joins an already-in-flight
+    /// friend-release flight instead of starting its own (R5 Slice B2c
+    /// review, determinism fix for the single-flight test).
+    private(set) var friendReleaseFlightJoinCount = 0
 
     /// Copy for `prepareFriendRelease`'s no-op outcomes — shown immediately
     /// after an owner's tap, before any network call. `internal` (not
@@ -968,6 +1052,7 @@ final class CompanionCoordinator: ObservableObject {
                 // fetch) — display-only, see `approvalsByRequestID`.
                 for approval in response.approvals ?? [] { approvalsByRequestID[approval.requestID] = approval }
                 rejectionCount += applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
+                pruneUseIDsByRequestID(presentRequestIDs: Set(response.requests.map(\.requestID)))
                 anyFetchSucceeded = true
             } catch { encounteredError = error }
         }
