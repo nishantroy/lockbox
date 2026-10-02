@@ -23,7 +23,7 @@ struct PeopleView: View {
                 if !companion.people.isEmpty {
                     PeopleListCard(companion: companion)
                 }
-                InboxCard(companion: companion)
+                InboxCard(coordinator: coordinator, companion: companion)
                 if let notice = companion.inboxDataNotice {
                     LockboxCard {
                         Label(notice, systemImage: "info.circle")
@@ -57,8 +57,14 @@ struct PeopleView: View {
         }
         .lockboxScreen()
 #if canImport(CompanionKit)
-        .task { await companion.refreshInbox() }
-        .refreshable { await companion.refreshInbox() }
+        .task {
+            await companion.refreshInbox()
+            await companion.replayPendingFriendRelease(coordinator: coordinator)
+        }
+        .refreshable {
+            await companion.refreshInbox()
+            await companion.replayPendingFriendRelease(coordinator: coordinator)
+        }
 #endif
     }
 }
@@ -396,7 +402,9 @@ private struct AskToEndEarlyCard: View {
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                     .disabled(selected.isEmpty || isSending)
-                    Text("This shows an approval once someone accepts. It never ends your lock by itself in this build.")
+                    Text(companion.friendApprovalCanEndLocksEnabled
+                         ? "Once someone approves, you can end your lock from this screen with a confirmation. It never ends automatically."
+                         : "This shows an approval once someone accepts. It never ends your lock by itself in this build.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 } else if companion.trustedApprovers.isEmpty {
@@ -414,6 +422,7 @@ private struct AskToEndEarlyCard: View {
 }
 
 private struct InboxCard: View {
+    @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
 
     var body: some View {
@@ -432,7 +441,7 @@ private struct InboxCard: View {
                         .foregroundStyle(LockboxTheme.secondary)
                 } else {
                     ForEach(companion.inboxItems) { item in
-                        InboxRow(companion: companion, item: item)
+                        InboxRow(coordinator: coordinator, companion: companion, item: item)
                         if item.id != companion.inboxItems.last?.id { Divider().overlay(LockboxTheme.border) }
                     }
                 }
@@ -442,6 +451,7 @@ private struct InboxCard: View {
 }
 
 private struct InboxRow: View {
+    @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
     let item: CompanionInboxItem
     @State private var isBusy = false
@@ -466,6 +476,12 @@ private struct InboxRow: View {
                 }
                 .disabled(isBusy)
             }
+            // R5 Slice B2c, gate on: an owner's own approved request can end
+            // the lock from here. With the gate off this never appears, and
+            // the row looks exactly as it did in B1.
+            if item.isMine, companion.friendApprovalCanEndLocksEnabled, item.status == .approved {
+                FriendReleaseActionView(coordinator: coordinator, companion: companion, item: item)
+            }
         }
         .accessibilityElement(children: .contain)
     }
@@ -488,6 +504,86 @@ private struct InboxRow: View {
         case .approved: return LockboxTheme.focus
         case .pending: return LockboxTheme.accent
         case .declined, .cancelled, .expired: return LockboxTheme.secondary
+        }
+    }
+}
+
+/// R5 Slice B2c. The gate-on action/status for an owner's own approved
+/// request: "End lock now" with a confirmation, "Finishing…" while the
+/// durable intent is pending, or a final "Used to end lock"/"Lock already
+/// ended" once resolved. Every state reads `ScreenTimeCoordinator` fresh —
+/// never cached — so this always reflects the authoritative document.
+private struct FriendReleaseActionView: View {
+    @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
+    let item: CompanionInboxItem
+    @State private var isBusy = false
+    @State private var showingConfirmation = false
+
+    private var state: ScreenTimeCoordinator.FriendReleaseSessionState {
+        coordinator.friendReleaseSessionState(sessionID: item.request.sessionID)
+    }
+
+    private var approverName: String {
+        guard let approval = companion.approvalsByRequestID[item.request.requestID] else { return "This person" }
+        return companion.personName(forIdentityID: approval.approver.identityID) ?? "This person"
+    }
+
+    private var lockEndText: String {
+        guard let end = coordinator.sessionEnd(forSessionID: item.request.sessionID) else { return "its scheduled end" }
+        return end.formatted(date: .omitted, time: .shortened)
+    }
+
+    var body: some View {
+        switch state {
+        case .eligible:
+            Button {
+                showingConfirmation = true
+            } label: {
+                Label("End lock now", systemImage: "lock.open")
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+            .disabled(isBusy || companion.approvalsByRequestID[item.request.requestID] == nil)
+            .accessibilityHint("Ends your current lock now, using \(approverName)'s approval, after a confirmation")
+            .confirmationDialog(
+                "End your lock now?",
+                isPresented: $showingConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("End lock now", role: .destructive) { run() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("\(approverName) approved ending this lock, which would otherwise run until \(lockEndText).")
+            }
+        case .finishing:
+            Label("Finishing…", systemImage: "hourglass")
+                .font(.footnote)
+                .foregroundStyle(LockboxTheme.secondary)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Finishing: ending this lock using the approval")
+        case .usedToEnd:
+            Label("Used to end lock", systemImage: "checkmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(LockboxTheme.focus)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .combine)
+        case .alreadyEnded:
+            Label("Lock already ended", systemImage: "checkmark.circle")
+                .font(.footnote)
+                .foregroundStyle(LockboxTheme.secondary)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .combine)
+        }
+    }
+
+    private func run() {
+        isBusy = true
+        Task {
+            await companion.endLockNow(item, coordinator: coordinator)
+            isBusy = false
         }
     }
 }

@@ -220,6 +220,16 @@ private struct DeveloperToolsSection: View {
                 LockboxSectionLabel("Developer", systemImage: "wrench.and.screwdriver")
 
                 VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Friend approval can end locks (prototype)", isOn: $companion.friendApprovalCanEndLocksEnabled)
+                        .tint(LockboxTheme.accent)
+                    Text("Off by default. When on, the People tab lets you end your own lock from a trusted person's approval, with a confirmation. When off, the People tab behaves exactly as before: approvals are shown, but never end the lock.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                }
+
+                Divider().overlay(LockboxTheme.border)
+
+                VStack(alignment: .leading, spacing: 8) {
                     Text("Companion relay address")
                         .font(.subheadline.weight(.semibold))
                     TextField(CompanionCoordinator.defaultRelayBaseURLString, text: $relayURLDraft)

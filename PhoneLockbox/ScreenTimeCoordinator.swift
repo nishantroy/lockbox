@@ -1,5 +1,4 @@
 import Combine
-import CryptoKit
 import DeviceActivity
 import FamilyControls
 import ManagedSettings
@@ -188,15 +187,185 @@ final class ScreenTimeCoordinator: ObservableObject {
         return (session.id.uuidString, Self.companionActiveSetID(for: sessions), session.start, session.end)
     }
 
-    /// Derived from session **identity only** — `SHA256("PhoneLockbox.active-set.v1" || sorted session IDs)`
-    /// — never from `RuntimeSession.policy.selectionData` (the restricted
-    /// app/category selection). A companion request must not be able to
-    /// fingerprint which apps are blocked, even indirectly through a hash.
+    /// Derived from session **identity only** — never from
+    /// `RuntimeSession.policy.selectionData` (the restricted app/category
+    /// selection). A companion request must not be able to fingerprint which
+    /// apps are blocked, even indirectly through a hash.
+    ///
+    /// R5 Slice B2c: delegates to the pure `RuntimeActiveSet.id(for:)` in
+    /// `Shared/RuntimeFriendRelease.swift`, which must stay byte-identical to
+    /// (and now is the single source of truth for) this algorithm.
     static func companionActiveSetID(for sessions: [RuntimeSession]) -> String {
-        let sortedIDs = sessions.map { $0.id.uuidString }.sorted()
-        let input = (["PhoneLockbox.active-set.v1"] + sortedIDs).joined(separator: "|")
-        let digest = SHA256.hash(data: Data(input.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        RuntimeActiveSet.id(for: sessions.map(\.id))
+    }
+
+    // MARK: R5 Slice B2c — friend-release wiring
+    //
+    // CompanionKit stays app-only: every value crossing this boundary is a
+    // plain String/UUID/Date (RuntimeFriendReleaseIntent, RuntimeFriendRelease
+    // outcomes), never a CompanionKit type. `CompanionCoordinator` builds and
+    // verifies the signed `Approval`/`use` round trip; this coordinator only
+    // ever records/applies/abandons the durable intent under the shared
+    // transaction lock, using its own injected clock.
+
+    /// The per-session state the People tab needs under the developer gate.
+    /// Computed fresh from the document on every call, never cached. This is
+    /// a coarse, UI-facing read: the authoritative recheck happens inside
+    /// `RuntimeLifecycle.prepareFriendRelease`/`applyFriendRelease` at the
+    /// moment of an actual attempt.
+    enum FriendReleaseSessionState: Equatable {
+        /// The session is still active/recoveryPending and not already
+        /// targeted by a pending intent — "End lock now" may be offered.
+        case eligible
+        /// A friend-release intent for this exact session is durably pending
+        /// (prepared but not yet applied, or interrupted mid-flight).
+        case finishing
+        /// A released marker exists for this session with cause
+        /// `.friendApproval` — the approval was actually used to end it.
+        case usedToEnd
+        /// The session ended some other way (natural end, recovery,
+        /// developer unlock), or the session ID is unknown entirely.
+        case alreadyEnded
+    }
+
+    /// The durable friend-release intent awaiting a verified `use`, if any.
+    /// Read-only; `nil` when nothing is pending. Used by `CompanionCoordinator`
+    /// to drive the foreground replay (retry `use` with the same `useID`, then
+    /// continue to apply) without ever starting a new release automatically.
+    var pendingFriendReleaseIntent: RuntimeFriendReleaseIntent? { document.pendingFriendRelease }
+
+    func friendReleaseSessionState(sessionID: String) -> FriendReleaseSessionState {
+        guard let uuid = UUID(uuidString: sessionID) else { return .alreadyEnded }
+        if let pending = document.pendingFriendRelease, pending.sessionID == uuid {
+            return .finishing
+        }
+        if let released = document.releasedOccurrences.first(where: { $0.sessionID == uuid }) {
+            return released.cause == .friendApproval ? .usedToEnd : .alreadyEnded
+        }
+        if let session = document.sessions.first(where: { $0.id == uuid }), session.isEffective(at: currentDate()) {
+            return .eligible
+        }
+        return .alreadyEnded
+    }
+
+    /// The frozen absolute end of an exact session, for People tab
+    /// confirmation/status copy, regardless of how many sessions are
+    /// concurrently enforcing (unlike `companionActiveSessionIdentity`, which
+    /// is only populated for exactly one active session). `nil` when the
+    /// session is unknown to this document.
+    func sessionEnd(forSessionID sessionID: String) -> Date? {
+        guard let uuid = UUID(uuidString: sessionID) else { return nil }
+        return document.sessions.first(where: { $0.id == uuid })?.end
+    }
+
+    /// Persists a durable intent to release exactly one session once the
+    /// caller's relay `use` call is verified. Runs under the shared
+    /// transaction lock using this coordinator's injected clock, mirroring
+    /// every other lifecycle mutation here. Every failure path inside
+    /// `RuntimeLifecycle.prepareFriendRelease` is a calm `.noOp`, never a
+    /// throw; this method itself only throws for a local storage failure
+    /// (no App Group, lock busy), which is a different, non-relay failure
+    /// the caller must handle separately from a `.noOp` outcome.
+    func prepareFriendRelease(
+        sessionID: UUID,
+        activeSetID: String,
+        requestID: String,
+        approvalID: String,
+        useID: String,
+        approverIdentityID: String
+    ) throws -> RuntimeFriendRelease.PrepareOutcome {
+        let store = try requireStore()
+        var outcome: RuntimeFriendRelease.PrepareOutcome = .noOp(.alreadyEnded)
+        try store.withTransaction { context in
+            let now = currentDate()
+            let intent = RuntimeFriendReleaseIntent(
+                sessionID: sessionID,
+                activeSetID: activeSetID,
+                requestID: requestID,
+                approvalID: approvalID,
+                useID: useID,
+                approverIdentityID: approverIdentityID,
+                createdAt: now
+            )
+            outcome = RuntimeLifecycle.prepareFriendRelease(&context.document, intent: intent, at: now, calendar: Calendar.current)
+            try context.commit()
+        }
+        refreshDocument()
+        return outcome
+    }
+
+    /// Applies a previously prepared friend release once its `use` has been
+    /// verified. Mirrors `confirmRecovery`'s ordering exactly: set the policy
+    /// intent and record `.policyClearAttempted`, commit, `applyEffectivePolicy`,
+    /// clear the intent and record `.policyCleared`, commit — then stop only
+    /// the released session's own manual route generation and, exactly as
+    /// `confirmRecovery` does, activate and re-register a pending
+    /// configuration if the store is now idle. Every `.noOp` outcome is
+    /// terminal: the durable intent is already cleared inside
+    /// `RuntimeLifecycle.applyFriendRelease`, so this is never retried.
+    func applyFriendRelease(useID: String) throws -> RuntimeFriendRelease.ApplyOutcome {
+        let store = try requireStore()
+        var outcome: RuntimeFriendRelease.ApplyOutcome = .noOp(.noMatchingPendingIntent)
+        var manualRouteToStop: RuntimeManualRouteBinding?
+        var shouldRegisterPending = false
+        try store.withTransaction { context in
+            let now = currentDate()
+            let result = RuntimeLifecycle.applyFriendRelease(&context.document, useID: useID, at: now, calendar: Calendar.current)
+            outcome = result
+            switch result {
+            case .noOp:
+                try context.commit()
+            case .released(let sessionID, _, let effect):
+                manualRouteToStop = effect.manualRouteToStop
+                if RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: now) {
+                    shouldRegisterPending = context.document.recurringEnabledIntent
+                }
+                // `effect.policyIntent` is already the correct post-release
+                // decision (Shared/RuntimeFriendRelease.swift); it is used
+                // directly rather than re-derived here.
+                context.document.policyIntent = effect.policyIntent
+                context.document.record(RuntimeDiagnostic(operation: .policyClearAttempted, observedAt: now, detail: "Friend-release persisted for session \(sessionID.uuidString), use \(useID), before reconciling this app's named policy."))
+                try context.commit()
+                try applyEffectivePolicy(context.document, at: now)
+                context.document.policyIntent = nil
+                context.document.record(RuntimeDiagnostic(operation: .policyCleared, observedAt: Date(), detail: "Friend-release applied for use \(useID); future occurrences remain configured."), succeeded: true)
+                try context.commit()
+            }
+        }
+        if let manualRouteToStop {
+            try stopManualRouteIfOwned(store: store, expected: manualRouteToStop)
+        }
+        refreshDocument()
+        if case .released = outcome {
+            clearLastErrorAfterSuccessfulOperation()
+            scheduleLiveActivityReconciliation()
+            if shouldRegisterPending { registerConfiguredSchedule() }
+        }
+        return outcome
+    }
+
+    /// Clears a pending friend-release intent after a **definitive** relay
+    /// rejection (replay, expired, wrong target, unauthorized, …) only. An
+    /// `integrityFatal` classification must never call this — that case
+    /// keeps the intent pending and neither retries nor abandons it. A
+    /// `useID` that does not match the pending intent is a safe no-op.
+    @discardableResult
+    func abandonFriendRelease(useID: String) throws -> Bool {
+        let store = try requireStore()
+        var abandoned = false
+        try store.withTransaction { context in
+            abandoned = RuntimeLifecycle.abandonFriendRelease(&context.document, useID: useID)
+            try context.commit()
+        }
+        refreshDocument()
+        return abandoned
+    }
+
+    private func requireStore() throws -> SharedRuntimeStore {
+        guard let store else {
+            throw RuntimeValidationError.invalidConfiguration(storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription)
+        }
+        return store
     }
 
     var nextScheduledStart: Date? {

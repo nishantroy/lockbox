@@ -146,6 +146,10 @@ var ownerConsent: RelationshipConsent?
 var helperConsent: RelationshipConsent?
 var publishedSession: ActiveSession?
 var request: TrustedRequest?
+var approval: Approval?
+var ownerCachedConsent: RelationshipConsent?
+var useID: String?
+var firstVerification: ApprovalVerification?
 
 // MARK: - 1. Health
 
@@ -266,6 +270,82 @@ await step("owner's inbox shows the request as approved") {
     }
     guard seen.effectiveStatus(at: Date()) == .approved else {
         throw SmokeError.unexpected("request status is \(seen.effectiveStatus(at: Date())), not approved")
+    }
+}
+
+// MARK: - 8b. Owner's anchored inbox includes the approval (R5 Slice B2a/B2c)
+
+await step("owner's anchored inbox includes the approval") {
+    guard let request, let pairing else { throw SmokeError.unexpected("no request or pairing") }
+    let response = try await ownerClient.fetchInboxResponse()
+    guard let found = response.approvals?.first(where: { $0.requestID == request.requestID }) else {
+        throw SmokeError.unexpected("owner inbox did not report an approval for this request")
+    }
+    guard found.decision == .approved else {
+        throw SmokeError.unexpected("inbox-delivered approval decision is \(found.decision), not approved")
+    }
+    approval = found
+    // The owner's own freshest cached consent, exactly as the app reads it
+    // (never a possibly stale locally-held copy) — required so
+    // `OwnerApprovalCheck`'s generation check lines up with the generation
+    // actually bound into the approval.
+    guard let consent = response.consents?.first(where: { $0.pairingID == pairing.pairingID }) else {
+        throw SmokeError.unexpected("owner inbox did not report consent for this pairing")
+    }
+    ownerCachedConsent = consent
+}
+
+// MARK: - 8c. OwnerApprovalCheck passes against the owner's own trusted-person cache
+
+await step("OwnerApprovalCheck verifies the inbox-delivered approval") {
+    guard let approval, let request, let pairing, let ownerCachedConsent else {
+        throw SmokeError.unexpected("missing approval, request, pairing, or owner's cached consent")
+    }
+    let trustedApprover = OwnerApprovalCheck.TrustedApprover(pairing: pairing, consent: ownerCachedConsent)
+    try OwnerApprovalCheck.verify(approval: approval, request: request, trustedApprover: trustedApprover,
+                                  ownerIdentity: ownerSigner.identity)
+}
+
+// MARK: - 8d. useApproval succeeds and its verification matches
+
+await step("owner's useApproval succeeds and its verification matches") {
+    guard let approval, let request else { throw SmokeError.unexpected("missing approval or request") }
+    let generatedUseID = UUID().uuidString
+    useID = generatedUseID
+    let verification = try await ownerClient.useApproval(approval, request: request, useID: generatedUseID)
+    guard verification.approval == approval, verification.useID == generatedUseID else {
+        throw SmokeError.unexpected("use verification does not match the submitted approval/useID")
+    }
+    firstVerification = verification
+}
+
+// MARK: - 8e. An identical use retry returns the same verification (idempotent replay)
+
+await step("an identical use retry returns the same verification") {
+    guard let approval, let request, let useID, let firstVerification else {
+        throw SmokeError.unexpected("missing approval, request, useID, or first verification")
+    }
+    let replay = try await ownerClient.useApproval(approval, request: request, useID: useID)
+    guard replay == firstVerification else {
+        throw SmokeError.unexpected("replayed use verification differs from the first one")
+    }
+}
+
+// MARK: - 8f. A different useID is rejected, and classify returns .definitive
+
+await step("a different useID on a consumed approval is rejected as .definitive") {
+    guard let approval, let request else { throw SmokeError.unexpected("missing approval or request") }
+    var caught: Error?
+    do {
+        _ = try await ownerClient.useApproval(approval, request: request, useID: UUID().uuidString)
+    } catch {
+        caught = error
+    }
+    guard let caught else {
+        throw SmokeError.unexpected("expected a rejection, but the call succeeded")
+    }
+    guard AsyncCompanionClient.UseFailureDisposition.classify(caught) == .definitive else {
+        throw SmokeError.unexpected("expected .definitive, classify(_:) returned something else for: \(caught)")
     }
 }
 

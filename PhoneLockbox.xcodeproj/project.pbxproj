@@ -66,6 +66,7 @@
 		E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */; };
 		E4EE663BF81E00D83BB7D66D /* DeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */; };
+		EE9DA6E228EF2D19028C2BDB /* FriendReleaseWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */; };
 		F0396C945F9466D0DFCC935B /* QuickActionPendingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */; };
 		F234C577D935B71999353749 /* MonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7F44B15683DBC4D4CC9AE5C /* MonitorExtension.swift */; };
 		F282EB9F3E9120ED651BA39C /* CompanionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8018D6A26EC0E688140EDC /* CompanionCoordinator.swift */; };
@@ -145,6 +146,7 @@
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
 		30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistant.swift; sourceTree = "<group>"; };
 		35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryGate.swift; sourceTree = "<group>"; };
+		4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendReleaseWiringTests.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4937C609973AA395FE5785C2 /* LockboxPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicy.swift; sourceTree = "<group>"; };
 		4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeStore.swift; sourceTree = "<group>"; };
@@ -317,6 +319,7 @@
 		5A805F511DE7EFE8BF45461A /* PhoneLockboxTests */ = {
 			isa = PBXGroup;
 			children = (
+				4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */,
 				EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */,
 				007587A21F60E1CD46B8904F /* QuickActionRouteTests.swift */,
 			);
@@ -691,6 +694,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				EE9DA6E228EF2D19028C2BDB /* FriendReleaseWiringTests.swift in Sources */,
 				E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */,
 				3633D5BF5B4871E3827366BB /* QuickActionRouteTests.swift in Sources */,
 			);
