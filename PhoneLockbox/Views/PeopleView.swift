@@ -57,6 +57,7 @@ struct PeopleView: View {
         }
         .lockboxScreen()
 #if canImport(CompanionKit)
+        .scrollDismissesKeyboard(.interactively)
         .task {
             await companion.refreshInbox()
             await companion.replayPendingFriendRelease(coordinator: coordinator)
@@ -156,9 +157,13 @@ private struct InviteSomeoneCard: View {
                         TextField("Six-digit code they read aloud", text: $typedCode)
                             .textFieldStyle(.roundedBorder)
                             #if os(iOS)
-                            .keyboardType(.numberPad)
+                            // Not `.numberPad`: it has no return key, and the
+                            // keyboard would cover the Confirm button.
+                            .keyboardType(.numbersAndPunctuation)
                             #endif
                             .textContentType(.oneTimeCode)
+                            .submitLabel(.go)
+                            .onSubmit { confirm(acceptance) }
                             .focused($codeFieldFocused)
                             .onChange(of: typedCode) { _, newValue in
                                 // Number pads have no return key, and pasted
@@ -173,16 +178,6 @@ private struct InviteSomeoneCard: View {
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                         .disabled(typedCode.count != 6 || isConfirming)
                         .accessibilityHint("Confirms this person as a trusted approver only if the typed code matches")
-                    }
-                    .toolbar {
-                        ToolbarItemGroup(placement: .keyboard) {
-                            if codeFieldFocused {
-                                Button("Done") { codeFieldFocused = false }
-                                Spacer()
-                                Button("Confirm") { confirm(acceptance) }
-                                    .disabled(typedCode.count != 6 || isConfirming)
-                            }
-                        }
                     }
                 }
             }
