@@ -59,7 +59,12 @@ The owner chose this over a matching-word check and over fully automatic pairing
    - Remove the "share acceptance code back" step and the typed-code UI.
    - Keep parsing legacy acceptance links only if trivial; otherwise remove them.
 6. **Remove** the six-digit code field and its keyboard handling.
-7. **UI test** (`PhoneLockboxUITests`, simulator, local relay):
+7. **UX fixes from the parent's simulator screenshot check (2026-10-02):**
+   - **Incoming invite.** Opening an invite link must put the invite in front of the friend: a sheet or a top-of-page card saying "You've been invited to be a trusted person", with **Accept** and **Not now**. Don't leave it prefilled in a field below the fold.
+   - **Invite link display.** Show the created invite as one truncated line (for example "Invite link ready"), not the raw base64 blob. Keep the full link in the accessibility value under identifier `inviteSomeone.inviteLinkText`, so the UI test can still read it.
+   - **Copy.** Remove the outdated text "that approval isn't connected to your lock yet in this build", and every six-digit-code instruction. Replace them with short, accurate copy for one-tap confirm.
+   - **Layout.** Make sure the bottom tab bar doesn't cover actionable content: add bottom padding or a safe-area inset to the People scroll content.
+8. **UI test** (`PhoneLockboxUITests`, simulator, local relay):
    1. The app (owner) creates an invite and copies the link.
    2. A scripted friend accepts over HTTP.
    3. The app pulls to refresh, sees the pending card, enters a name and taps **Confirm**. The person shows as paired. Attach screenshots.
