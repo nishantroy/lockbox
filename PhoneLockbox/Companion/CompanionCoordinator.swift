@@ -152,7 +152,6 @@ final class CompanionCoordinator: ObservableObject {
     /// instead of a generic error.
     @Published private(set) var needsRepair = false
     @Published var pendingInvitation: Invitation?
-    @Published var pendingAcceptance: PairingAcceptance?
     /// R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2b", UX fix
     /// item 7): set by `ContentView.onOpenURL` via
     /// `handleIncomingCompanionLink` when it recognizes a decodable,
@@ -382,6 +381,25 @@ final class CompanionCoordinator: ObservableObject {
         if pendingInvitation?.payload.inviteID == inviteID { pendingInvitation = nil }
     }
 
+    /// Owner-review follow-up (P2-7): caps `storedInvites` so creating many
+    /// invites over a long device lifetime cannot grow it unboundedly.
+    /// Drops the oldest (by `issuedAt`) once the count exceeds the cap — a
+    /// dropped invite simply can no longer be confirmed on this device
+    /// (same practical effect as "Not them" or natural expiry); this is a
+    /// defensive bound, not expected to matter in ordinary prototype use.
+    /// Mutates `storedInvites` only — callers are responsible for
+    /// `saveStoredInvites()`.
+    private static let maxStoredInvites = 20
+
+    private func trimStoredInvitesIfNeeded() {
+        guard storedInvites.count > Self.maxStoredInvites else { return }
+        let overflow = storedInvites.count - Self.maxStoredInvites
+        let oldestFirst = storedInvites.values.sorted { $0.payload.issuedAt < $1.payload.issuedAt }
+        for invitation in oldestFirst.prefix(overflow) {
+            storedInvites.removeValue(forKey: invitation.payload.inviteID)
+        }
+    }
+
     private func loadUseIDsByRequestID() {
         guard let sharedDefaults, let data = sharedDefaults.data(forKey: Self.useIDsByRequestIDDefaultsKey),
               let decoded = try? JSONDecoder().decode([String: String].self, from: data) else { return }
@@ -447,6 +465,21 @@ final class CompanionCoordinator: ObservableObject {
     private func fail(_ error: Error) {
         needsRepair = Self.isKeyUnavailable(error)
         lastError = Self.describe(error)
+        #if DEBUG
+        // Opus review of 70c7d27 (docs follow-up): `.unavailable` and
+        // `.timedOut` share one user-facing banner ("Couldn't reach the
+        // relay…"), so a transient flake's exact transport-level cause is
+        // otherwise unrecoverable after the fact. This never reaches a
+        // release build.
+        switch error {
+        case CompanionTransportError.unavailable:
+            print("[CompanionCoordinator] transport error: .unavailable")
+        case CompanionTransportError.timedOut:
+            print("[CompanionCoordinator] transport error: .timedOut")
+        default:
+            break
+        }
+        #endif
     }
 
     private static func isKeyUnavailable(_ error: Error) -> Bool {
@@ -585,6 +618,7 @@ final class CompanionCoordinator: ObservableObject {
             // verified against this exact invite (R5 pairing v2 P2b, item
             // 1) — never trusted from the relay/acceptance alone.
             storedInvites[invitation.payload.inviteID] = invitation
+            trimStoredInvitesIfNeeded()
             saveStoredInvites()
             lastError = nil; needsRepair = false
         } catch { fail(error) }
@@ -595,18 +629,55 @@ final class CompanionCoordinator: ObservableObject {
         try? Invitation.fromShareLink(link.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    #if DEBUG
+    /// Test-only seam (owner-review follow-up, P2-9): reads `storedInvites`
+    /// directly, without a network round trip through `createInvite()`.
+    /// Never used by production code paths — only `PhoneLockboxTests`.
+    var storedInvitesForTesting: [String: Invitation] { storedInvites }
+
+    /// Test-only seam: mirrors `createInvite()`'s storage side effects
+    /// (insert, trim to `maxStoredInvites`, persist) without any network
+    /// call, so `PhoneLockboxTests` can exercise persistence/pruning/
+    /// capping directly.
+    func insertStoredInviteForTesting(_ invitation: Invitation) {
+        storedInvites[invitation.payload.inviteID] = invitation
+        trimStoredInvitesIfNeeded()
+        saveStoredInvites()
+    }
+
+    /// Test-only seam: ensures (creating if necessary) this device's owner
+    /// identity, exactly as `createInvite()`/`confirmPendingAcceptance()`
+    /// do internally — purely local Keychain + App Group work, no network.
+    @discardableResult
+    func ensureOwnerIdentityForTesting() throws -> DeviceIdentity {
+        try ensureIdentity(role: .owner)
+    }
+
+    /// Test-only seam: seeds `people` directly with an already-confirmed
+    /// pairing, without any network call — used by `PhoneLockboxTests` to
+    /// set up a pairing-ID conflict scenario for
+    /// `upsertConfirmedPairing`/P2-10.
+    func testOnlySeedConfirmedPairing(_ pairing: Pairing, nickname: String) {
+        people.append(CompanionPerson(nickname: nickname, localRole: .iAmOwner, pairing: pairing, consent: nil))
+        savePeople()
+    }
+    #endif
+
     func acceptInvite(_ invitation: Invitation) async {
         guard isAvailable else { return }
         do {
             let identity = try ensureIdentity(role: .trustedApprover)
             let client = makeClient(signer: try signer(for: identity))
             let acceptanceID = UUID().uuidString
-            let acceptance = try await client.accept(invitation, acceptanceID: acceptanceID, now: Date())
-            pendingAcceptance = acceptance
+            _ = try await client.accept(invitation, acceptanceID: acceptanceID, now: Date())
             // Persisted so a later inbox-reported pairing can be checked
             // against this exact accept attempt — see `CompanionTrustMerge`
             // and `CompanionPendingAcceptance`. The record is consumed
-            // (removed) once its pairing is learned from the inbox.
+            // (removed) once its pairing is learned from the inbox, and is
+            // also what `hasPendingApproverAcceptance` reads below — unlike
+            // a transient in-memory flag, this survives a relaunch and
+            // clears itself exactly when the pairing is actually learned
+            // (owner-review follow-up, P2-5).
             let record = try CompanionPendingAcceptance(ownerIdentity: invitation.payload.owner, acceptanceID: acceptanceID,
                                                         approverIdentity: identity, createdAt: Date())
             pendingAcceptances.append(record)
@@ -614,6 +685,17 @@ final class CompanionCoordinator: ObservableObject {
             lastError = nil; needsRepair = false
         } catch { fail(error) }
     }
+
+    /// Owner-review follow-up (P2-5): whether this device, acting as
+    /// approver, has at least one outstanding "I accepted an invite,
+    /// waiting for the owner to confirm" record. Backed by the persisted
+    /// `pendingAcceptances` list — survives a relaunch, and clears itself
+    /// once the matching pairing is actually learned from the inbox
+    /// (`applyInboxSnapshot`'s `.add` case consumes the record) or the
+    /// record goes stale (`pruneExpiredPendingAcceptances`, run at launch
+    /// and on every `refreshInbox()`). `AcceptInviteCard` uses this instead
+    /// of a transient in-memory flag that reset on every relaunch.
+    var hasPendingApproverAcceptance: Bool { !pendingAcceptances.isEmpty }
 
     /// R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2b", items 2–3):
     /// pure, local binding of relay-delivered acceptances to this device's
@@ -635,6 +717,27 @@ final class CompanionCoordinator: ObservableObject {
         }
     }
 
+    /// P1-1 (Opus review of 70c7d27): the exact assignment-time guard
+    /// `refreshInbox()` applies to a previously computed
+    /// `pendingOwnerAcceptances` candidate list, right before ever
+    /// publishing it — re-verifies every entry against the instance's
+    /// *current* `storedInvites` (pure, no I/O), so a concurrent "Not
+    /// them"/confirm that discarded one of those invites during an earlier
+    /// `await` in that same refresh cycle can never be undone by this
+    /// assignment resurrecting a card already resolved. `internal` (not
+    /// `private`) so `PhoneLockboxTests` can exercise this exact guard
+    /// directly, without a network round trip.
+    func reverifyPendingOwnerAcceptancesAtAssignmentTime(_ computed: [VerifiedPendingAcceptance],
+                                                         ownerIdentity: DeviceIdentity, now: Date) -> [VerifiedPendingAcceptance] {
+        Self.verifyPendingAcceptances(computed.map(\.signedAcceptance), storedInvites: storedInvites,
+                                      ownerIdentity: ownerIdentity, now: now)
+    }
+
+    /// Test-only override for `confirmPendingAcceptance`'s `client.confirm`
+    /// call (owner-review follow-up, P2-9) — mirrors `useApprovalOverride`
+    /// (R5 Slice B2c). Defaults to the real network round trip.
+    var confirmPendingAcceptanceOverride: (@MainActor (_ acceptance: PairingAcceptance, _ verificationCode: String) async throws -> Pairing)?
+
     /// The owner taps **Confirm** on a verified pending-acceptance card,
     /// after optionally naming the person and choosing whether to grant
     /// early-end trust immediately. No code is read or typed — the code
@@ -643,6 +746,15 @@ final class CompanionCoordinator: ObservableObject {
     /// (consumed) and the card removed immediately, without waiting for the
     /// next refresh.
     ///
+    /// P1-1 (Opus review of 70c7d27): re-verifies `item` against the
+    /// *current* `storedInvites` and `ownerIdentity` before ever contacting
+    /// the relay — never trusts the `item` the view was handed, which could
+    /// be stale if "Not them" discarded its invite elsewhere (or during an
+    /// earlier `await` in this very refresh cycle) between when the card
+    /// was shown and this tap. If it no longer verifies, the card is
+    /// dropped and nothing is confirmed — never merely a presence check,
+    /// the same full `OwnerAcceptanceCheck` the inbox refresh itself runs.
+    ///
     /// `grantEarlyEndTrust`, when true (the pending-acceptance card's
     /// default), immediately performs the same owner-side consent grant the
     /// person row's "Can approve early end"/"Receives my requests" toggles
@@ -650,24 +762,48 @@ final class CompanionCoordinator: ObservableObject {
     /// This never makes the friend fully trusted by itself: `authorizes`
     /// requires the scope on **both** sides, and the friend still has to
     /// separately accept on their own device (consent stays bilateral; see
-    /// `docs/r5-pairing-v2-plan.md`'s P2b follow-up). A failed grant never
-    /// un-confirms the pairing — it only surfaces `lastError`, and the
-    /// per-scope toggles on the person row remain the fallback path.
+    /// `docs/r5-pairing-v2-plan.md`'s P2b follow-up — and the owner-decision
+    /// note there that this on-by-default pattern is R5-scopes-only and must
+    /// not be reused for R6 status sharing). A failed grant never un-confirms
+    /// the pairing — it only surfaces `lastError`, and the per-scope toggles
+    /// on the person row remain the fallback path. P2-10: a pairing-ID
+    /// conflict (`upsertConfirmedPairing` returning `false`) skips the grant
+    /// entirely and leaves `lastError` exactly as that conflict set it —
+    /// granting trust for whatever *other* person happens to share the
+    /// pairing ID, or silently clearing the conflict warning, would both be
+    /// wrong.
     func confirmPendingAcceptance(_ item: VerifiedPendingAcceptance, nickname: String, grantEarlyEndTrust: Bool) async {
         guard isAvailable else { return }
+        guard let ownerIdentity,
+              let invite = storedInvites[item.acceptance.inviteID],
+              (try? OwnerAcceptanceCheck.verify(signedAcceptance: item.signedAcceptance, invite: invite,
+                                                ownerIdentity: ownerIdentity, now: Date())) != nil else {
+            pendingOwnerAcceptances.removeAll { $0.id == item.id }
+            return
+        }
         do {
-            let identity = try ensureIdentity(role: .owner)
-            let client = makeClient(signer: try signer(for: identity))
-            let pairing = try await client.confirm(item.acceptance, verificationCode: item.expectedVerificationCode, now: Date())
-            upsertConfirmedPairing(pairing, nickname: nickname.isEmpty ? nil : nickname)
+            let pairing: Pairing
+            if let confirmPendingAcceptanceOverride {
+                pairing = try await confirmPendingAcceptanceOverride(item.acceptance, item.expectedVerificationCode)
+            } else {
+                let identity = try ensureIdentity(role: .owner)
+                let client = makeClient(signer: try signer(for: identity))
+                pairing = try await client.confirm(item.acceptance, verificationCode: item.expectedVerificationCode, now: Date())
+            }
+            let upserted = upsertConfirmedPairing(pairing, nickname: nickname.isEmpty ? nil : nickname)
             discardStoredInvite(inviteID: item.acceptance.inviteID)
             pendingOwnerAcceptances.removeAll { $0.id == item.id }
+            guard upserted else { return }
             lastError = nil; needsRepair = false
             if grantEarlyEndTrust {
                 await grantOwnerTrustAfterConfirm(pairingID: pairing.pairingID)
             }
         } catch { fail(error) }
     }
+
+    /// Test-only override for `grantOwnerTrustAfterConfirm`'s
+    /// `client.grantScopes` call (owner-review follow-up, P2-9).
+    var grantOwnerTrustAfterConfirmOverride: (@MainActor (_ pairing: Pairing, _ scopes: [CompanionScope]) async throws -> RelationshipConsent)?
 
     /// Follow-up to `confirmPendingAcceptance`: grants both owner scopes
     /// (`approveEarlyEnd`, `receiveRequests`) for the just-confirmed pairing
@@ -682,11 +818,16 @@ final class CompanionCoordinator: ObservableObject {
     private func grantOwnerTrustAfterConfirm(pairingID: String) async {
         guard let person = people.first(where: { $0.pairing.pairingID == pairingID }) else { return }
         do {
-            let identity = try ensureIdentity(role: .owner)
-            let client = makeClient(signer: try signer(for: identity))
             var scopes = Set(person.consent?.ownerScopes ?? [])
             scopes.formUnion([.approveEarlyEnd, .receiveRequests])
-            let consent = try await client.grantScopes(pairing: person.pairing, scopes: Array(scopes))
+            let consent: RelationshipConsent
+            if let grantOwnerTrustAfterConfirmOverride {
+                consent = try await grantOwnerTrustAfterConfirmOverride(person.pairing, Array(scopes))
+            } else {
+                let identity = try ensureIdentity(role: .owner)
+                let client = makeClient(signer: try signer(for: identity))
+                consent = try await client.grantScopes(pairing: person.pairing, scopes: Array(scopes))
+            }
             applyOwnConsentUpdate(consent, forPairingID: pairingID)
             lastError = nil; needsRepair = false
         } catch {
@@ -710,12 +851,17 @@ final class CompanionCoordinator: ObservableObject {
     /// the acceptance by `validateConfirmResponse` inside `confirm` itself),
     /// never the inbox. Still never replaces an existing entry whose owner
     /// or approver differs, as a last line of defense against a pairing-ID
-    /// collision or a caller bug.
-    private func upsertConfirmedPairing(_ pairing: Pairing, nickname: String?) {
+    /// collision or a caller bug. Returns `false` on that conflict (P2-10)
+    /// so the caller can skip anything that assumes the upsert actually
+    /// happened — `confirmPendingAcceptance`'s early-end grant in
+    /// particular, which must never land on whatever *other* person happens
+    /// to share the conflicting pairing ID.
+    @discardableResult
+    private func upsertConfirmedPairing(_ pairing: Pairing, nickname: String?) -> Bool {
         if let index = people.firstIndex(where: { $0.pairing.pairingID == pairing.pairingID }) {
             guard people[index].pairing.owner == pairing.owner, people[index].pairing.approver == pairing.approver else {
                 lastError = "The relay returned a pairing that conflicts with one already stored; ignoring it."
-                return
+                return false
             }
             people[index].pairing = pairing
             if let nickname { people[index].nickname = nickname }
@@ -724,6 +870,7 @@ final class CompanionCoordinator: ObservableObject {
                                           pairing: pairing, consent: nil))
         }
         savePeople()
+        return true
     }
 
     // MARK: - Consent (two independent scopes, per person)
@@ -1305,8 +1452,12 @@ final class CompanionCoordinator: ObservableObject {
         // `nil` until a successful owner-anchored fetch computes it; applied
         // to `pendingOwnerAcceptances` below only then, so a failed fetch
         // leaves the previous (already-verified) cards exactly as they were
-        // rather than clearing them.
+        // rather than clearing them. `newPendingOwnerAcceptancesOwnerIdentity`
+        // captures the exact owner identity used to compute it, so the P1-1
+        // re-verification below never depends on `self.ownerIdentity`
+        // possibly having changed in the meantime.
         var newPendingOwnerAcceptances: [VerifiedPendingAcceptance]?
+        var newPendingOwnerAcceptancesOwnerIdentity: DeviceIdentity?
 
         if let ownerIdentity {
             do {
@@ -1327,6 +1478,7 @@ final class CompanionCoordinator: ObservableObject {
                     response.pendingAcceptances ?? [], storedInvites: storedInvites,
                     ownerIdentity: ownerIdentity, now: Date()
                 )
+                newPendingOwnerAcceptancesOwnerIdentity = ownerIdentity
                 anyFetchSucceeded = true
             } catch { encounteredError = error }
         }
@@ -1341,7 +1493,22 @@ final class CompanionCoordinator: ObservableObject {
             } catch { encounteredError = error }
         }
 
-        if let newPendingOwnerAcceptances { pendingOwnerAcceptances = newPendingOwnerAcceptances }
+        // P1-1 (Opus review of 70c7d27): `newPendingOwnerAcceptances` above
+        // was computed against a snapshot of `storedInvites` taken before
+        // the approver-fetch `await` just above — if a concurrent "Not
+        // them"/confirm (a separate `Task`, e.g. a user's tap) discarded one
+        // of those invites during that await, assigning the stale list
+        // wholesale would resurrect (or keep showing) a card that was
+        // already resolved. `reverifyPendingOwnerAcceptancesAtAssignmentTime`
+        // closes that window by re-verifying in full against the *current*
+        // `storedInvites` — pure and local, no I/O — right before this
+        // assignment, rather than merely filtering by invite-ID presence,
+        // which would miss a concurrent expiry too.
+        if let newPendingOwnerAcceptances, let capturedOwnerIdentity = newPendingOwnerAcceptancesOwnerIdentity {
+            pendingOwnerAcceptances = reverifyPendingOwnerAcceptancesAtAssignmentTime(
+                newPendingOwnerAcceptances, ownerIdentity: capturedOwnerIdentity, now: Date()
+            )
+        }
         inboxItems = items.sorted { $0.request.createdAt > $1.request.createdAt }
         inboxDataNotice = rejectionCount > 0
             ? "The relay returned unexpected pairing or consent data; \(rejectionCount) item(s) were ignored."

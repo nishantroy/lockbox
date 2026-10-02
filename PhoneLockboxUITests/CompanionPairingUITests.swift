@@ -248,10 +248,15 @@ final class CompanionPairingUITests: XCTestCase {
         // A pull-to-refresh afterward must not resurrect the card: the
         // underlying invite was discarded, so the same acceptance can never
         // verify again on this device.
-        pullToRefresh()
-        let stillGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["pendingAcceptance.confirmButton"])
-        XCTAssertEqual(XCTWaiter().wait(for: [stillGone], timeout: 10), .completed,
-                       "a dismissed pending acceptance must never reappear after another refresh")
+        //
+        // P2-8 (owner review): a single pull-to-refresh plus a fixed
+        // timeout would pass even if that one gesture never actually
+        // completed a round trip — proving nothing. Strengthened two ways:
+        // wait for a concrete "a refresh is actually in flight" signal to
+        // clear (so at least this one pull is known to have finished), then
+        // repeat the pull/assert cycle a few more times for good measure.
+        waitForRefreshToSettle()
+        assertElementStaysGoneAcrossRepeatedRefreshes(app.buttons["pendingAcceptance.confirmButton"])
     }
 
     /// A second, independently scripted owner identity creates its own
@@ -421,6 +426,39 @@ final class CompanionPairingUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
         start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+    }
+
+    /// Owner-review follow-up (P2-8): pulls to refresh once, then waits for
+    /// a concrete "a refresh is actually in flight" signal
+    /// (`inboxCard.refreshingIndicator`, `CompanionCoordinator.isRefreshing`)
+    /// to clear — a stronger proof that the pull genuinely completed a
+    /// round trip than a fixed delay after the gesture alone. The
+    /// *appearance* half is best-effort only: a very fast local relay can
+    /// finish before this ever observes the indicator showing at all; the
+    /// *disappearance* wait below still gives a slower round trip real time
+    /// to finish before this returns. `app.descendants(matching: .any)`
+    /// rather than a typed query (`.activityIndicators`/`.progressIndicators`)
+    /// since SwiftUI's small-style `ProgressView` doesn't reliably surface
+    /// as one specific XCUIElementType across OS versions.
+    private func waitForRefreshToSettle() {
+        pullToRefresh()
+        let indicator = app.descendants(matching: .any)["inboxCard.refreshingIndicator"]
+        _ = indicator.waitForExistence(timeout: 2)
+        let indicatorGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: indicator)
+        _ = XCTWaiter().wait(for: [indicatorGone], timeout: 15)
+    }
+
+    /// Owner-review follow-up (P2-8): repeats pull-to-refresh several
+    /// times, asserting `element` stays absent after each — not merely
+    /// after one, possibly-incomplete pull, which could pass trivially
+    /// without ever actually re-fetching the inbox.
+    private func assertElementStaysGoneAcrossRepeatedRefreshes(_ element: XCUIElement, attempts: Int = 3) {
+        for attempt in 1...attempts {
+            pullToRefresh()
+            let stillGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
+            XCTAssertEqual(XCTWaiter().wait(for: [stillGone], timeout: 10), .completed,
+                           "a dismissed pending acceptance must never reappear after a refresh (attempt \(attempt))")
+        }
     }
 
     /// Pulls to refresh repeatedly until `element` appears or `timeout`

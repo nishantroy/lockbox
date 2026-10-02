@@ -163,7 +163,15 @@ private struct IncomingInviteCard: View {
                         Task {
                             await companion.acceptInvite(invitation)
                             isAccepting = false
-                            companion.incomingInvite = nil
+                            // P2-4 (owner review): only dismiss the prompt
+                            // on success. On failure, `companion.lastError`
+                            // is already set by `acceptInvite` and shown by
+                            // the error card below — keep the invite itself
+                            // on screen so the owner can simply retry rather
+                            // than having to reopen the link.
+                            if companion.lastError == nil {
+                                companion.incomingInvite = nil
+                            }
                         }
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
@@ -239,7 +247,7 @@ private struct InviteSomeoneCard: View {
                     .accessibilityHint("Copies the invite link to the clipboard")
                     .accessibilityIdentifier("inviteSomeone.copyLinkButton")
                     #endif
-                    Text("Once they accept, you'll see a card below to confirm them — no code to type or read aloud.")
+                    Text("Once they accept, a card at the top of this page lets you confirm them — no code to type or read aloud.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
@@ -263,7 +271,11 @@ private struct PendingAcceptanceCard: View {
     /// pairing confirms — the same grant the person row's own toggles
     /// perform, just without an extra trip back to this screen. The friend
     /// still has to accept those scopes themselves (consent stays
-    /// bilateral); this never grants anything on their behalf.
+    /// bilateral); this never grants anything on their behalf. This
+    /// default-on pattern is specific to these two R5 scopes and must not
+    /// be reused as-is for a future R6 capability such as status sharing,
+    /// which the pairing v2 plan requires an explicit, informed
+    /// confirmation for (see `docs/r5-pairing-v2-plan.md`).
     @State private var grantEarlyEndTrust = true
     @State private var isBusy = false
 
@@ -277,9 +289,10 @@ private struct PendingAcceptanceCard: View {
                 TextField("Name for this person", text: $nickname)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("pendingAcceptance.nameField")
-                Toggle("Let them approve ending my locks early", isOn: $grantEarlyEndTrust)
+                Toggle("Let them get and approve my early-end requests", isOn: $grantEarlyEndTrust)
                     .tint(LockboxTheme.accent)
                     .accessibilityIdentifier("pendingAcceptance.grantEarlyEndToggle")
+                    .accessibilityHint("Grants both receiving your early-end requests and approving them")
                 HStack(spacing: 10) {
                     Button(isBusy ? "Confirming…" : "Confirm") {
                         isBusy = true
@@ -338,12 +351,19 @@ private struct AcceptInviteCard: View {
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 .disabled(companion.decodeInvitation(from: pastedInvite) == nil)
 
-                if companion.pendingAcceptance != nil {
+                if companion.hasPendingApproverAcceptance {
                     // R5 pairing v2 (Slice P2b, item 5): the friend never
                     // types or shares anything back — the owner's device
                     // confirms from the relay-delivered acceptance alone.
                     // The owner's name isn't known to this device, hence
                     // "the person who invited you" rather than a name.
+                    //
+                    // P2-5 (owner review): backed by the persisted
+                    // `pendingAcceptances` list via
+                    // `hasPendingApproverAcceptance`, not the transient,
+                    // relaunch-resetting `pendingAcceptance` this replaced —
+                    // so this label survives a relaunch and clears itself
+                    // exactly when the pairing is actually learned.
                     //
                     // Deliberately a plain `Text`, not a `Label` — a plain
                     // `Text` registers as a `staticText` accessibility
@@ -579,7 +599,13 @@ private struct InboxCard: View {
                     LockboxSectionLabel("Inbox", systemImage: "tray")
                     Spacer()
                     if companion.isRefreshing {
+                        // Owner-review follow-up (P2-8): gives
+                        // `PhoneLockboxUITests` a concrete "a refresh is
+                        // actually in flight right now" marker to wait on,
+                        // rather than only inferring completion from a
+                        // fixed timeout after the pull gesture.
                         ProgressView().controlSize(.small)
+                            .accessibilityIdentifier("inboxCard.refreshingIndicator")
                     }
                 }
                 if companion.inboxItems.isEmpty {
