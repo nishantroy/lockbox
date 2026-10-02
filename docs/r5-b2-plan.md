@@ -1,6 +1,6 @@
 # R5 Slice B2 — friend approval releases the exact session
 
-Status: **B2a and B2b merged on `r5-relay` (2026-10-02); B2c not started.** See [integration results](#integration-results-b2a--b2b-2026-10-02).
+Status: **B2a, B2b and B2c merged on `r5-relay` (2026-10-02); build 17 installed on the owner's iPhone. Friend release is developer-gated (off by default) and not device-tested.** See [B2c integration](#integration-results-b2c-2026-10-02).
 
 ## Goal
 
@@ -229,3 +229,61 @@ No app, extension or CompanionKit code. Shared stays free of CompanionKit types,
 - `xcodegen generate`: the only diff adds `Shared/RuntimeFriendRelease.swift` to the app and monitor targets. The iOS simulator build succeeded.
 - Production relay redeployed with B2a. `tools/relay-smoke` against `https://relay.example.com` passed all 17 steps.
 - The smoke tool does not yet exercise approval delivery or `use`. That is added with B2c.
+
+## Integration results: B2c (2026-10-02)
+
+**Delegation actually used:**
+- Builder: a Claude **Sonnet** subagent in an isolated worktree. The worktree started at a stale base and was fast-forwarded to `6c941ff`.
+- Reviewer: an independent Claude **Opus** subagent at high effort. No Luna/Terra models were used.
+
+**Review history:**
+- **First review:** approve with fixes; no P0.
+  - P1 findings:
+    - single-flight across tap, pull-to-refresh and foreground replay;
+    - `confirmRecovery`-style recovery on `applyFriendRelease` errors;
+    - orchestration tests.
+  - Twelve P2s were also fixed.
+- **Re-review:** approve.
+- **Final P2 round (R2-1 to R2-5)**, checked by the parent from the diff and tests only, without another review:
+  - R2-1: the success shortcut requires the exact `useID` marker.
+  - R2-2: Discard is disabled while a release is in flight.
+  - R2-3: a conflicting-request message.
+  - R2-4: a bounded `requestID -> useID` UI map.
+  - R2-5: replay selects the pinned `approvalID`.
+  - The single-flight test was made deterministic (5/5 iterations passed).
+
+**What shipped:**
+- **Developer toggle:** "Friend approval can end locks (prototype)", off by default, persisted in the App Group.
+- **With the toggle on:**
+  - An owner's approved request shows **End lock now**, behind a confirmation naming the friend and the lock's end time.
+  - The flow is: freshly fetched owner-anchored inbox → `selectFriendRelease`/`OwnerApprovalCheck` → `prepareFriendRelease` (durable intent) → `useApproval` → `applyFriendRelease`, in `confirmRecovery` ordering.
+- **Failure handling:**
+  - `retryable` keeps the intent ("Pull to refresh to finish").
+  - `definitive` abandons it, with specific calm copy.
+  - `integrityFatal` keeps it and shows an integrity message.
+  - Every apply no-op is terminal.
+- **Replay:** foreground and People-tab replay only finish an existing intent. "Finishing…" is shown regardless of the toggle.
+- **Developer escape hatch:** "Discard pending friend release" clears the intent only and never releases.
+
+**Parent validation on the merged branch:**
+- Root `swift test`: 177 passed.
+- CompanionKit: 140 passed.
+- CompanionRelayService: 18 passed.
+- Relay typecheck passed, and `npm test` passed 139.
+- `xcodegen generate` produced no diff.
+- `PhoneLockboxTests`: 74 passed, 1 pre-existing skip.
+- `tools/relay-smoke` against production passed all 25 steps, including:
+  - approval delivery;
+  - `OwnerApprovalCheck`;
+  - `use`;
+  - an idempotent retry;
+  - a different `useID` rejected as definitive;
+  - `use` after the session is superseded rejected.
+- The relay code is unchanged by B2c, so no redeploy was needed.
+
+**Build 17:** built for generic iOS and installed on the owner's iPhone. The launch failed because the phone was locked; that is not a build or signing problem. **No device or two-phone QA has been done.**
+
+**Known gaps:**
+- **Two-phone device QA:** pair, approve, tap End lock now, and confirm the shield lifts for that exact lock only.
+- **Deferred P2-9 (CompanionKit):** `classify` maps wrapped `.malformed` integrity failures from the transport (owner identity mismatch, missing state root) to `definitive` instead of `integrityFatal`. This fails closed: the intent is abandoned and the lock stays on.
+- `replace_pairing` learning, the owner-signed `PairingConfirmation`, and APNs remain deferred.
