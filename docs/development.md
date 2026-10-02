@@ -15,7 +15,7 @@
 - `Shared/SafetyAssistant.swift` and `PhoneLockbox/Views/SafetyAssistantView.swift`: local privacy-minimal safety review.
 - `CoreTests`, `RuntimeTests` and `PhoneLockboxTests`: pure core/runtime and iOS integration tests.
 
-Current deployment target: iOS 17, Swift 6. Build 15 is the latest installed QA candidate; its reviewed source integrations have not yet received focused behavioral/device acceptance. Actual oldest-OS runtime/API compatibility has not been validated. Build machine: Xcode 26.6 / iPhoneOS SDK 26.5. No backend, HTTP listener, dependency port or signing secret is needed in the repository.
+Current deployment target: iOS 17, Swift 6. Build 16 (from `r5-relay` at 6338a2a, installed 2026-10-02) is the latest installed QA candidate; it adds the Midnight app icon and the B1 People tab (relay prototype, local relay URL only) since build 15. Its reviewed source integrations have not yet received focused behavioral/device acceptance. Actual oldest-OS runtime/API compatibility has not been validated. Build machine: Xcode 26.6 / iPhoneOS SDK 26.5. No backend, HTTP listener, dependency port or signing secret is needed in the repository.
 
 Development signing uses the paid team already specified in `project.yml`. App Group: `group.com.phone-lockbox`. App bundle: `com.phone-lockbox.app`; three extension identifiers are specified in YAML. Do not change identifiers casually—this can invalidate the device test baseline and storage/provisioning assumptions.
 
@@ -57,7 +57,7 @@ xcrun devicectl device process launch --device '<CoreDevice-ID>' com.phone-lockb
 
 Check each exit status. Installation can succeed while launch fails because the phone is locked; report those separately. A transient wireless timeout is not a compiler/signing defect. No new deployment is needed for documentation-only changes. Never reinstall mid scheduled-release experiment.
 
-Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the revision alongside it. Build 15 installed and launched successfully on 2026-09-17; do not convert that delivery result into feature or reliability acceptance.
+Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the revision alongside it. Build 16 installed and launched successfully on 2026-10-02 (generic-iOS build, then devicectl install); do not convert that delivery result into feature or reliability acceptance.
 
 ## Review and continuation
 
