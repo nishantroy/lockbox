@@ -35,6 +35,41 @@ Use separate derived data from SwiftPM's `.build/`; do not repeatedly delete cac
 
 Review new/untracked sources as well as `git diff`. Most app implementation remains untracked at this handoff; no reset/clean or blind staging of build artifacts.
 
+## Companion pairing UI test (`PhoneLockboxUITests`)
+
+`PhoneLockboxUITests` (XCUITest, in the `PhoneLockbox` scheme's test action alongside `PhoneLockboxTests`) drives the owner side of companion pairing in the simulator against a **local** relay, with a scripted in-process "friend" (a fresh, in-memory `CompanionKit` identity — see `tools/relay-smoke` for the pattern it mirrors). It needs a running local relay:
+
+```bash
+lsof -nP -iTCP:8002 -sTCP:LISTEN          # confirm the port is free first
+cd relay
+npm install                               # first run only
+cp .env.example .env                      # first run only
+npm run db:migrate                        # Postgres on 56330; `npm run db:start` first if it isn't running
+npm run dev                                # leave running in this shell/process
+```
+
+Then, from the repo root, with a booted simulator (discover its ID with `xcrun simctl list devices available`; do not reuse a guessed ID):
+
+```bash
+xcodegen generate
+xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox \
+  -destination 'platform=iOS Simulator,id=<simulator-id>' \
+  -configuration Debug -derivedDataPath DerivedData \
+  -only-testing:PhoneLockboxUITests \
+  -resultBundlePath <path>.xcresult \
+  test
+```
+
+The app under test is launched with a `-relayBaseURL http://127.0.0.1:8002` argument (a standard Xcode launch-argument pair, read once at launch by `CompanionCoordinator`'s DEBUG-only `relayBaseURLLaunchArgumentOverride()`), so the test needs no interaction with the Developer settings screen to point the app at the local relay. Stop the relay dev server (`Ctrl-C`, or kill the background process) once the run finishes — it is local-only infrastructure, not something to leave running.
+
+The tests attach `XCTAttachment` screenshots (`lifetime: .keepAlways`) at key steps. Export them from the result bundle:
+
+```bash
+xcrun xcresulttool export attachments --path <path>.xcresult --output-path <output-dir>
+```
+
+This writes each attachment plus a `manifest.json` describing them into `<output-dir>`.
+
 ## Physical-device deployment (wireless supported after pairing)
 
 ```bash

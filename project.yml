@@ -45,6 +45,10 @@ targets:
             CFBundleURLName: com.phone-lockbox.app.quick-actions
             CFBundleURLSchemes:
               - phonelockbox
+          - CFBundleTypeRole: Viewer
+            CFBundleURLName: com.phone-lockbox.app.companion
+            CFBundleURLSchemes:
+              - phone-lockbox-companion
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     dependencies:
@@ -84,6 +88,19 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.tests
         GENERATE_INFOPLIST_FILE: YES
+  PhoneLockboxUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: PhoneLockboxUITests
+    dependencies:
+      - target: PhoneLockbox
+      - package: CompanionKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: PhoneLockbox
   DeviceActivityMonitor:
     type: app-extension
     platform: iOS
@@ -127,6 +144,8 @@ schemes:
       targets:
         PhoneLockbox: all
         PhoneLockboxTests: [test]
+        PhoneLockboxUITests: [test]
     test:
       targets:
         - PhoneLockboxTests
+        - PhoneLockboxUITests

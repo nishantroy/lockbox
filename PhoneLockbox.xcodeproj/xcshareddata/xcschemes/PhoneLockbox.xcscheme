@@ -35,6 +35,20 @@
                ReferencedContainer = "container:PhoneLockbox.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "819A252A1AE7368129DFDE3D"
+               BuildableName = "PhoneLockboxUITests.xctest"
+               BlueprintName = "PhoneLockboxUITests"
+               ReferencedContainer = "container:PhoneLockbox.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -61,6 +75,17 @@
                BlueprintIdentifier = "FF2BEF98104BE5573573C6A7"
                BuildableName = "PhoneLockboxTests.xctest"
                BlueprintName = "PhoneLockboxTests"
+               ReferencedContainer = "container:PhoneLockbox.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "819A252A1AE7368129DFDE3D"
+               BuildableName = "PhoneLockboxUITests.xctest"
+               BlueprintName = "PhoneLockboxUITests"
                ReferencedContainer = "container:PhoneLockbox.xcodeproj">
             </BuildableReference>
          </TestableReference>

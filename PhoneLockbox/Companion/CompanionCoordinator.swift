@@ -87,6 +87,9 @@ final class CompanionCoordinator: ObservableObject {
     /// equal to it is treated as "never customised" and follows the default.
     static let legacyLocalRelayBaseURLString = "http://127.0.0.1:8002"
     private static let acceptanceLinkPrefix = "PLBX-ACCEPT:"
+    /// Scheme for `Invitation.shareLink`/`.fromShareLink(_:)` (registered in
+    /// `project.yml`'s `CFBundleURLTypes` alongside `phonelockbox`).
+    static let companionLinkScheme = "phone-lockbox-companion"
     /// R5 Slice B2c developer gate. Defaults to **off**; see
     /// `docs/r5-b2-plan.md` ("Developer gate"). Persisted in the App Group
     /// suite (falls back to `false` when storage is unavailable, same as
@@ -114,6 +117,14 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var needsRepair = false
     @Published var pendingInvitation: Invitation?
     @Published var pendingAcceptance: PairingAcceptance?
+    /// Prototype-only deep-link prefill for the People tab's "Paste invite
+    /// link" field, set by `ContentView.onOpenURL` when it recognizes a
+    /// `phone-lockbox-companion://invite/...` link (whether that's this
+    /// device's own just-created invite, shared back to itself, or one a
+    /// friend shared with this device). `AcceptInviteCard` copies the value
+    /// into its own `@State` and clears it; opening the link never itself
+    /// accepts anything — accepting still requires an explicit tap.
+    @Published var prefillInviteLink: String?
     /// R5 Slice B2a: the relay-stored `Approval` for each request this
     /// device's owner identity has fetched in its own anchored inbox,
     /// keyed by `requestID`. Populated alongside `inboxItems` on every
@@ -186,6 +197,17 @@ final class CompanionCoordinator: ObservableObject {
             self.friendApprovalCanEndLocksEnabled = false
             self.lastError = Self.appGroupUnavailableMessage
         }
+        #if DEBUG
+        // UI-test-only override: `-relayBaseURL <url>` is a standard Xcode
+        // launch-argument pair, read once at launch so a scripted UI test
+        // can point this coordinator at a local relay without touching the
+        // Developer settings UI. Never compiled into a release build, and
+        // never consulted outside DEBUG even if a release binary somehow
+        // launched with this argument.
+        if let override = Self.relayBaseURLLaunchArgumentOverride() {
+            self.relayBaseURLString = override
+        }
+        #endif
         if resolvedDefaults != nil {
             loadIdentities()
             loadPeople()
@@ -366,7 +388,34 @@ final class CompanionCoordinator: ObservableObject {
         }
     }
 
+    #if DEBUG
+    /// Reads a `-relayBaseURL <url>` launch-argument pair, if present and a
+    /// valid URL. DEBUG-only — see the call site in `init`.
+    private static func relayBaseURLLaunchArgumentOverride() -> String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-relayBaseURL"), index + 1 < arguments.count else { return nil }
+        let value = arguments[index + 1]
+        return URL(string: value) != nil ? value : nil
+    }
+    #endif
+
     // MARK: - Invite / accept / confirm
+
+    /// Routes an incoming `phone-lockbox-companion://invite/...` link
+    /// (`Invitation.shareLink`'s format) to the People tab's "Paste invite
+    /// link" prefill. Called from `ContentView.onOpenURL`. Returns `true`
+    /// when the URL was a recognized companion invite link, so the caller
+    /// knows to switch to the People tab; returns `false` for anything else
+    /// (including a malformed/expired invite — `AcceptInviteCard` reports
+    /// that the same way it would for a hand-pasted invalid link, via
+    /// `decodeInvitation` returning `nil`). This never accepts anything by
+    /// itself; it only fills a text field.
+    @discardableResult
+    func handleIncomingCompanionLink(_ url: URL) -> Bool {
+        guard url.scheme == Self.companionLinkScheme, url.host == "invite" else { return false }
+        prefillInviteLink = url.absoluteString
+        return true
+    }
 
     func createInvite() async {
         guard isAvailable else { return }
