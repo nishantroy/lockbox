@@ -29,6 +29,38 @@ export interface LedgerInvitation {
   consumedAt: number | null;
 }
 
+/**
+ * R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2a"): the stored
+ * pending-acceptance record retains the approver's signature alongside the
+ * acceptance payload, so the owner's inbox can deliver a verifiable
+ * `SignedAcceptance` instead of a bare, unsigned `PairingAcceptance`.
+ * `signature` is optional only to decode a pre-existing ledger row written
+ * before this change (the reducer's old "accept" case stored the bare
+ * acceptance with no signature at all) -- see `normalizePendingAcceptance`.
+ * Every row this reducer writes going forward always carries one.
+ */
+export interface LedgerPendingAcceptance {
+  acceptance: PairingAcceptance;
+  signature?: Buffer;
+}
+
+/**
+ * Reads one `ledger.pendingAcceptances[...]` entry regardless of which shape
+ * produced it: the current `{ acceptance, signature }` wrapper, or a legacy
+ * row written before this change, which is the bare `PairingAcceptance`
+ * object itself (no `acceptance`/`signature` wrapper, no retained
+ * signature). A legacy row normalizes to `signature: undefined`; callers that
+ * need the signature (the inbox) must treat that as "cannot be delivered"
+ * rather than crash or fabricate one -- see `fetchInboxOperation`.
+ */
+export function normalizePendingAcceptance(raw: unknown): LedgerPendingAcceptance {
+  const r = raw as { acceptance?: unknown; signature?: unknown } | null | undefined;
+  if (r && typeof r === "object" && r.acceptance && typeof r.acceptance === "object") {
+    return { acceptance: r.acceptance as PairingAcceptance, signature: Buffer.isBuffer(r.signature) ? r.signature : undefined };
+  }
+  return { acceptance: raw as PairingAcceptance, signature: undefined };
+}
+
 export interface LedgerPairing {
   pairing: Pairing;
   revokedAt: number | null;
@@ -75,7 +107,7 @@ export interface Marker {
 export interface Ledger {
   owner: DeviceIdentity;
   invitations: Record<string, LedgerInvitation>;
-  pendingAcceptances: Record<string, PairingAcceptance>;
+  pendingAcceptances: Record<string, LedgerPendingAcceptance>;
   pairings: Record<string, LedgerPairing>;
   pairingEpochs: Record<string, number>;
   sessions: Record<string, LedgerSession>;

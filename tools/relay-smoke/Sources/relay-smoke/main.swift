@@ -9,6 +9,13 @@ import CompanionKit
 // the pairing, consent, publish an exact session, request an early end,
 // approve, and revoke.
 //
+// R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a"): confirm no
+// longer uses an out-of-band/typed verification code. The owner learns of
+// the helper's acceptance only through its own anchored inbox fetch
+// (`pendingAcceptances`), verifies it locally with `OwnerAcceptanceCheck`,
+// and confirms with the code that check derives -- exactly the path the app
+// takes, with no code ever read or typed by a human.
+//
 // Nothing here is persisted: identities live only in `InMemoryDeviceKeyStore`,
 // and the owner's rollback anchor lives only in `InMemoryRollbackAnchorStore`.
 // No Keychain and no App Group are touched.
@@ -140,7 +147,8 @@ let helperClient = makeHelperClient()
 // MARK: - Flow state
 
 var invitation: Invitation?
-var acceptance: PairingAcceptance?
+var pendingAcceptance: SignedAcceptance?
+var derivedVerificationCode: String?
 var pairing: Pairing?
 var ownerConsent: RelationshipConsent?
 var helperConsent: RelationshipConsent?
@@ -166,23 +174,53 @@ await step("owner creates an invite") {
 
 await step("helper accepts the invite") {
     guard let invitation else { throw SmokeError.unexpected("no invitation to accept") }
-    acceptance = try await helperClient.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
+    // The returned acceptance is discarded here on purpose: the owner never
+    // sees it out of band. The owner only ever learns of it through its own
+    // inbox fetch below (R5 pairing v2, docs/r5-pairing-v2-plan.md's "Slice
+    // P2a"), exactly as the real app does.
+    _ = try await helperClient.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
 }
 
-// MARK: - 3. Confirm: wrong code rejected, then correct code
+// MARK: - 3. Owner's inbox delivers the pending acceptance; OwnerAcceptanceCheck
+// verifies it and derives the code locally, with no out-of-band/typed code.
+
+await step("owner's inbox delivers the pending acceptance") {
+    guard let invitation else { throw SmokeError.unexpected("no invitation") }
+    let response = try await ownerClient.fetchInboxResponse()
+    guard let entry = response.pendingAcceptances?.first(where: { $0.acceptance.inviteID == invitation.payload.inviteID }) else {
+        throw SmokeError.unexpected("owner inbox did not deliver the pending acceptance")
+    }
+    pendingAcceptance = entry
+}
+
+await step("OwnerAcceptanceCheck verifies the inbox-delivered acceptance and derives the code") {
+    guard let invitation, let pendingAcceptance else { throw SmokeError.unexpected("missing invitation or pending acceptance") }
+    derivedVerificationCode = try OwnerAcceptanceCheck.verify(signedAcceptance: pendingAcceptance, invite: invitation,
+                                                              ownerIdentity: ownerSigner.identity, now: Date())
+}
+
+// MARK: - 4. Confirm: wrong code rejected, then the locally derived code
 
 await expectRejection("confirm rejects a wrong verification code") {
-    guard let acceptance else { throw SmokeError.unexpected("no acceptance to confirm") }
-    let wrongCode = acceptance.verificationCode == "000000" ? "111111" : "000000"
-    _ = try await ownerClient.confirm(acceptance, verificationCode: wrongCode, now: Date())
+    guard let pendingAcceptance, let derivedVerificationCode else { throw SmokeError.unexpected("no derived verification code") }
+    let wrongCode = derivedVerificationCode == "000000" ? "111111" : "000000"
+    _ = try await ownerClient.confirm(pendingAcceptance.acceptance, verificationCode: wrongCode, now: Date())
 }
 
-await step("confirm accepts the correct verification code") {
-    guard let acceptance else { throw SmokeError.unexpected("no acceptance to confirm") }
-    pairing = try await ownerClient.confirm(acceptance, verificationCode: acceptance.verificationCode, now: Date())
+await step("confirm accepts the inbox-delivered acceptance using the locally derived code") {
+    guard let pendingAcceptance, let derivedVerificationCode else { throw SmokeError.unexpected("no derived verification code") }
+    pairing = try await ownerClient.confirm(pendingAcceptance.acceptance, verificationCode: derivedVerificationCode, now: Date())
 }
 
-// MARK: - 4. Helper learns the pairing from its inbox
+await step("the confirmed pending acceptance no longer appears in the owner's inbox") {
+    guard let invitation else { throw SmokeError.unexpected("no invitation") }
+    let response = try await ownerClient.fetchInboxResponse()
+    guard (response.pendingAcceptances ?? []).contains(where: { $0.acceptance.inviteID == invitation.payload.inviteID }) == false else {
+        throw SmokeError.unexpected("owner inbox still delivered the confirmed acceptance")
+    }
+}
+
+// MARK: - 5. Helper learns the pairing from its inbox
 
 await step("helper learns the pairing from its inbox") {
     guard let pairing else { throw SmokeError.unexpected("no confirmed pairing") }
@@ -195,7 +233,7 @@ await step("helper learns the pairing from its inbox") {
     }
 }
 
-// MARK: - 5. Consent both sides; owner's anchored inbox shows both
+// MARK: - 6. Consent both sides; owner's anchored inbox shows both
 
 await step("owner grants approveEarlyEnd and receiveRequests") {
     guard let pairing else { throw SmokeError.unexpected("no pairing") }
@@ -218,7 +256,7 @@ await step("owner's anchored inbox shows bilateral consent") {
     }
 }
 
-// MARK: - 6. Publish an exact session and request an early end
+// MARK: - 7. Publish an exact session and request an early end
 
 await step("owner publishes an exact session") {
     guard let pairing else { throw SmokeError.unexpected("no pairing") }
@@ -240,7 +278,7 @@ await step("owner requests an early end") {
                                                    target: helperSigner.identity.identityID, validFor: 600)
 }
 
-// MARK: - 7. Helper sees and approves the request; a duplicate is rejected
+// MARK: - 8. Helper sees and approves the request; a duplicate is rejected
 
 await step("helper sees the pending request in its inbox") {
     guard let request else { throw SmokeError.unexpected("no request") }
@@ -260,7 +298,7 @@ await expectRejection("a duplicate approval is rejected") {
     _ = try await helperClient.submitApproval(request: request, pairing: pairing, decision: .approved)
 }
 
-// MARK: - 8. Owner's inbox shows the request approved
+// MARK: - 9. Owner's inbox shows the request approved
 
 await step("owner's inbox shows the request as approved") {
     guard let request else { throw SmokeError.unexpected("no request") }
@@ -273,7 +311,7 @@ await step("owner's inbox shows the request as approved") {
     }
 }
 
-// MARK: - 8b. Owner's anchored inbox includes the approval (R5 Slice B2a/B2c)
+// MARK: - 9b. Owner's anchored inbox includes the approval (R5 Slice B2a/B2c)
 
 await step("owner's anchored inbox includes the approval") {
     guard let request, let pairing else { throw SmokeError.unexpected("no request or pairing") }
@@ -295,7 +333,7 @@ await step("owner's anchored inbox includes the approval") {
     ownerCachedConsent = consent
 }
 
-// MARK: - 8c. OwnerApprovalCheck passes against the owner's own trusted-person cache
+// MARK: - 9c. OwnerApprovalCheck passes against the owner's own trusted-person cache
 
 await step("OwnerApprovalCheck verifies the inbox-delivered approval") {
     guard let approval, let request, let pairing, let ownerCachedConsent else {
@@ -306,7 +344,7 @@ await step("OwnerApprovalCheck verifies the inbox-delivered approval") {
                                   ownerIdentity: ownerSigner.identity)
 }
 
-// MARK: - 8d. useApproval succeeds and its verification matches
+// MARK: - 9d. useApproval succeeds and its verification matches
 
 await step("owner's useApproval succeeds and its verification matches") {
     guard let approval, let request else { throw SmokeError.unexpected("missing approval or request") }
@@ -319,7 +357,7 @@ await step("owner's useApproval succeeds and its verification matches") {
     firstVerification = verification
 }
 
-// MARK: - 8e. An identical use retry returns the same verification (idempotent replay)
+// MARK: - 9e. An identical use retry returns the same verification (idempotent replay)
 
 await step("an identical use retry returns the same verification") {
     guard let approval, let request, let useID, let firstVerification else {
@@ -331,7 +369,7 @@ await step("an identical use retry returns the same verification") {
     }
 }
 
-// MARK: - 8f. A different useID is rejected, and classify returns .definitive
+// MARK: - 9f. A different useID is rejected, and classify returns .definitive
 
 await step("a different useID on a consumed approval is rejected as .definitive") {
     guard let approval, let request else { throw SmokeError.unexpected("missing approval or request") }
@@ -349,7 +387,7 @@ await step("a different useID on a consumed approval is rejected as .definitive"
     }
 }
 
-// MARK: - 8g. `use` is rejected once the session is superseded (R5 Slice B2c review, P2-11)
+// MARK: - 9g. `use` is rejected once the session is superseded (R5 Slice B2c review, P2-11)
 //
 // The relay's "use" reducer requires `ledger.currentSessionID ==
 // current.request.sessionID` (relay/src/reducer.ts); publishing a *new*
@@ -400,7 +438,7 @@ await step("use after the session is superseded is rejected as .definitive") {
     }
 }
 
-// MARK: - 9. Owner revokes; helper sees the pairing revoked
+// MARK: - 10. Owner revokes; helper sees the pairing revoked
 
 await step("owner revokes the pairing") {
     guard let pairing else { throw SmokeError.unexpected("no pairing") }

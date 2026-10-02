@@ -31,6 +31,8 @@ import {
   decodePairingReplacement,
   verifyPairingReplacementSignature,
   decodeSignedAcceptance,
+  verifySignedAcceptanceSignature,
+  encodeSignedAcceptance,
   decodeSignedConfirmation,
   decodeConsentMutation,
   decodeActiveSession,
@@ -241,6 +243,42 @@ describe("InboxResponse wire shape carries approvals (R5 Slice B2a, contract v1.
   it("a pure helper/approver inbox sample omits the approvals key entirely", () => {
     const parsed = JSON.parse(vectors.helperInboxResponseSample);
     expect(Object.prototype.hasOwnProperty.call(parsed, "approvals")).toBe(false);
+  });
+});
+
+describe("InboxResponse wire shape carries pendingAcceptances (R5 pairing v2, contract v1.3)", () => {
+  it("an owner inbox sample's pendingAcceptances array decodes and verifies", () => {
+    const parsed = JSON.parse(vectors.inboxResponseWithPendingAcceptanceSample);
+    expect(Array.isArray(parsed.pendingAcceptances)).toBe(true);
+    expect(parsed.pendingAcceptances).toHaveLength(1);
+    const signed = decodeSignedAcceptance(parsed.pendingAcceptances[0]);
+    expect(verifySignedAcceptanceSignature(signed)).toBe(true);
+    expect(signed.acceptance.acceptanceID).toBe("fixture-acceptance-01");
+  });
+
+  it("encodeInboxResponse reproduces the same pendingAcceptances fields and values as the Swift vector", () => {
+    const parsed = JSON.parse(vectors.inboxResponseWithPendingAcceptanceSample);
+    const signed = decodeSignedAcceptance(parsed.pendingAcceptances[0]);
+    const request = decodeTrustedRequest(parsed.requests[0]);
+    const encoded = encodeInboxResponse({
+      ownerIdentityID: parsed.ownerIdentityID,
+      stateRoot: undefined,
+      revision: parsed.revision,
+      requests: [request],
+      pairings: [],
+      consents: [],
+      pendingAcceptances: [signed]
+    });
+    const reEncoded = (encoded as any).pendingAcceptances[0];
+    const reDecoded = decodeSignedAcceptance(reEncoded);
+    expect(reDecoded).toEqual(signed);
+    // Also confirm the raw encode matches byte-for-byte field-by-field.
+    expect(reEncoded).toEqual(encodeSignedAcceptance(signed));
+  });
+
+  it("a pure helper/approver inbox sample omits the pendingAcceptances key entirely", () => {
+    const parsed = JSON.parse(vectors.helperInboxResponseSample);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "pendingAcceptances")).toBe(false);
   });
 });
 

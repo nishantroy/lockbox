@@ -572,6 +572,15 @@ out["inboxResponseSample"] = try resultJSON(sampleInboxResponse)
 let sampleHelperInboxResponse = try InboxResponse(ownerIdentityID: nil, revision: 7, requests: [trustedRequest])
 out["helperInboxResponseSample"] = try resultJSON(sampleHelperInboxResponse)
 
+// R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a"): an owner inbox
+// sample that also carries `pendingAcceptances` (contract v1.3, additive) --
+// the relay-stored, still-verifiable `SignedAcceptance` for an outstanding
+// "accept", exactly as an owner fetch of their own ledger would include it.
+let sampleInboxResponseWithPendingAcceptance = try InboxResponse(
+    ownerIdentityID: ownerSigner.identity.identityID, revision: 7, requests: [trustedRequest],
+    pendingAcceptances: [signedAcceptance])
+out["inboxResponseWithPendingAcceptanceSample"] = try resultJSON(sampleInboxResponseWithPendingAcceptance)
+
 // MARK: - Tampered full-operation variants (built from the "invite" and "request" ops)
 
 var tamperedOperations: [[String: Any]] = []

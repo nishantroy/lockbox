@@ -1,6 +1,6 @@
 # R5 pairing v2: relay-delivered acceptance and one-tap confirm
 
-Status: **planned 2026-10-02; not started.** It follows the pairing-links slice: the `phone-lockbox-companion` URL scheme, invite-link routing, Copy link and the `PhoneLockboxUITests` target.
+Status: **P2a (relay and protocol) built and Opus-reviewed 2026-10-02 (approved, no P0/P1; P2-1..P2-5 follow-up fixes applied); P2b (app) not started.** It follows the pairing-links slice: the `phone-lockbox-companion` URL scheme, invite-link routing, Copy link and the `PhoneLockboxUITests` target. See [P2a build results](#build-results-p2a-2026-10-02).
 
 ## Owner decision (2026-10-02)
 
@@ -79,3 +79,49 @@ The owner chose this over a matching-word check and over fully automatic pairing
 ## Docs
 
 Update `docs/companion-security.md`, the R5 relay plan contract table and the roadmap to record the removal of the typed code and the accepted risk above.
+
+## Build results: P2a (2026-10-02)
+
+**Delegation actually used:** built directly in a Claude Sonnet worktree (no separate P2a builder/reviewer split was available this session). Independently reviewed by a Claude Opus subagent that wrote none of this code: **approved, no P0/P1.** P2-1 through P2-5 below are that review's P2 (non-blocking) findings, addressed in a follow-up commit by the same Sonnet builder.
+
+**Stored-signature finding.** Before this change, both the TS relay (`relay/src/reducer.ts`'s `"accept"` case) and the Swift reference relay (`InMemoryCompanionRelay.apply`'s `"accept"` case) stored only the bare, unsigned `PairingAcceptance` payload in `pendingAcceptances` — the approver's signature over it was verified once at submission time and then discarded, never retained. An inbox that returned this stored value as-is would hand the owner device something it cannot verify. Fixed by retaining the signature going forward:
+- TS: `Ledger.pendingAcceptances` is now `Record<string, LedgerPendingAcceptance>` (`{ acceptance, signature? }`, `relay/src/ledger.ts`), written as `{ acceptance: signed.acceptance, signature: signed.signature }` by `"accept"`. `normalizePendingAcceptance(raw)` reads either the current wrapped shape or a legacy flat row (pre-existing production ledgers may still hold the old shape) and reports `signature: undefined` for the latter.
+- Swift: `InMemoryCompanionRelay.pendingAcceptances` is now `[String: SignedAcceptance]`; `RelaySnapshot.pendingAcceptances` is `[SignedAcceptance]` (schema bumped 3 → 4 — this snapshot format is a reference/test-only developer-harness artifact per `docs/companion-security.md`, never a field build's persisted data, so the bump carries no production migration risk).
+- The inbox never fabricates a signature: an entry with no retained signature (only reachable from a pre-existing/legacy row) is silently skipped rather than delivered unverifiable. `confirm` itself was unaffected either way — it only ever checked the owner's own confirmation signature, never the stored acceptance's.
+
+**API added:**
+- TS: `InboxResponse.pendingAcceptances?: SignedAcceptance[]` (contract v1.3, additive; owner-fetch only, mirrors `approvals`'s v1.2 presence rule). `encodeSignedAcceptance`, `normalizePendingAcceptance` (`relay/src/ledger.ts`).
+- Swift: `InboxResponse.pendingAcceptances: [SignedAcceptance]?` (`DurableSemantics.swift`); `SignedAcceptance.validateSignature()` (`ProtocolModels.swift`); `OwnerAcceptanceCheck.verify(signedAcceptance:invite:ownerIdentity:now:) throws -> String` (new `OwnerAcceptanceCheck.swift`), returning the expected six-digit code so the caller can call `confirm(acceptance, verificationCode:)`/`AsyncCompanionClient.confirm` without the owner reading or typing anything.
+- `CompanionVectorGen` adds `inboxResponseWithPendingAcceptanceSample`; `relay/test/vectors.test.ts` verifies parity and that a helper sample omits the key entirely.
+
+**Files changed:** `relay/src/ledger.ts`, `relay/src/reducer.ts`, `relay/src/retention.ts`, `relay/src/service.ts`, `relay/src/protocol.ts`, `relay/test/pairing-v2-inbox.test.ts` (new), `relay/test/vectors.test.ts`, `relay/test/fixtures/vectors.json` (regenerated), `CompanionKit/Sources/CompanionKit/ProtocolModels.swift`, `CompanionKit/Sources/CompanionKit/DurableSemantics.swift`, `CompanionKit/Sources/CompanionKit/InMemoryRelay.swift`, `CompanionKit/Sources/CompanionKit/OwnerAcceptanceCheck.swift` (new), `CompanionKit/Tests/CompanionKitTests/OwnerAcceptanceCheckTests.swift` (new), `CompanionKit/Sources/CompanionVectorGen/main.swift`, `tools/relay-smoke/Sources/relay-smoke/main.swift`. `CompanionRelayService/**` was left unchanged: it has no inbox (per the plan's "(where an inbox exists)" scoping), so the same latent stored-signature gap there is out of scope for this slice.
+
+**Validation (exact results):**
+- `swift test --package-path CompanionKit`: 148 passed (was 140; +8 new `OwnerAcceptanceCheckTests`).
+- `swift test --package-path CompanionRelayService`: 18 passed (unchanged; not touched).
+- Root `swift test`: 177 passed (unchanged).
+- `cd relay && npm run typecheck`: passed. `npm test` against Docker Postgres 16 (port 56330, `npm run db:migrate` applied): 149 passed (was 139; +7 new `test/pairing-v2-inbox.test.ts` + 3 new vector assertions).
+- `relay-smoke`: **deviation** — port 8002 was already bound by a different worktree's `npm run dev` (not this one); left that process untouched and instead ran a throwaway instance on `RELAY_PORT=18002` against the same Docker Postgres, then stopped it. All 28 steps passed, including the new inbox-delivered-acceptance/`OwnerAcceptanceCheck`/locally-derived-code flow replacing the old out-of-band confirm.
+
+**Known gaps / deviations:**
+- `relay-smoke` ran against the local relay on an alternate port (18002), not 8002, for the reason above; it was not run against production, per instructions.
+- P2b (app wiring, People UI, typed-code removal) has not started; `PhoneLockbox/**` is unchanged. The roadmap/companion-security.md updates for "removal of the typed code and the accepted risk" are deferred to when P2b lands, since the typed-code UI itself still exists until then.
+
+**Forward-only ledger-shape change (P2-1).** Storing `{acceptance, signature}` instead of the bare `PairingAcceptance` in `ledger.pendingAcceptances` is additive for *reading* (a legacy row still decodes and confirms fine — see "Stored-signature finding" above) but is **not safe to roll back**: if the TS relay is ever reverted to the pre-P2a build while new wrapped rows already exist in production Postgres, the old reducer's `"confirm"` case reads `ledger.pendingAcceptances[acceptanceID]` expecting a bare `PairingAcceptance` and would instead get the `{acceptance, signature}` wrapper, so every field access (`.inviteID`, `.approver`, `.verificationCode`, …) resolves to `undefined` and confirm breaks for any invite accepted under the new code. This does **not** corrupt or desynchronize anything: `computeStateRoot` is a pure function of whatever is actually stored, so a reverted relay's own integrity check (`storedStateRoot` vs. a fresh recompute) still verifies correctly either way — only the application-level field access breaks, not the cryptographic anchor. Operationally this means: **do not roll back the relay deployment once P2a has served live traffic** without also rolling back any client that could still try to confirm against a wrapped row; roll forward instead.
+- **Legacy acceptances cannot be delivered.** Any acceptance already `accept`-ed before this deploy (stored as the old bare, unsigned shape) will never appear in `pendingAcceptances` on the inbox — it has no retained signature, so it is correctly skipped rather than delivered unverifiable (see "Stored-signature finding"). Once P2b removes the typed six-digit-code UI, there is no other way left to confirm such a pre-existing acceptance: **the owner and friend need a fresh invite/accept** for anything that was pending across this deploy. In this prototype's current state (R5 pairing v2 not yet shipped to the field), this is expected to affect at most the owner's own in-progress testing, not real users.
+
+## Follow-up fixes: P2-1 .. P2-5 (2026-10-02)
+
+Non-blocking (P2) findings from the Opus review above, fixed in a separate commit by the same Sonnet builder; no re-review has happened on these specific fixes.
+
+- **P2-1 (docs):** the "forward-only ledger-shape change" and "legacy acceptances cannot be delivered" notes above were added to this file.
+- **P2-2 (Swift tests):** new `CompanionKit/Tests/CompanionKitTests/PendingAcceptanceInboxTests.swift`, mirroring `relay/test/pairing-v2-inbox.test.ts` against `InMemoryCompanionRelay` directly: a helper fetch returns `nil` for `pendingAcceptances`; the list is cleared from the owner's inbox after `confirm`; the list is empty once the invite expires (via `relay.advance(to:)`); and a schema-4 `RelaySnapshot` round trip (`snapshot()` + `checkpoint()` + the anchored `init(snapshot:checkpoint:)` restore) still delivers and verifies the signed pending acceptance.
+- **P2-3 (TS regression test):** `relay/test/pairing-v2-inbox.test.ts` gained a test that writes a legacy flat `pendingAcceptances` row with its state root computed exactly once (via the existing `patchLedger` test helper), then runs an owner inbox fetch and a second, unrelated mutation (an "ack") — neither ever recomputes/rewrites that row — and asserts both resolve cleanly with no `integrity_error`.
+- **P2-4 (`OwnerAcceptanceCheck` issuedAt bounds):** `verify` now additionally requires `acceptance.issuedAt >= invite.payload.issuedAt - 60`, `< invite.payload.expiresAt`, and `<= now + 60` (all three, `CompanionError.expired` on failure) — previously the acceptance's own timestamp was never checked at all, only the invite's expiry against `now`. Three new tests in `OwnerAcceptanceCheckTests.swift` cover: issued too far in the future relative to the device's clock, issued too long before the invite itself, and issued at-or-after the invite's own expiry.
+- **P2-5 (TS/Swift parity):** the TS inbox filter (`relay/src/service.ts`) now also requires `signature.length === 64`, matching the Swift relay's existing `fetchInbox` filter (`signed.signature.count == 64`) — a truncated/corrupt signature is no more deliverable than a missing one.
+
+**Validation after the follow-up (exact results):**
+- `swift test --package-path CompanionKit`: **155 passed** (was 148; +4 `PendingAcceptanceInboxTests` + 3 new `OwnerAcceptanceCheckTests` issuedAt-bound cases).
+- `cd relay && npm run typecheck`: passed. `npm test` against Docker Postgres 16 on 56330: **150 passed** (was 149; +1 new P2-3 regression test).
+- Neither `CompanionRelayService` nor root `swift test` were re-run for this follow-up (nothing in `CompanionRelayService/**` or outside `CompanionKit`/`relay` changed); both were already green in the prior validation above.
+- `relay-smoke` was not re-run for this follow-up (no protocol/wire change, no relay dev server was started — port 8002 was left bound to the other worktree's process throughout).

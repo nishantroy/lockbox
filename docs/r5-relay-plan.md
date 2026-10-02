@@ -132,6 +132,10 @@ Vercel deployment (needs the owner's account; the target is Hobby plus Neon), AP
   - B1 went through three fix rounds and was approved.
   - A went through two fix rounds and was approved with minor fixes. The final P2 round was applied, then verified by the parent's tests; it was not re-reviewed.
 
+**Contract v1.3** (R5 pairing v2, `docs/r5-pairing-v2-plan.md`'s "Slice P2a", 2026-10-02; supersedes v1.1/v1.2 below where they differ): `/v1/inbox` additionally returns `pendingAcceptances` — every `ledger.pendingAcceptances` entry (as a verifiable `SignedAcceptance`, not the bare acceptance) whose invite exists, is unconsumed and has not expired. Same presence rule as `approvals`/`ownerIdentityID`: populated only on an owner fetch of their own ledger, omitted entirely on a helper/approver fetch. This replaces the owner typing a six-digit code read aloud by the friend (see the pairing v2 plan's "Owner decision"); `OwnerAcceptanceCheck` (CompanionKit) verifies an entry locally and derives the expected code before `confirm`. See that plan's "Build results: P2a" for what shipped and what is still outstanding (an Opus review, and the P2b app-side wiring that actually removes the typed-code UI).
+
+**Contract v1.2** added by Slice B2a (2026-10-02): `/v1/inbox` also returns `approvals` (owner-fetch only) — the relay-stored accepted `Approval` for each request in `requests` whose status is `approved`, or that has a recorded use. See `docs/r5-b2-plan.md`.
+
 **Contract v1.1**, which supersedes the API table above where they differ:
 - `/v1/inbox` also returns `pairings` and `consents` for pairings the signer is part of.
 - `stateRoot` is per owner.
