@@ -27,6 +27,19 @@ public enum CompanionError: Error, Equatable, Sendable {
     case missingOperationRevision
     case unsupportedScope
     case consentRequired
+    /// R5 Slice B2a review fix (N2): a **locally detected** rollback or fork
+    /// in the relay's reported `(revision, stateRoot)` for one owner,
+    /// raised only by `RollbackAnchor`/`HTTPCompanionTransport.validateAnchor`
+    /// (`HTTPTransport.swift`) — never by the relay itself. This is
+    /// distinct from `.staleRevision`, which is the *relay's own*
+    /// optimistic-concurrency rejection of a stale `expectedRevision` on a
+    /// mutation (a benign write race a caller may simply retry with a fresh
+    /// revision). A `.relayRollback` means this device's own previously
+    /// accepted checkpoint disagrees with what the relay just reported —
+    /// the relay has gone backwards or forked — and is integrity-fatal: the
+    /// caller must not retry the same request and must not treat this as a
+    /// transient condition.
+    case relayRollback(RelayRollbackReason)
 
     /// A transport may retry a command only when it can resend the exact same
     /// signed operation. These errors describe terminal command outcomes; the
@@ -38,7 +51,7 @@ public enum CompanionError: Error, Equatable, Sendable {
              .revokedPairing, .expired, .replay, .staleSession, .wrongTarget,
              .wrongVerificationCode, .rateLimited, .keyUnavailable,
              .alreadyPaired, .notFound, .invalidTransition, .unsupportedScope,
-             .consentRequired:
+             .consentRequired, .relayRollback:
             return false
         }
     }
@@ -65,8 +78,24 @@ public enum CompanionError: Error, Equatable, Sendable {
         case .invalidTransition: return "invalid_transition"
         case .unsupportedScope: return "unsupported_scope"
         case .consentRequired: return "consent_required"
+        // This device's own local detection, never a code the relay sends
+        // or that `fromTransportCode(_:)` ever decodes from the wire — used
+        // only for local diagnostics/logging via `CompanionTransportError.code`.
+        case .relayRollback: return "relay_rollback"
         }
     }
+}
+
+/// The specific way a relay's reported `(revision, stateRoot)` disagreed
+/// with this device's own previously accepted checkpoint for one owner. See
+/// `CompanionError.relayRollback`.
+public enum RelayRollbackReason: Equatable, Sendable {
+    /// The reported revision is lower than the last one this device
+    /// accepted for this owner — the relay has gone backwards.
+    case regressedRevision(expected: UInt64, actual: UInt64)
+    /// The reported revision matches the last one this device accepted for
+    /// this owner, but the state root differs — the relay has forked.
+    case conflictingRoot(revision: UInt64)
 }
 
 public enum CompanionLimits {

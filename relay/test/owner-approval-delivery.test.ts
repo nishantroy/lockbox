@@ -358,4 +358,41 @@ describe("R5 Slice B2a: owner inbox approval delivery", () => {
     const useOp = buildOperation({ kind: "use", payload: { approval, requestID, useID: uniqueID("use"), consentGeneration: 2 }, signer: s.owner, expectedRevision: revision });
     await expectRejected(useOp, "replay", now);
   });
+
+  it("a helper's replay after an intervening owner commit returns the commit-time (revision, stateRoot), not the current one (N1 privacy fix)", async () => {
+    const now = BASE_NOW + 9_000;
+    const s = await setupPairedSession(now);
+    const requestID = uniqueID("request");
+    let revision = s.nextRevision;
+    await submitOperation(toRequest(buildOperation({ kind: "request", payload: requestPayload(s, requestID, now, now + 40_000), signer: s.owner, expectedRevision: revision++ })), now);
+
+    // The approver (a non-owner, helper-signed operation) submits an
+    // approval and holds onto the exact signed operation to replay later.
+    const approval = approvalPayload(s, requestID, uniqueID("approval"), "approved", 29, now);
+    const approvalOp = buildOperation({ kind: "approval", payload: approval, signer: s.approver, expectedRevision: revision });
+    const first = await submitOperation(toRequest(approvalOp), now);
+    expect(first.result.kind).toBe("approval");
+    expect(first.ownerIdentityID).toBe(s.owner.identity.identityID);
+
+    // An unrelated owner mutation advances the owner's ledger revision
+    // after the approval committed but before the approver's replay
+    // arrives.
+    const ackOp = buildOperation({ kind: "ack", payload: {}, signer: s.owner, expectedRevision: first.revision });
+    const ackResponse = await submitOperation(toRequest(ackOp), now);
+    expect(ackResponse.revision).toBeGreaterThan(first.revision);
+
+    // The approver replays their own identical "approval" operation. They
+    // must see the SAME (revision, stateRoot) they already received the
+    // first time -- not the owner's current state, which would leak the
+    // owner's activity timing to a signer whose own request is otherwise
+    // completely inert (the replay path never re-runs authorize(), so this
+    // would still "succeed" even after this approver's pairing was later
+    // revoked).
+    const replay = await submitOperation(toRequest(approvalOp), now);
+    expect(replay.result).toEqual(first.result);
+    expect(replay.revision).toBe(first.revision);
+    expect(replay.stateRoot.equals(first.stateRoot)).toBe(true);
+    expect(replay.revision).not.toBe(ackResponse.revision);
+    expect(replay.stateRoot.equals(ackResponse.stateRoot)).toBe(false);
+  });
 });

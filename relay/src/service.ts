@@ -206,13 +206,28 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
       // canonical root *for `revision`*", not "the root this specific
       // operation produced", so substituting the current verified pair for
       // an unchanged `result` is within contract, not a special case.
+      //
+      // R5 Slice B2a review fix (N1, privacy): only an OWNER-signed replay
+      // gets this substitution. The replay path above intentionally never
+      // calls `authorize()` (a lost acknowledgement must return its
+      // original result even after e.g. a consent revoke would now reject
+      // the same operation), so a non-owner (approver/helper) signer who
+      // simply re-sends one of their own old operations (e.g. "approval")
+      // must not be able to read the owner's CURRENT revision/state root
+      // off that replay -- that would leak the owner's current activity
+      // timing (including after this exact approver's own pairing has
+      // since been revoked) through a request that looks, and is
+      // authorized as, entirely inert. A non-owner signer's replay keeps
+      // the historical `prior.committedRevision`/`prior.stateRootAfter`
+      // pair -- exactly what they already received the first time.
+      const isOwnerSigned = operation.signer.role === "owner";
       return {
         response: {
           operationID: prior.operationID,
-          revision: ownerRow.revision,
+          revision: isOwnerSigned ? ownerRow.revision : prior.committedRevision,
           result,
           ownerIdentityID: ownerRow.ownerID,
-          stateRoot: ownerRow.storedStateRoot
+          stateRoot: isOwnerSigned ? ownerRow.storedStateRoot : prior.stateRootAfter
         },
         surfaceExpired: prior.disposition === "rejectedExpiredRequest"
       };

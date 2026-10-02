@@ -224,12 +224,20 @@ public struct RollbackAnchor: Sendable {
                 throw CompanionError.malformed("relay response is missing a state root")
             }
             if let previous {
+                // R5 Slice B2a review fix (N2): a regression or fork detected
+                // here is this device's OWN local checkpoint disagreeing with
+                // the relay, never the relay's own `stale_revision` rejection
+                // of a stale `expectedRevision` (that is a distinct, benign
+                // write race surfaced via `fromTransportCode`/`.staleRevision`
+                // elsewhere). Use the dedicated `.relayRollback` case so a
+                // caller can tell the two apart and treat only this one as
+                // integrity-fatal (never retried).
                 guard revision >= previous.revision else {
-                    throw CompanionError.staleRevision(expected: previous.revision, actual: revision)
+                    throw CompanionError.relayRollback(.regressedRevision(expected: previous.revision, actual: revision))
                 }
                 if revision == previous.revision {
                     guard stateRoot == previous.stateRoot else {
-                        throw CompanionError.malformed("conflicting relay state root at revision \(revision)")
+                        throw CompanionError.relayRollback(.conflictingRoot(revision: revision))
                     }
                     return (previous, nil)
                 }
@@ -641,5 +649,87 @@ public struct AsyncCompanionClient: Sendable {
 
     public func fetchInbox() async throws -> [TrustedRequest] {
         try await fetchInboxResponse().requests
+    }
+
+    /// Classifies a failure from `useApproval` (R5 Slice B2a review fix,
+    /// N2) so a caller (B2c's friend-release flow) knows how to react
+    /// without re-deriving the error-code taxonomy itself:
+    /// - `.retryable`: the identical `useID`/approval may be resubmitted.
+    ///   The idempotent-replay fix (P1-1) makes this safe even if other
+    ///   activity happened on the relay in between.
+    /// - `.definitive`: a terminal command rejection. Retrying the same
+    ///   `useID`/approval will never succeed; call `abandonFriendRelease`
+    ///   and show a calm, specific message.
+    /// - `.integrityFatal`: a detected relay rollback/fork, or a `use`
+    ///   response that could not be decoded or failed local verification.
+    ///   Never retry and never silently abandon the pending intent either
+    ///   — the relay's true state is unknown, so the safe move is to leave
+    ///   the intent pending and surface this for the owner/developer.
+    public enum UseFailureDisposition: Equatable, Sendable {
+        case retryable
+        case definitive
+        case integrityFatal
+
+        public static func classify(_ error: Error) -> UseFailureDisposition {
+            if let transportError = error as? CompanionTransportError {
+                switch transportError {
+                case .unavailable, .timedOut:
+                    // Covers an HTTP 5xx too: `HTTPCompanionTransport`
+                    // already maps every 5xx status to `.unavailable`.
+                    return .retryable
+                case .malformedResponse:
+                    return .integrityFatal
+                case .server(let inner):
+                    return classify(serverError: inner)
+                }
+            }
+            if error is CompanionError {
+                // A bare (unwrapped) `CompanionError` in the context of a
+                // `useApproval` call is always thrown directly by local
+                // code -- `useApproval`'s own guards or
+                // `validateUseVerification`'s checks on the relay's
+                // response -- never by the HTTP transport's status-code
+                // mapping (that path always wraps in
+                // `CompanionTransportError.server`). Every such case is a
+                // malformed or failed-verification `use` response, or an
+                // equivalent local precondition failure: integrity-fatal.
+                return .integrityFatal
+            }
+            return .integrityFatal
+        }
+
+        /// A `CompanionError` the relay itself returned (wrapped in
+        /// `CompanionTransportError.server`), keyed by the same error-code
+        /// names `relay/test/fixtures/error-codes.json` and
+        /// `CompanionError.fromTransportCode(_:)` use.
+        private static func classify(serverError error: CompanionError) -> UseFailureDisposition {
+            switch error {
+            case .rateLimited, .staleRevision:
+                // `rate_limited` (429) and the relay's own `stale_revision`
+                // optimistic-concurrency rejection are both benign and
+                // retryable with a fresh attempt.
+                return .retryable
+            case .replay, .expired, .wrongTarget, .unauthorized, .notFound,
+                 .consentRequired, .revokedPairing, .invalidSignature, .operationConflict:
+                // `operation_conflict` is this device's local vocabulary for
+                // the relay's `idempotency_conflict` code (see
+                // `fromTransportCode`).
+                return .definitive
+            case .relayRollback:
+                // This device's own anchor detected a rollback or fork --
+                // never the relay's `stale_revision`, which is handled
+                // above.
+                return .integrityFatal
+            case .malformed, .unknownIdentity, .staleSession, .wrongVerificationCode,
+                 .keyUnavailable, .alreadyPaired, .invalidTransition,
+                 .missingOperationRevision, .unsupportedScope:
+                // Every other server-side code is either a shape/identity
+                // problem with the response (`.malformed`,
+                // `.unknownIdentity`) or a code this protocol's "use" path
+                // does not expect to see at all -- treated conservatively
+                // as integrity-fatal rather than guessed at.
+                return .integrityFatal
+            }
+        }
     }
 }

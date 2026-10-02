@@ -633,7 +633,7 @@ final class HTTPTransportTests: XCTestCase {
             _ = try await client.createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime,
                                               nonce: invitation.payload.nonce)
             XCTFail("expected rollback rejection")
-        } catch CompanionTransportError.server(.staleRevision(let expected, let actual)) {
+        } catch CompanionTransportError.server(.relayRollback(.regressedRevision(let expected, let actual))) {
             XCTAssertEqual(expected, 5)
             XCTAssertEqual(actual, 3)
         }
@@ -662,11 +662,61 @@ final class HTTPTransportTests: XCTestCase {
             _ = try await client.createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime,
                                               nonce: invitation.payload.nonce)
             XCTFail("expected fork rejection")
-        } catch CompanionTransportError.server(.malformed) {
-            // expected: conflicting root at same revision
+        } catch CompanionTransportError.server(.relayRollback(.conflictingRoot(let revision))) {
+            XCTAssertEqual(revision, 2)
         }
         let checkpoint = try loadCheckpoint(anchorStore, ownerIdentityID: ownerIdentityID)
         XCTAssertEqual(checkpoint?.stateRoot, originalRoot, "unchanged on a rejected fork")
+    }
+
+    /// R5 Slice B2a review fix (N2): the relay's own `stale_revision`
+    /// rejection (a benign optimistic-concurrency write race, surfaced as
+    /// an HTTP error status before any response body is even decoded) and
+    /// this device's own local anchor detecting a rollback in an otherwise
+    /// well-formed 200 response must never collapse to the same error case
+    /// — a caller needs to treat them completely differently (retry with a
+    /// fresh revision vs. never retry).
+    func testRelayStaleRevisionAndAnchorRollbackAreDistinctErrors() async throws {
+        // (1) The relay itself rejects the mutation outright: HTTP 409 with
+        // error code "stale_revision". Never reaches `RollbackAnchor` at all.
+        let (ownerSigner1, invitation1) = try makeInvite()
+        let transport1 = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client1 = AsyncCompanionClient(signer: ownerSigner1, transport: transport1, now: { fixedTime })
+        StubURLProtocol.handler = { _ in .init(status: 409, body: Data(#"{"error":"stale_revision"}"#.utf8)) }
+        do {
+            _ = try await client1.createInvite(inviteID: invitation1.payload.inviteID, validFor: 3_600, now: fixedTime,
+                                               nonce: invitation1.payload.nonce)
+            XCTFail("expected a relay-rejected stale revision")
+        } catch CompanionTransportError.server(let error) {
+            guard case .staleRevision = error else { return XCTFail("expected .staleRevision, got \(error)") }
+        }
+
+        // (2) A well-formed 200 response whose revision regresses behind
+        // this device's own already-accepted checkpoint -- an actual
+        // rollback/fork, detected locally, nothing to do with the relay's
+        // HTTP-level rejection above.
+        let (ownerSigner2, invitation2) = try makeInvite()
+        let anchorStore = InMemoryRollbackAnchorStore()
+        let ownerIdentityID2 = ownerSigner2.identity.identityID
+        let anchor = RollbackAnchor(store: anchorStore)
+        try anchor.accept(relayBaseURL: testBaseURL.absoluteString, ownerIdentityID: ownerIdentityID2,
+                          revision: 5, stateRoot: Data(repeating: 1, count: 32), enforceIfNoCheckpoint: true)
+        let transport2 = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession(), anchorStore: anchorStore)
+        let client2 = AsyncCompanionClient(signer: ownerSigner2, transport: transport2, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 2,
+                                                 ownerIdentityID: ownerIdentityID2, stateRoot: Data(repeating: 2, count: 32))
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client2.createInvite(inviteID: invitation2.payload.inviteID, validFor: 3_600, now: fixedTime,
+                                               nonce: invitation2.payload.nonce)
+            XCTFail("expected an anchor rollback rejection")
+        } catch CompanionTransportError.server(let error) {
+            guard case .relayRollback = error else { return XCTFail("expected .relayRollback, got \(error)") }
+            if case .staleRevision = error { XCTFail("a locally-detected rollback must never also match .staleRevision") }
+        }
     }
 
     func testAnchorEnforcementRejectsMissingStateRootByDefault() async throws {
@@ -851,7 +901,7 @@ final class HTTPTransportTests: XCTestCase {
             _ = try await AsyncCompanionClient(signer: ownerSigner, transport: transport2, now: { fixedTime })
                 .createInvite(inviteID: invitation2.payload.inviteID, validFor: 3_600, now: fixedTime, nonce: invitation2.payload.nonce)
             XCTFail("expected the two differently-formatted base URLs to share one anchor and reject the regression")
-        } catch CompanionTransportError.server(.staleRevision(let expected, let actual)) {
+        } catch CompanionTransportError.server(.relayRollback(.regressedRevision(let expected, let actual))) {
             XCTAssertEqual(expected, 4)
             XCTAssertEqual(actual, 2)
         }

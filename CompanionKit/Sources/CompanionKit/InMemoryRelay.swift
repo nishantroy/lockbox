@@ -420,8 +420,18 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             // the revision field itself should still describe "the ledger's
             // revision as of this response" consistently between the fresh
             // and replayed paths, matching the TS relay's contract.
+            //
+            // R5 Slice B2a review fix (N1, privacy): mirrors the TS relay's
+            // additional gate -- only an OWNER-signed replay gets the
+            // current revision. This relay has exactly one owner, so an
+            // exact identity match on `owner` is that signer; a non-owner
+            // (approver) replaying their own old operation gets the
+            // historical `record.revision` instead, so they cannot read the
+            // owner's current activity level off an otherwise-inert resend.
+            // (There is still no state root to gate here -- see above.)
+            let replayRevision = operation.signer == owner ? revision : record.revision
             return try RelayResponse(operationID: operation.operationID,
-                                     revision: revision, result: record.response)
+                                     revision: replayRevision, result: record.response)
         }
         if let expectedRevision = operation.expectedRevision, expectedRevision != revision {
             throw CompanionError.staleRevision(expected: expectedRevision, actual: revision)
