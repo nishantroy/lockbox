@@ -87,6 +87,15 @@ final class CompanionCoordinator: ObservableObject {
     /// equal to it is treated as "never customised" and follows the default.
     static let legacyLocalRelayBaseURLString = "http://127.0.0.1:8002"
     private static let acceptanceLinkPrefix = "PLBX-ACCEPT:"
+    /// Scheme for `Invitation.shareLink`/`.fromShareLink(_:)` (registered in
+    /// `project.yml`'s `CFBundleURLTypes` alongside `phonelockbox`).
+    static let companionLinkScheme = "phone-lockbox-companion"
+    /// Shown for any `phone-lockbox-companion://...` link this device
+    /// doesn't recognize (review P2-1), and for a recognized invite link
+    /// whose payload doesn't actually decode once looked at (review P2-2,
+    /// `AcceptInviteCard`). Same wording in both cases: "an invite link" is
+    /// the only kind of companion link a person can currently receive.
+    static let invalidInviteLinkMessage = "This invite link isn't valid."
     /// R5 Slice B2c developer gate. Defaults to **off**; see
     /// `docs/r5-b2-plan.md` ("Developer gate"). Persisted in the App Group
     /// suite (falls back to `false` when storage is unavailable, same as
@@ -114,6 +123,14 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var needsRepair = false
     @Published var pendingInvitation: Invitation?
     @Published var pendingAcceptance: PairingAcceptance?
+    /// Prototype-only deep-link prefill for the People tab's "Paste invite
+    /// link" field, set by `ContentView.onOpenURL` when it recognizes a
+    /// `phone-lockbox-companion://invite/...` link (whether that's this
+    /// device's own just-created invite, shared back to itself, or one a
+    /// friend shared with this device). `AcceptInviteCard` copies the value
+    /// into its own `@State` and clears it; opening the link never itself
+    /// accepts anything — accepting still requires an explicit tap.
+    @Published var prefillInviteLink: String?
     /// R5 Slice B2a: the relay-stored `Approval` for each request this
     /// device's owner identity has fetched in its own anchored inbox,
     /// keyed by `requestID`. Populated alongside `inboxItems` on every
@@ -186,6 +203,33 @@ final class CompanionCoordinator: ObservableObject {
             self.friendApprovalCanEndLocksEnabled = false
             self.lastError = Self.appGroupUnavailableMessage
         }
+        #if DEBUG
+        // UI-test-only override: `-relayBaseURL <url>` is a standard Xcode
+        // launch-argument pair, read once at launch so a scripted UI test
+        // can point this coordinator at a local relay without touching the
+        // Developer settings UI. Never compiled into a release build, and
+        // never consulted outside DEBUG even if a release binary somehow
+        // launched with this argument.
+        if let override = Self.relayBaseURLLaunchArgumentOverride() {
+            self.relayBaseURLString = override
+        }
+        // UI-test-only full reset: `-resetCompanionStateForUITests` clears
+        // this app's companion identity (the Keychain-held private keys),
+        // every companion App Group key, and the rollback anchors, before
+        // anything below loads them — so a UI test gets a brand-new
+        // owner/approver identity and a clean anchor on every launch,
+        // regardless of what a previous (possibly interrupted) test run,
+        // or another process sharing the same local relay's Postgres, left
+        // behind. Without this, a real relay-state regression (for
+        // example, another test suite truncating the shared local
+        // database) is correctly, but unhelpfully, reported as
+        // `CompanionError.relayRollback` against a stale identity's
+        // leftover anchor. Never compiled into a release build, and never
+        // reachable from any production UI.
+        if ProcessInfo.processInfo.arguments.contains("-resetCompanionStateForUITests") {
+            Self.resetCompanionStateForUITests(keyStore: self.keyStore, sharedDefaults: resolvedDefaults, anchorStore: self.anchorStore)
+        }
+        #endif
         if resolvedDefaults != nil {
             loadIdentities()
             loadPeople()
@@ -366,7 +410,71 @@ final class CompanionCoordinator: ObservableObject {
         }
     }
 
+    #if DEBUG
+    /// Reads a `-relayBaseURL <url>` launch-argument pair, if present and a
+    /// valid URL. DEBUG-only — see the call site in `init`.
+    private static func relayBaseURLLaunchArgumentOverride() -> String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-relayBaseURL"), index + 1 < arguments.count else { return nil }
+        let value = arguments[index + 1]
+        return URL(string: value) != nil ? value : nil
+    }
+
+    /// Backs the `-resetCompanionStateForUITests` launch argument. Deletes
+    /// any existing owner/approver private key from the Keychain, clears
+    /// every companion App Group key this coordinator owns (identities,
+    /// paired people, pending acceptances, the friend-approval gate, and
+    /// the friend-release use-ID map), and resets every rollback-anchor
+    /// checkpoint. Deliberately leaves `relayBaseURLDefaultsKey` alone — the
+    /// `-relayBaseURL` override above already governs that independently.
+    /// Best-effort: a failure to delete one Keychain item does not stop the
+    /// rest of the reset.
+    private static func resetCompanionStateForUITests(keyStore: any DeviceKeyStore, sharedDefaults: UserDefaults?,
+                                                      anchorStore: (any RollbackAnchorStore)?) {
+        guard let sharedDefaults else { return }
+        for key in [ownerIdentityDefaultsKey, approverIdentityDefaultsKey] {
+            guard let data = sharedDefaults.data(forKey: key),
+                  let identity = try? JSONDecoder().decode(DeviceIdentity.self, from: data) else { continue }
+            try? keyStore.deletePrivateKey(for: identity.identityID)
+        }
+        for key in [ownerIdentityDefaultsKey, approverIdentityDefaultsKey, peopleDefaultsKey,
+                    pendingAcceptancesDefaultsKey, friendApprovalGateDefaultsKey, useIDsByRequestIDDefaultsKey] {
+            sharedDefaults.removeObject(forKey: key)
+        }
+        try? anchorStore?.resetAll()
+    }
+    #endif
+
     // MARK: - Invite / accept / confirm
+
+    /// Claims any `phone-lockbox-companion://...` link for companion
+    /// handling (review P2-1): the Quick Action parser must never see one of
+    /// these, valid or not, since the two schemes share a host app and a
+    /// malformed companion link must not silently fall through to Lockbox
+    /// navigation. Returns `true` for every URL with this scheme (so the
+    /// caller always switches to the People tab), `false` only when the
+    /// scheme doesn't match at all.
+    ///
+    /// A recognized `.../invite/...` link (`Invitation.shareLink`'s format)
+    /// fills the People tab's "Paste invite link" field — but only after
+    /// also confirming the payload itself actually decodes (signature,
+    /// expiry, shape); an undecodable payload reports the same
+    /// companion-specific `lastError` as an unrecognized host, rather than
+    /// prefilling something "Accept invite" can only silently refuse
+    /// (review P2-2: it's disabled whenever `decodeInvitation` fails, which
+    /// would otherwise leave no feedback at all). This never accepts
+    /// anything by itself — accepting still requires an explicit tap.
+    @discardableResult
+    func handleIncomingCompanionLink(_ url: URL) -> Bool {
+        guard url.scheme == Self.companionLinkScheme else { return false }
+        guard url.host == "invite", decodeInvitation(from: url.absoluteString) != nil else {
+            lastError = Self.invalidInviteLinkMessage
+            return true
+        }
+        prefillInviteLink = url.absoluteString
+        lastError = nil
+        return true
+    }
 
     func createInvite() async {
         guard isAvailable else { return }

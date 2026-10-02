@@ -45,6 +45,10 @@ targets:
             CFBundleURLName: com.phone-lockbox.app.quick-actions
             CFBundleURLSchemes:
               - phonelockbox
+          - CFBundleTypeRole: Viewer
+            CFBundleURLName: com.phone-lockbox.app.companion
+            CFBundleURLSchemes:
+              - phone-lockbox-companion
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     dependencies:
@@ -84,6 +88,19 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.tests
         GENERATE_INFOPLIST_FILE: YES
+  PhoneLockboxUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: PhoneLockboxUITests
+    dependencies:
+      - target: PhoneLockbox
+      - package: CompanionKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: PhoneLockbox
   DeviceActivityMonitor:
     type: app-extension
     platform: iOS
@@ -127,6 +144,26 @@ schemes:
       targets:
         PhoneLockbox: all
         PhoneLockboxTests: [test]
+        PhoneLockboxUITests: [test]
     test:
       targets:
         - PhoneLockboxTests
+        # Review P2-4: PhoneLockboxUITests is deliberately NOT a test
+        # target of this scheme (tried `skipped: true` first — Xcode
+        # refused `-only-testing:PhoneLockboxUITests` against it with
+        # "isn't a member of the specified test plan or scheme", so a
+        # skipped testable does not actually make -only-testing override
+        # it in this Xcode version). It has its own PhoneLockboxUITests
+        # scheme below instead. A bare `xcodebuild test -scheme
+        # PhoneLockbox` therefore only ever runs PhoneLockboxTests and
+        # never needs a local relay. See docs/development.md for how to
+        # run the UI tests deliberately.
+
+  PhoneLockboxUITests:
+    build:
+      targets:
+        PhoneLockbox: all
+        PhoneLockboxUITests: [test]
+    test:
+      targets:
+        - PhoneLockboxUITests

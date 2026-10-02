@@ -638,6 +638,82 @@ final class QuickActionDeliveryBrokerTests: XCTestCase {
     }
 }
 
+/// Review P1: `ScreenTimeCoordinator.onWillPresentQuickAction` must run
+/// strictly before `pendingQuickAction` is published, and must never run
+/// when nothing is actually claimed/presented. Uses the same injectable
+/// `quickActionQueue`/`quickActionScheduler` seam `ScreenTimeCoordinator`
+/// already exposes for exactly this kind of narrow, DI'd Quick Action test,
+/// rather than exercising `QuickActionDeliveryBroker` directly (that only
+/// proves the broker's own callback ordering, not that this coordinator
+/// actually wires the hook ahead of the publish).
+@MainActor
+final class ScreenTimeCoordinatorQuickActionPresentationTests: XCTestCase {
+    private let now = Date(timeIntervalSinceReferenceDate: 4_000_000)
+
+    func testOnWillPresentQuickActionRunsBeforePendingQuickActionIsPublished() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        let url = try XCTUnwrap(QuickActionRoute.url(for: .status, now: now))
+        let claim = try makeClaim(for: url, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [.claimed(claim)])
+        let coordinator = ScreenTimeCoordinator(clock: { self.now }, quickActionQueue: queue, quickActionScheduler: scheduler)
+
+        var hookCallCount = 0
+        var pendingQuickActionWasNilWhenHookRan = false
+        coordinator.onWillPresentQuickAction = {
+            hookCallCount += 1
+            pendingQuickActionWasNilWhenHookRan = coordinator.pendingQuickAction == nil
+        }
+
+        coordinator.processPendingQuickActionRoute(now: now)
+
+        XCTAssertEqual(hookCallCount, 1, "the hook must run exactly once for a route that gets presented")
+        XCTAssertTrue(pendingQuickActionWasNilWhenHookRan, "the hook must run before pendingQuickAction is published, not after")
+        XCTAssertNotNil(coordinator.pendingQuickAction, "the route should still end up presented")
+    }
+
+    func testOnWillPresentQuickActionDoesNotRunWhenNothingIsClaimed() {
+        let scheduler = TestQuickActionRetryScheduler()
+        let queue = TestQuickActionRouteQueue(results: [.empty])
+        let coordinator = ScreenTimeCoordinator(clock: { self.now }, quickActionQueue: queue, quickActionScheduler: scheduler)
+
+        var hookCallCount = 0
+        coordinator.onWillPresentQuickAction = { hookCallCount += 1 }
+
+        coordinator.processPendingQuickActionRoute(now: now)
+
+        XCTAssertEqual(hookCallCount, 0, "an empty queue must never run the presentation hook")
+        XCTAssertNil(coordinator.pendingQuickAction)
+    }
+
+    func testOnWillPresentQuickActionDoesNotRunForATerminalDrop() throws {
+        let scheduler = TestQuickActionRetryScheduler()
+        // A focus route when unconfigured/unauthorized is terminal (dropped,
+        // never presented) — see `quickActionDisposition(for:)`.
+        let url = try XCTUnwrap(QuickActionRoute.url(for: .focus(.thirtyMinutes), now: now))
+        let claim = try makeClaim(for: url, leaseUntil: now.addingTimeInterval(60))
+        let queue = TestQuickActionRouteQueue(results: [.claimed(claim)])
+        let coordinator = ScreenTimeCoordinator(clock: { self.now }, quickActionQueue: queue, quickActionScheduler: scheduler)
+
+        var hookCallCount = 0
+        coordinator.onWillPresentQuickAction = { hookCallCount += 1 }
+
+        coordinator.processPendingQuickActionRoute(now: now)
+
+        XCTAssertEqual(hookCallCount, 0, "a terminally dropped route must never run the presentation hook")
+        XCTAssertNil(coordinator.pendingQuickAction)
+    }
+
+    private func makeClaim(for url: URL, leaseUntil: Date) throws -> QuickActionPendingRouteStore.Claim {
+        let route = try XCTUnwrap(QuickActionRoute.parse(url, now: now))
+        return QuickActionPendingRouteStore.Claim(
+            id: route.id,
+            token: "123e4567-e89b-12d3-a456-426614174000",
+            url: url,
+            leaseUntil: leaseUntil
+        )
+    }
+}
+
 private final class TestQuickActionRouteQueue: QuickActionRouteQueue {
     private var results: [QuickActionPendingRouteStore.ClaimResult]
     private var acknowledgementResults: [Bool]

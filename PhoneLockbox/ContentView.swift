@@ -55,32 +55,54 @@ struct ContentView: View {
         .tint(LockboxTheme.accent)
         .lockboxScreen()
         .onOpenURL { url in
+            // A `phone-lockbox-companion://invite/...` link (shared via the
+            // People tab, whether this device created the invite or a
+            // friend shared theirs) routes to People with the "Paste invite
+            // link" field prefilled. It never auto-accepts anything.
+            if companion.handleIncomingCompanionLink(url) {
+                selectedTab = 1
+                return
+            }
             selectedTab = 0
             lockboxPath = []
             coordinator.handleQuickActionURL(url)
         }
         .task {
+            // Set once, before the first `processPendingQuickActionRoute()`
+            // call below: switches to Lockbox and clears any stale recovery
+            // path, but only from inside the coordinator, strictly before a
+            // route is actually published as pending — see the doc comment
+            // on `coordinator.onWillPresentQuickAction`. This is what
+            // replaced an earlier `onChange(of: coordinator.pendingQuickAction)`
+            // here (review P1): that ran reactively, racing
+            // `LockboxTabView`'s own `onChange` of the same value with
+            // undefined ordering, which could append `.recovery` and then
+            // immediately clear it (or clear a path it hadn't appended to
+            // yet), wedging `pendingQuickAction` since `RecoveryView` would
+            // never actually appear to acknowledge/settle it.
+            coordinator.onWillPresentQuickAction = {
+                selectedTab = 0
+                lockboxPath = []
+            }
             coordinator.refreshAuthorization()
-            routePendingQuickActionIfNeeded()
+            coordinator.processPendingQuickActionRoute()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 coordinator.refreshAuthorization()
-                routePendingQuickActionIfNeeded()
+                // Scene reactivation is an explicit additional retry trigger
+                // for the durable Quick Action queue (docs/quick-actions.md),
+                // independent of whether anything is actually pending — this
+                // call must run every time. It does not, by itself, switch
+                // tabs or clear the Lockbox nav path; `onWillPresentQuickAction`
+                // (set in `.task` above) does that only if this call actually
+                // ends up presenting something.
+                coordinator.processPendingQuickActionRoute()
                 // R5 Slice B2c review, P2-4: finish an interrupted friend
                 // release on every foreground, not only from the People tab.
                 Task { await companion.replayPendingFriendRelease(coordinator: coordinator) }
             }
         }
-    }
-
-    private func routePendingQuickActionIfNeeded() {
-        // Every queued route is navigation-only. Selecting the Lockbox tab and
-        // clearing an old recovery path happen before claiming presentation;
-        // enforcement and recovery state remain untouched.
-        selectedTab = 0
-        lockboxPath = []
-        coordinator.processPendingQuickActionRoute()
     }
 
     @Environment(\.scenePhase) private var scenePhase

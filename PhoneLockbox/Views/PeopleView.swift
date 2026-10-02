@@ -2,6 +2,9 @@ import SwiftUI
 #if canImport(CompanionKit)
 import CompanionKit
 #endif
+#if os(iOS)
+import UIKit
+#endif
 
 struct PeopleView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
@@ -88,6 +91,15 @@ private struct PrototypeLabelCard: View {
 
 #if canImport(CompanionKit)
 
+#if os(iOS)
+/// Backs the "Copy link"/"Copy" buttons next to the invite and acceptance
+/// `ShareLink`s (item d): a visible, explicit alternative to the share
+/// sheet for a link that didn't open when tapped in Messages.
+private func copyCompanionTextToPasteboard(_ text: String) {
+    UIPasteboard.general.string = text
+}
+#endif
+
 private struct IntroCard: View {
     var body: some View {
         LockboxCard {
@@ -131,12 +143,35 @@ private struct InviteSomeoneCard: View {
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 .disabled(isCreating)
                 .accessibilityHint("Creates a one-use invitation link")
+                .accessibilityIdentifier("inviteSomeone.createInviteButton")
 
                 if let invitation = companion.pendingInvitation {
+                    // Visible and selectable, not just copyable: lets someone
+                    // manually select/copy it too, and gives this exact text
+                    // a stable, readable place to verify from (including in
+                    // the UI test, which reads this rather than the system
+                    // pasteboard — a cross-app pasteboard read from the test
+                    // process is subject to the OS's own "Allow Paste"
+                    // confirmation, which an automated run can't answer).
+                    Text(invitation.shareLink)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(LockboxTheme.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("inviteSomeone.inviteLinkText")
                     ShareLink(item: invitation.shareLink) {
                         Label("Share invite link", systemImage: "square.and.arrow.up")
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    #if os(iOS)
+                    Button {
+                        copyCompanionTextToPasteboard(invitation.shareLink)
+                    } label: {
+                        Label("Copy link", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                    .accessibilityHint("Copies the invite link to the clipboard")
+                    .accessibilityIdentifier("inviteSomeone.copyLinkButton")
+                    #endif
                 }
 
                 Divider().overlay(LockboxTheme.border)
@@ -215,6 +250,7 @@ private struct AcceptInviteCard: View {
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     #endif
+                    .accessibilityIdentifier("acceptInvite.pastedInviteField")
                 Button("Accept invite") {
                     guard let invitation = companion.decodeInvitation(from: pastedInvite) else {
                         return
@@ -237,11 +273,35 @@ private struct AcceptInviteCard: View {
                             Label("Share acceptance code", systemImage: "square.and.arrow.up")
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                        #if os(iOS)
+                        Button {
+                            copyCompanionTextToPasteboard(companion.acceptanceShareText(acceptance))
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                        .accessibilityHint("Copies the acceptance code text to the clipboard")
+                        #endif
                     }
                     .accessibilityElement(children: .combine)
                 }
             }
         }
+        .onAppear { applyInviteLinkPrefillIfNeeded() }
+        .onChange(of: companion.prefillInviteLink) { _, _ in applyInviteLinkPrefillIfNeeded() }
+    }
+
+    /// Consumes `companion.prefillInviteLink` (set by
+    /// `ContentView.onOpenURL` via `CompanionCoordinator.handleIncomingCompanionLink`,
+    /// which already reports an undecodable payload via `lastError` —
+    /// review P2-2) into this card's own "Paste invite link" field, then
+    /// clears it so it is applied exactly once. Opening the link never
+    /// itself accepts anything — "Accept invite" still requires an
+    /// explicit tap.
+    private func applyInviteLinkPrefillIfNeeded() {
+        guard let link = companion.prefillInviteLink else { return }
+        pastedInvite = link
+        companion.prefillInviteLink = nil
     }
 }
 
