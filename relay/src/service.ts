@@ -192,13 +192,27 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
         throw relayError("idempotency_conflict");
       }
       const result = prior.disposition === "rejectedExpiredRequest" ? ({ kind: "acknowledgement" } as const) : decodeStoredResult(prior.responseKind, prior.responseBody);
+      // R5 Slice B2a review fix (P1-1): return the owner's row-locked,
+      // just-verified CURRENT (revision, stateRoot) here, not
+      // `prior.committedRevision`/`prior.stateRootAfter` (the values at the
+      // time this operation first committed). Between that first commit and
+      // a later replay, the owner's revision can advance for unrelated
+      // reasons (another mutation, a retention purge), so the historical
+      // pair can be strictly behind an anchor this device already accepted
+      // from an intervening response -- `RollbackAnchor.accept` would then
+      // reject this *correct, idempotent* replay as a regression
+      // (`staleRevision`), which a B2c crash-recovery retry of "use" could
+      // never clear. `RelayResponse.stateRoot` is documented as "the
+      // canonical root *for `revision`*", not "the root this specific
+      // operation produced", so substituting the current verified pair for
+      // an unchanged `result` is within contract, not a special case.
       return {
         response: {
           operationID: prior.operationID,
-          revision: prior.committedRevision,
+          revision: ownerRow.revision,
           result,
           ownerIdentityID: ownerRow.ownerID,
-          stateRoot: prior.stateRootAfter
+          stateRoot: ownerRow.storedStateRoot
         },
         surfaceExpired: prior.disposition === "rejectedExpiredRequest"
       };

@@ -4,9 +4,11 @@
 // as test/security-fixes.test.ts's P1.4 suite.
 
 import { describe, it, expect } from "vitest";
-import { makeIdentity, buildOperation, swiftDate, signPayloadFields, encodeDeviceIdentityWire, uniqueID, type TestIdentity } from "./setup.js";
-import { submitOperation, fetchInboxOperation } from "../src/service.js";
+import { makeIdentity, buildOperation, swiftDate, signPayloadFields, encodeDeviceIdentityWire, uniqueID, testPool, type TestIdentity } from "./setup.js";
+import { submitOperation, fetchInboxOperation, computeStateRoot } from "../src/service.js";
 import { pairingVerificationCode, base64url, COMPANION_VERSION } from "../src/canonical.js";
+import { purgeExpiredRecords } from "../src/retention.js";
+import { deserializeLedger, serializeLedger } from "../src/ledger.js";
 
 function toRequest(op: object): Buffer {
   return Buffer.from(JSON.stringify(op), "utf8");
@@ -15,6 +17,24 @@ function toRequest(op: object): Buffer {
 async function expectRejected(op: object, code: string, now?: number) {
   await expect(submitOperation(toRequest(op), now)).rejects.toMatchObject({ code });
 }
+
+/** Same helper pattern as test/retention.test.ts: read/patch the stored ledger directly, for scenarios the normal protocol flow can't reach quickly (an old terminal timestamp, past the retention window). */
+async function readLedgerText(ownerID: string): Promise<{ text: string; revision: number }> {
+  const result = await testPool().query<{ state: string; revision: string }>(`SELECT state, revision FROM companion_owner WHERE owner_id = $1`, [ownerID]);
+  const row = result.rows[0];
+  if (!row) throw new Error("owner not found");
+  return { text: row.state, revision: Number(row.revision) };
+}
+
+async function patchLedger(ownerID: string, mutate: (ledger: ReturnType<typeof deserializeLedger>) => void): Promise<void> {
+  const { text, revision } = await readLedgerText(ownerID);
+  const ledger = deserializeLedger(text);
+  mutate(ledger);
+  const newRoot = computeStateRoot(ledger, revision);
+  await testPool().query(`UPDATE companion_owner SET state = $1, state_root = $2 WHERE owner_id = $3`, [serializeLedger(ledger), newRoot, ownerID]);
+}
+
+const DAY = 86_400;
 
 const BASE_NOW = 1_750_000_000; // fixed, deterministic, distinct from other suites' bases
 
@@ -218,5 +238,124 @@ describe("R5 Slice B2a: owner inbox approval delivery", () => {
     const realUseOp = buildOperation({ kind: "use", payload: { approval, requestID, useID: uniqueID("use-real"), consentGeneration: 2 }, signer: s.owner, expectedRevision: revision });
     const response = await submitOperation(toRequest(realUseOp), now);
     expect(response.result.kind).toBe("verification");
+  });
+
+  // ---------------------------------------------------------------------
+  // Review round (P1-1, P1-2): idempotent-replay anchor fix and coverage.
+  // ---------------------------------------------------------------------
+
+  it("a replayed use returns the SAME result but the ledger's CURRENT revision/stateRoot, not the historical commit-time pair", async () => {
+    const now = BASE_NOW + 5_000;
+    const s = await setupPairedSession(now);
+    const requestID = uniqueID("request");
+    let revision = s.nextRevision;
+    await submitOperation(toRequest(buildOperation({ kind: "request", payload: requestPayload(s, requestID, now, now + 40_000), signer: s.owner, expectedRevision: revision++ })), now);
+    const approval = approvalPayload(s, requestID, uniqueID("approval"), "approved", 26, now);
+    await submitOperation(toRequest(buildOperation({ kind: "approval", payload: approval, signer: s.approver, expectedRevision: revision++ })), now);
+
+    const useOp = buildOperation({ kind: "use", payload: { approval, requestID, useID: uniqueID("use"), consentGeneration: 2 }, signer: s.owner, expectedRevision: revision });
+    const first = await submitOperation(toRequest(useOp), now);
+    expect(first.result.kind).toBe("verification");
+
+    // An unrelated mutation advances the owner's revision after "use"
+    // committed but before the replay arrives (R5 Slice B2a review fix,
+    // P1-1: before the fix, the replay below would return the stale
+    // (revision, stateRoot) pair from this "use" operation's original
+    // commit, which a client's RollbackAnchor -- having already accepted
+    // this later ack's higher revision -- would reject as a regression).
+    const ackOp = buildOperation({ kind: "ack", payload: {}, signer: s.owner, expectedRevision: first.revision });
+    const ackResponse = await submitOperation(toRequest(ackOp), now);
+    expect(ackResponse.revision).toBeGreaterThan(first.revision);
+
+    const replay = await submitOperation(toRequest(useOp), now);
+    expect(replay.result).toEqual(first.result);
+    expect(replay.revision).toBe(ackResponse.revision);
+    expect(replay.revision).toBeGreaterThan(first.revision);
+    expect(replay.stateRoot.equals(ackResponse.stateRoot)).toBe(true);
+
+    // A genuinely different useID on the now-consumed approval is still a
+    // hard rejection, not a replay.
+    const differentUseID = buildOperation({ kind: "use", payload: { approval, requestID, useID: uniqueID("use-different"), consentGeneration: 2 }, signer: s.owner, expectedRevision: ackResponse.revision });
+    await expectRejected(differentUseID, "replay", now);
+  });
+
+  it("the inbox projection never changes the owner's stored revision or state root", async () => {
+    const now = BASE_NOW + 6_000;
+    const s = await setupPairedSession(now);
+    const requestID = uniqueID("request");
+    let revision = s.nextRevision;
+    await submitOperation(toRequest(buildOperation({ kind: "request", payload: requestPayload(s, requestID, now, now + 40_000), signer: s.owner, expectedRevision: revision++ })), now);
+
+    const before = await fetchInboxOperation(toRequest(inboxOp(s.owner, now)), now);
+    const after = await fetchInboxOperation(toRequest(inboxOp(s.owner, now)), now);
+    expect(after.revision).toBe(before.revision);
+    expect(before.stateRoot).toBeInstanceOf(Buffer);
+    expect(after.stateRoot).toBeInstanceOf(Buffer);
+    expect(after.stateRoot!.equals(before.stateRoot!)).toBe(true);
+
+    const { revision: storedRevision } = await readLedgerText(s.owner.identity.identityID);
+    expect(storedRevision).toBe(before.revision);
+  });
+
+  it("a purged terminal request's approval is no longer delivered in the owner's inbox", async () => {
+    const now = BASE_NOW + 7_000;
+    const s = await setupPairedSession(now);
+    const requestID = uniqueID("request");
+    let revision = s.nextRevision;
+    await submitOperation(toRequest(buildOperation({ kind: "request", payload: requestPayload(s, requestID, now, now + 40_000), signer: s.owner, expectedRevision: revision++ })), now);
+    const approvalID = uniqueID("approval");
+    const approval = approvalPayload(s, requestID, approvalID, "approved", 27, now);
+    await submitOperation(toRequest(buildOperation({ kind: "approval", payload: approval, signer: s.approver, expectedRevision: revision++ })), now);
+    // Use it (so the approval stays deliverable via the "has a recorded
+    // use" rule even once natural end below flips the request's status
+    // away from "approved"), then naturally end the session so the request
+    // becomes terminal (expiredAt is set) and purge-eligible.
+    await submitOperation(toRequest(buildOperation({ kind: "use", payload: { approval, requestID, useID: uniqueID("use"), consentGeneration: 2 }, signer: s.owner, expectedRevision: revision++ })), now);
+    const afterEnd = now + 100_001;
+    await submitOperation(toRequest(buildOperation({ kind: "natural_end", payload: { sessionID: s.sessionID, activeSetID: s.activeSetID }, signer: s.owner, expectedRevision: revision++ })), afterEnd);
+
+    const beforePurge = await fetchInboxOperation(toRequest(inboxOp(s.owner, afterEnd)), afterEnd);
+    expect(beforePurge.requests.find((r) => r.requestID === requestID)?.status).not.toBe("approved");
+    expect(beforePurge.approvals?.map((a) => a.approvalID)).toContain(approvalID);
+
+    // Push the request's terminal (expiredAt) timestamp back past the
+    // 30-day retention window, directly in storage, exactly as
+    // test/retention.test.ts does.
+    await patchLedger(s.owner.identity.identityID, (ledger) => {
+      const record = ledger.requests[requestID]!;
+      ledger.requests[requestID] = { ...record, expiredAt: afterEnd - 31 * DAY };
+    });
+
+    const summary = await purgeExpiredRecords(testPool(), 30, afterEnd);
+    expect(summary.purgedRequests).toBeGreaterThanOrEqual(1);
+    expect(summary.purgedApprovals).toBeGreaterThanOrEqual(1);
+
+    const afterPurge = await fetchInboxOperation(toRequest(inboxOp(s.owner, afterEnd)), afterEnd);
+    expect(afterPurge.requests.map((r) => r.requestID)).not.toContain(requestID);
+    expect(afterPurge.approvals?.map((a) => a.approvalID)).not.toContain(approvalID);
+  });
+
+  it("use is rejected once a newer session supersedes the one the approval was bound to", async () => {
+    const now = BASE_NOW + 8_000;
+    const s = await setupPairedSession(now);
+    const requestID = uniqueID("request");
+    let revision = s.nextRevision;
+    await submitOperation(toRequest(buildOperation({ kind: "request", payload: requestPayload(s, requestID, now, now + 40_000), signer: s.owner, expectedRevision: revision++ })), now);
+    const approval = approvalPayload(s, requestID, uniqueID("approval"), "approved", 28, now);
+    await submitOperation(toRequest(buildOperation({ kind: "approval", payload: approval, signer: s.approver, expectedRevision: revision++ })), now);
+
+    // Publish a new session -- becomes `currentSessionID` and immediately
+    // expires every outstanding request still bound to the old session.
+    const newSessionPayload = {
+      owner: encodeDeviceIdentityWire(s.owner.identity),
+      sessionID: uniqueID("session"),
+      activeSetID: uniqueID("activeset"),
+      startsAt: swiftDate(now),
+      endsAt: swiftDate(now + 100_000)
+    };
+    await submitOperation(toRequest(buildOperation({ kind: "session", payload: newSessionPayload, signer: s.owner, expectedRevision: revision++ })), now);
+
+    const useOp = buildOperation({ kind: "use", payload: { approval, requestID, useID: uniqueID("use"), consentGeneration: 2 }, signer: s.owner, expectedRevision: revision });
+    await expectRejected(useOp, "replay", now);
   });
 });

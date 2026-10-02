@@ -411,8 +411,17 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   record.expectedRevision == operation.expectedRevision else {
                 throw CompanionError.operationConflict
             }
+            // R5 Slice B2a review fix (P1-1): mirrors the TS relay's replay
+            // fix in service.ts -- return the *current* relay revision, not
+            // `record.revision` (the revision at the time this operation
+            // first committed). This prototype relay never populates
+            // `ownerIdentityID`/`stateRoot` on any response (see both
+            // returns in this method), so nothing anchors off it today, but
+            // the revision field itself should still describe "the ledger's
+            // revision as of this response" consistently between the fresh
+            // and replayed paths, matching the TS relay's contract.
             return try RelayResponse(operationID: operation.operationID,
-                                     revision: record.revision, result: record.response)
+                                     revision: revision, result: record.response)
         }
         if let expectedRevision = operation.expectedRevision, expectedRevision != revision {
             throw CompanionError.staleRevision(expected: expectedRevision, actual: revision)

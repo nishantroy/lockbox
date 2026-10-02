@@ -13,8 +13,9 @@ import Foundation
 /// apply.
 ///
 /// No I/O: every input is a value the caller already has (the inbox
-/// `Approval`, the local `TrustedRequest` copy, and a snapshot of the
-/// owner's own trusted pairing/consent cache for that approver).
+/// `Approval`, the local `TrustedRequest` copy, the device's own owner
+/// `DeviceIdentity`, and a snapshot of the owner's own trusted
+/// pairing/consent cache for that approver).
 public enum OwnerApprovalCheck {
     /// A snapshot of the owner's own trusted pairing/consent cache for one
     /// approver, exactly as `OwnerApprovalCheck.verify` needs it. The caller
@@ -23,10 +24,6 @@ public enum OwnerApprovalCheck {
     /// check itself, which is exactly what this type exists to validate
     /// against.
     public struct TrustedApprover: Sendable {
-        /// The local owner identity this approver is paired with. Checked
-        /// against `request.owner` so an approval cannot be accepted for a
-        /// request this device does not itself own.
-        public let ownerIdentityID: String
         public let approverIdentityID: String
         public let approverPublicKey: Data
         public let pairingID: String
@@ -40,9 +37,8 @@ public enum OwnerApprovalCheck {
         /// cache entry.
         public let isActive: Bool
 
-        public init(ownerIdentityID: String, approverIdentityID: String, approverPublicKey: Data,
+        public init(approverIdentityID: String, approverPublicKey: Data,
                     pairingID: String, pairEpoch: UInt64, consentGeneration: UInt64, isActive: Bool) {
-            self.ownerIdentityID = ownerIdentityID
             self.approverIdentityID = approverIdentityID
             self.approverPublicKey = approverPublicKey
             self.pairingID = pairingID
@@ -50,14 +46,53 @@ public enum OwnerApprovalCheck {
             self.consentGeneration = consentGeneration
             self.isActive = isActive
         }
+
+        /// Preferred constructor (R5 Slice B2a review fix, P2-1): derives
+        /// every field straight from the owner's own locally trusted
+        /// `Pairing` and `RelationshipConsent`, rather than requiring the
+        /// caller to hand-assemble (and keep in sync) the individual
+        /// identity/epoch/generation/activity fields themselves — the
+        /// out-of-sync case is exactly what lets a stale-cache bug slip past
+        /// `verify`. `isActive` is `pairing.state == .active` AND the
+        /// consent currently authorizes *both* `approveEarlyEnd` and
+        /// `receiveRequests` (bilateral, current generation — see
+        /// `RelationshipConsent.authorizes(_:)`). If `pairing` and `consent`
+        /// do not actually describe the same relationship (mismatched
+        /// pairing ID, epoch, owner or approver — which should never happen
+        /// for a caller reading both from the same local cache entry, but is
+        /// checked here rather than trusted), the result is `isActive:
+        /// false` rather than silently accepting whichever generation/epoch
+        /// `consent` happens to carry.
+        public init(pairing: Pairing, consent: RelationshipConsent) {
+            self.approverIdentityID = pairing.approver.identityID
+            self.approverPublicKey = pairing.approver.publicKey
+            self.pairingID = pairing.pairingID
+            self.pairEpoch = pairing.epoch
+            self.consentGeneration = consent.generation
+            let consentMatchesPairing = consent.pairingID == pairing.pairingID
+                && consent.pairEpoch == pairing.epoch
+                && consent.owner == pairing.owner
+                && consent.approver == pairing.approver
+            self.isActive = consentMatchesPairing && pairing.state == .active
+                && consent.authorizes(.approveEarlyEnd) && consent.authorizes(.receiveRequests)
+        }
     }
 
     /// Throws unless `approval` is exactly the approval the owner's own
     /// trusted-person cache would expect for `request`. Every failure throws
     /// before any signature work that could be influenced by attacker input,
     /// except `validateSignature()` itself, which is pure.
+    ///
+    /// - Parameter ownerIdentity: this device's own owner `DeviceIdentity`
+    ///   (the signer identity `useApproval` will sign with) — **not** a
+    ///   field carried inside `trustedApprover`. The owner identity is a
+    ///   single, already-available value at every call site (R5 Slice B2a
+    ///   review fix, P2-1); baking a copy of it into a per-approver snapshot
+    ///   instead would require every cache entry to be kept in sync with it
+    ///   for no benefit, and a stale or substituted copy there would be an
+    ///   easy way to defeat the very check this type exists to perform.
     public static func verify(approval: Approval, request: TrustedRequest,
-                              trustedApprover: TrustedApprover) throws {
+                              trustedApprover: TrustedApprover, ownerIdentity: DeviceIdentity) throws {
         // An unknown or revoked approver.
         guard trustedApprover.isActive else { throw CompanionError.revokedPairing }
         guard approval.approver.identityID == trustedApprover.approverIdentityID,
@@ -79,8 +114,10 @@ public enum OwnerApprovalCheck {
         guard approval.consentGeneration == trustedApprover.consentGeneration else {
             throw CompanionError.consentRequired
         }
-        // A request that isn't owned by this owner.
-        guard request.owner.identityID == trustedApprover.ownerIdentityID else {
+        // A request that isn't owned by this owner. Compares the full
+        // `DeviceIdentity` (identity ID, role and public key), not just the
+        // identity ID string.
+        guard request.owner == ownerIdentity else {
             throw CompanionError.unauthorized
         }
         // An approval for a different request, session or active set.
