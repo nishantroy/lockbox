@@ -171,7 +171,7 @@ Vercel deployment (needs the owner's account; the target is Hobby plus Neon), AP
   9. the owner revokes, and the helper sees the pairing as revoked
 
   **All steps passed.** The script was a throwaway in the parent's scratch directory and is not committed.
-- No physical-device, Vercel or Neon run has happened.
+- No physical-device run has happened. Vercel/Neon: see [Deployment](#deployment-2026-10-02).
 
 **Known gaps:**
 - Learning of `replace_pairing` (device replacement) is deferred to B2.
@@ -179,5 +179,33 @@ Vercel deployment (needs the owner's account; the target is Hobby plus Neon), AP
 - The sync `CompanionClient.fetchInbox` still requires `ownerIdentityID`, so it fails against the relay for a pure helper inbox. It is used only with the in-memory relay; the app uses the async client.
 - A consent that stays queued offline for more than 24h returns `expired` and must be re-signed. The UI should present this as "try again".
 - `CompanionCoordinator` has no unit tests of its own; its merge and anchor logic is tested in CompanionKit.
-- The Vercel runtime behaviour (named exports, rewrites, cron) has not been checked with `vercel dev` or a deployment.
+- `vercel dev` has not been used; the deployed runtime (named exports, `/v1` rewrites, cron registration) was checked on the real deployment instead (see below). The cron has not yet fired.
 - Postgres is pinned to `16.9-alpine`.
+
+## Deployment (2026-10-02)
+
+**Hosting:** a serverless host (a Vercel Hobby project).
+- **Production URL:** `https://relay.example.com`. Per-deployment URLs sit behind Vercel Authentication by default.
+- **Deploys:** CLI only (`cd relay && vercel deploy --prod`). The GitHub integration that `vercel link` connected automatically was disconnected, so pushes never deploy.
+- **Uploads:** `relay/.vercelignore` excludes `.env*` files and tests.
+
+**Database:** a managed Postgres (Neon, via the Vercel Marketplace).
+- `DATABASE_URL` is the pooled (`-pooler`) host.
+- The owner ran migrations 001–003 manually over `DATABASE_URL_UNPOOLED`.
+
+**Production environment:**
+- `PGPOOL_MAX=2`, `PGPOOL_IDLE_TIMEOUT_MS=5000`, `RETENTION_DAYS=30`.
+- `CRON_SECRET`: a random 32-byte hex value, marked sensitive in Vercel and not recorded anywhere else.
+
+**Deployed revision:** `r5-relay` at `74dbfca` (Slices A and B1, contract v1.1). B2a's owner-approval inbox change is **not** deployed yet.
+
+**Parent checks against production:**
+- `GET /v1/health` returns `200 {"ok":true}`.
+- `vercel crons ls` lists `/api/cron/retention-purge` at `0 9 * * *`.
+- The cron endpoint returns `401` with no bearer token or a wrong one.
+- An empty `POST /v1/operations` returns `400 {"error":"malformed"}`.
+- `tools/relay-smoke` (two throwaway in-memory identities, owner anchors enabled) passed all 17 steps: health, invite/accept, wrong then correct confirm, helper learns the pairing, bilateral consent in the anchored inbox, exact session plus early-end request, helper approval, duplicate approval rejected, owner sees the request approved, revoke seen by the helper.
+  - The Sonnet builder ran it once locally and once against production.
+  - The parent re-ran it against production.
+
+**Still open:** a two-phone device run, the first natural cron execution, and redeploying after B2a/B2c.
