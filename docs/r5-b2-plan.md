@@ -1,6 +1,6 @@
 # R5 Slice B2 — friend approval releases the exact session
 
-Status: **planned 2026-10-02; not started.** Builds on Slices A and B1 on `r5-relay` (see [R5 relay plan](r5-relay-plan.md)). Nothing here is deployed or device-tested.
+Status: **B2b merged on `r5-relay` 2026-10-02 (Opus high review approved after one fix round; root `swift test` 177 passed). B2a in review fixes; B2c not started.** Builds on Slices A and B1 on `r5-relay` (see [R5 relay plan](r5-relay-plan.md)). Nothing here is deployed or device-tested.
 
 ## Goal
 
@@ -104,13 +104,13 @@ No app, extension or CompanionKit code. Shared stays free of CompanionKit types,
 - `RuntimeReleasedOccurrence` gains optional `cause: RuntimeReleaseCause?` (`recovery | developer | friendApproval`) and optional `friendUseID: String?`.
 - Both are decoded with `decodeIfPresent`. Old markers decode as `nil`, which means unknown or legacy.
 - The marker is the durable exact-session terminal event R6 can later read. Make sure `pruneTerminalSessions` and the 64-marker cap keep the most recent markers.
-- Add `RuntimeOperation` cases `friendReleaseIntentRecorded`, `friendReleaseApplied`, `friendReleaseNoOp` (diagnostics only).
+- **As merged:** no new `RuntimeOperation` cases. That enum decodes strictly, so a new case would make an older app or monitor fail to decode the whole document after a downgrade. Friend-release diagnostics reuse `.policyClearAttempted`/`.policyCleared`/`.conflictRejected`, with the friend-release detail in `RuntimeDiagnostic.detail`.
 
 **4. Pure lifecycle functions in `RuntimeLifecycle`.** Each takes `now` explicitly.
-- `prepareFriendRelease(_ doc:, intent:, effectiveSessionIDs:, now:) -> PrepareOutcome`:
+- `prepareFriendRelease(_ doc:, intent:, at:) -> PrepareOutcome`. **As merged**, it takes no caller-supplied set; it computes the enforcement sessions itself after expiry:
   1. Runs `expireNaturalSessions`.
   2. Requires the session to exist, be in `.active`/`.recoveryPending` and be effective at `now`.
-  3. Requires `RuntimeActiveSet.id(for: effectiveSessionIDs) == intent.activeSetID`.
+  3. Requires the target to be in the live enforcement set and `RuntimeActiveSet.id(for: thatSet) == intent.activeSetID`. **As merged, apply rechecks this too.** If the set changed after prepare, apply returns `.noOp(.activeSetMismatch)` and clears the intent. The relay `use` may already be consumed by then, so B2c must treat this as terminal.
   4. Requires no different pending intent to exist.
   5. On success, stores the intent and returns `.recorded`. Otherwise it returns `.noOp(reason)` with **no** state change beyond natural expiry.
   6. Re-preparing the identical intent is idempotent and returns `.recorded`.
@@ -156,7 +156,7 @@ No app, extension or CompanionKit code. Shared stays free of CompanionKit types,
    2. Set `policyIntent` and record `.policyClearAttempted`.
    3. `commit()`.
    4. `applyEffectivePolicy`.
-   5. Clear the intent, record `.policyCleared` and `.friendReleaseApplied`, `commit()`.
+   5. Clear the intent, record `.policyCleared` with friend-release detail text, `commit()`. **Every `.noOp` outcome from apply is terminal**, including `.activeSetMismatch` ("Your locks changed; ask again") and `.alreadyEnded`; never retry it, because the intent is already cleared.
    6. `stopManualRouteIfOwned` only for the released session's route generation.
    7. Activate and re-register a pending configuration exactly as `confirmRecovery` does.
 6. **Replay on foreground:** if a `pendingFriendRelease` exists, retry `use` with the same `useID`, which is idempotent, then continue at step 5. If its session is no longer active, normalization has already dropped it.
