@@ -34,7 +34,7 @@ import {
 } from "./protocol.js";
 import type { SignedOperation } from "./protocol.js";
 import { canonicalBytes, digest, base64url, COMPANION_VERSION, pairingVerificationCode } from "./canonical.js";
-import type { Ledger } from "./ledger.js";
+import { normalizePendingAcceptance, type Ledger } from "./ledger.js";
 import { relayError, type RelayErrorCode } from "./errors.js";
 
 /**
@@ -203,14 +203,25 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
         fail("unauthorized");
       }
       if (ledger.pendingAcceptances[signed.acceptance.acceptanceID]) fail("replay");
-      ledger.pendingAcceptances[signed.acceptance.acceptanceID] = signed.acceptance;
+      // R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a"): retain the
+      // approver's signature alongside the acceptance, so the owner's inbox
+      // can later deliver a verifiable `SignedAcceptance` (see
+      // `fetchInboxOperation`) instead of a bare, unsigned payload.
+      ledger.pendingAcceptances[signed.acceptance.acceptanceID] = { acceptance: signed.acceptance, signature: signed.signature };
       return { kind: "acceptance", value: signed.acceptance };
     }
 
     case "confirm": {
       const signed = decodeSignedConfirmation(JSON.parse(payload.toString("utf8")));
       if (!identitiesEqual(signer, owner) || !identitiesEqual(signed.confirmation.owner, owner)) fail("unauthorized");
-      const acceptance = ledger.pendingAcceptances[signed.confirmation.acceptanceID];
+      // `normalizePendingAcceptance` reads either shape: a row this reducer
+      // wrote (the `{acceptance, signature}` wrapper) or a legacy row from
+      // before this change (the bare acceptance). Confirm never needed the
+      // approver's signature itself (only the owner's own confirmation
+      // signature, checked below), so this is unaffected by which shape is
+      // stored.
+      const pendingRaw = ledger.pendingAcceptances[signed.confirmation.acceptanceID];
+      const acceptance = pendingRaw ? normalizePendingAcceptance(pendingRaw).acceptance : undefined;
       const invite = acceptance ? ledger.invitations[acceptance.inviteID] : undefined;
       const expectedCode = acceptance
         ? pairingVerificationCode({
@@ -236,7 +247,8 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       }
       invite.consumedAt = now;
       for (const id of Object.keys(ledger.pendingAcceptances)) {
-        if (ledger.pendingAcceptances[id]?.inviteID === acceptance.inviteID) delete ledger.pendingAcceptances[id];
+        const entry = ledger.pendingAcceptances[id];
+        if (entry && normalizePendingAcceptance(entry).acceptance.inviteID === acceptance.inviteID) delete ledger.pendingAcceptances[id];
       }
       const pairingID = derivedPairingID(acceptance.inviteID, acceptance.approver.identityID);
       if (ledger.pairings[pairingID]) fail("replay");

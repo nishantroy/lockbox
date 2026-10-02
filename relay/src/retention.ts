@@ -39,7 +39,7 @@ import {
   GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
   type StoredOperation
 } from "./db.js";
-import { emptyLedger, type Marker } from "./ledger.js";
+import { emptyLedger, normalizePendingAcceptance, type Marker } from "./ledger.js";
 import { computeStateRoot } from "./service.js";
 import { digest } from "./canonical.js";
 import { randomUUID } from "node:crypto";
@@ -260,7 +260,8 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
       changed = true;
     }
   }
-  for (const [acceptanceID, acceptance] of Object.entries(ledger.pendingAcceptances)) {
+  for (const [acceptanceID, raw] of Object.entries(ledger.pendingAcceptances)) {
+    const { acceptance } = normalizePendingAcceptance(raw);
     const invite = ledger.invitations[acceptance.inviteID];
     const terminalAt = invite ? invite.invitation.payload.expiresAt : acceptance.issuedAt;
     if (terminalAt < cutoff) {

@@ -611,7 +611,18 @@ public struct SignedOperation: Codable, Hashable, Sendable {
 }
 
 public struct RelaySnapshot: Codable, Sendable {
-    static let currentSchemaVersion: UInt16 = 3
+    // Bumped to 4 for R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice
+    // P2a"): `pendingAcceptances` now retains the approver's `SignedAcceptance`
+    // (acceptance + signature) instead of the bare, unsigned
+    // `PairingAcceptance`, so a restored relay can still deliver a verifiable
+    // signature through its inbox. `validateSnapshot` below already requires
+    // an exact `schemaVersion` match (no cross-version decoding is supported
+    // for this reference/test-only snapshot format -- see
+    // docs/companion-security.md), and this type backs only the developer
+    // harness's in-process relay (never a field build's persisted data; see
+    // `PhoneLockbox/Companion/CompanionPrototype.swift`), so the bump carries
+    // no production migration risk.
+    static let currentSchemaVersion: UInt16 = 4
     let schemaVersion: UInt16
     let owner: DeviceIdentity
     let currentTime: Date
@@ -619,7 +630,7 @@ public struct RelaySnapshot: Codable, Sendable {
     let currentSessionID: String?
     let invitations: [Invitation]
     let usedInviteIDs: Set<String>
-    let pendingAcceptances: [PairingAcceptance]
+    let pendingAcceptances: [SignedAcceptance]
     let pairings: [Pairing]
     let sessions: [ActiveSession]
     let requests: [TrustedRequest]
@@ -632,7 +643,7 @@ public struct RelaySnapshot: Codable, Sendable {
 
     init(owner: DeviceIdentity, currentTime: Date, revision: UInt64, currentSessionID: String?,
          invitations: [Invitation], usedInviteIDs: Set<String>,
-         pendingAcceptances: [PairingAcceptance], pairings: [Pairing], sessions: [ActiveSession],
+         pendingAcceptances: [SignedAcceptance], pairings: [Pairing], sessions: [ActiveSession],
          requests: [TrustedRequest], approvals: [Approval], usedApprovalIDs: Set<String>,
          usedApprovalNonces: Set<String> = [], usedConsentNonces: Set<String> = [],
          relationshipConsents: [RelationshipConsent] = [],
@@ -663,7 +674,7 @@ public struct RelaySnapshot: Codable, Sendable {
         self.currentSessionID = try c.decodeIfPresent(String.self, forKey: .currentSessionID)
         self.invitations = try c.decode([Invitation].self, forKey: .invitations)
         self.usedInviteIDs = try c.decode(Set<String>.self, forKey: .usedInviteIDs)
-        self.pendingAcceptances = try c.decode([PairingAcceptance].self, forKey: .pendingAcceptances)
+        self.pendingAcceptances = try c.decode([SignedAcceptance].self, forKey: .pendingAcceptances)
         self.pairings = try c.decode([Pairing].self, forKey: .pairings)
         self.sessions = try c.decode([ActiveSession].self, forKey: .sessions)
         self.requests = try c.decode([TrustedRequest].self, forKey: .requests)
@@ -954,10 +965,25 @@ func operationIdentifier(kind: String, signer: DeviceIdentity, body: Data) -> St
     return String(base64URL(Data(digest)).prefix(32))
 }
 
-public struct SignedAcceptance: Codable, Sendable {
+public struct SignedAcceptance: Codable, Hashable, Sendable {
     public let acceptance: PairingAcceptance
     public let signature: Data
     public init(acceptance: PairingAcceptance, signature: Data) { self.acceptance = acceptance; self.signature = signature }
+
+    /// Verifies the approver's signature over `acceptance` (R5 pairing v2,
+    /// `docs/r5-pairing-v2-plan.md`'s "Slice P2a", item 1: "Each entry
+    /// includes the approver's signature material, so the owner can verify
+    /// it."). Mirrors `Invitation.validateSignature()`'s shape: structural
+    /// validation first, then the raw Ed25519 check against the canonical
+    /// signed-field bytes.
+    public func validateSignature() throws {
+        try acceptance.validate()
+        guard signature.count == 64,
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: acceptance.approver.publicKey),
+              key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).acceptance", fields: acceptance.signingFields())) else {
+            throw CompanionError.invalidSignature
+        }
+    }
 }
 public struct SignedConfirmation: Codable, Sendable {
     public let confirmation: PairingConfirmation

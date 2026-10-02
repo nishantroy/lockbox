@@ -31,10 +31,11 @@ import {
   decodeTrustedRequest,
   decodeApproval,
   decodeApprovalVerification,
+  type SignedAcceptance,
   MAX_RAW_BODY_BYTES
 } from "./protocol.js";
 import { relayError, RelayError } from "./errors.js";
-import { emptyLedger, type Ledger } from "./ledger.js";
+import { emptyLedger, normalizePendingAcceptance, type Ledger } from "./ledger.js";
 import { authorize, reduce, chargeRateLimit } from "./reducer.js";
 import {
   getPool,
@@ -364,11 +365,15 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   // `ownerAnchor`, an owner fetch always gets a (possibly empty) array, even
   // before any ledger row exists for them yet.
   let approvals: Approval[] | undefined;
+  // R5 pairing v2 (contract v1.3): same presence rule as `approvals` --
+  // populated only on an owner fetch of their own ledger.
+  let pendingAcceptances: SignedAcceptance[] | undefined;
   let maxRevision = 0;
   let ownerAnchor: { ownerIdentityID: string; stateRoot: Buffer } | undefined;
 
   if (operation.signer.role === "owner") {
     approvals = [];
+    pendingAcceptances = [];
     const row = await readOwnerLedger(pool, identityID);
     if (row) {
       maxRevision = row.revision;
@@ -398,6 +403,20 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
       }
       for (const record of Object.values(row.ledger.pairings)) pairings.push(record.pairing);
       for (const consent of Object.values(row.ledger.relationshipConsents)) consents.push(consent);
+      // R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a", item 1):
+      // every pending acceptance whose invite still exists, is unconsumed
+      // and has not expired. An entry with no retained signature -- only
+      // possible from a ledger row written before this change (see
+      // `normalizePendingAcceptance`) -- is skipped rather than delivered
+      // unverifiable; the relay must not fabricate a signature, and the
+      // owner device has no use for an acceptance it cannot verify.
+      for (const raw of Object.values(row.ledger.pendingAcceptances)) {
+        const { acceptance, signature } = normalizePendingAcceptance(raw);
+        if (!signature) continue;
+        const invite = row.ledger.invitations[acceptance.inviteID];
+        if (!invite || invite.consumedAt !== null || now >= invite.invitation.payload.expiresAt) continue;
+        pendingAcceptances.push({ acceptance, signature });
+      }
     }
   } else {
     // A pure helper/approver inbox spans every owner they are paired with;
@@ -424,6 +443,7 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   pairings.sort((a, b) => (a.pairingID < b.pairingID ? -1 : a.pairingID > b.pairingID ? 1 : 0));
   consents.sort((a, b) => (a.relationshipID < b.relationshipID ? -1 : a.relationshipID > b.relationshipID ? 1 : 0));
   approvals?.sort((a, b) => (a.approvalID < b.approvalID ? -1 : a.approvalID > b.approvalID ? 1 : 0));
+  pendingAcceptances?.sort((a, b) => (a.acceptance.acceptanceID < b.acceptance.acceptanceID ? -1 : a.acceptance.acceptanceID > b.acceptance.acceptanceID ? 1 : 0));
   return {
     ownerIdentityID: ownerAnchor?.ownerIdentityID,
     stateRoot: ownerAnchor?.stateRoot,
@@ -431,7 +451,8 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
     requests,
     pairings,
     consents,
-    approvals
+    approvals,
+    pendingAcceptances
   };
 }
 

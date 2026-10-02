@@ -374,6 +374,17 @@ export function verifySignedAcceptanceSignature(signed: SignedAcceptance): boole
   return ed25519Verify(bytes, signed.signature, signed.acceptance.approver.publicKey);
 }
 
+/**
+ * R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2a"): the wire shape
+ * for one `InboxResponse.pendingAcceptances` entry, matching Swift's
+ * `SignedAcceptance` (`{"acceptance": {...}, "signature": "<base64>"}`) so
+ * the owner device can verify the approver's signature locally
+ * (`OwnerAcceptanceCheck`) before calling `confirm` with no typed code.
+ */
+export function encodeSignedAcceptance(s: SignedAcceptance): object {
+  return { acceptance: encodePairingAcceptance(s.acceptance), signature: encodeData(s.signature) };
+}
+
 export function encodePairingAcceptance(a: PairingAcceptance): object {
   return {
     acceptanceID: a.acceptanceID,
@@ -1083,6 +1094,16 @@ export interface InboxResponse {
    * is `[Approval]?` and decodes its absence via `decodeIfPresent`.
    */
   approvals?: Approval[];
+  /**
+   * R5 pairing v2 (contract v1.3, additive): every `ledger.pendingAcceptances`
+   * entry whose invite exists, is unconsumed and has not expired. Same
+   * presence rule as `approvals`/`ownerIdentityID` -- populated only when the
+   * signer is fetching their own ledger as its owner, `undefined` (omitted
+   * from the wire body entirely, not `null`) on a helper/approver fetch.
+   * Swift's `InboxResponse.pendingAcceptances` is `[SignedAcceptance]?` and
+   * decodes its absence via `decodeIfPresent`.
+   */
+  pendingAcceptances?: SignedAcceptance[];
 }
 
 export function encodeInboxResponse(r: InboxResponse): object {
@@ -1098,6 +1119,9 @@ export function encodeInboxResponse(r: InboxResponse): object {
   }
   if (r.approvals !== undefined) {
     base.approvals = r.approvals.map(encodeApproval);
+  }
+  if (r.pendingAcceptances !== undefined) {
+    base.pendingAcceptances = r.pendingAcceptances.map(encodeSignedAcceptance);
   }
   return base;
 }
