@@ -111,6 +111,7 @@ private struct InviteSomeoneCard: View {
     @State private var nickname = ""
     @State private var isCreating = false
     @State private var isConfirming = false
+    @FocusState private var codeFieldFocused: Bool
 
     var body: some View {
         LockboxCard {
@@ -157,22 +158,46 @@ private struct InviteSomeoneCard: View {
                             #if os(iOS)
                             .keyboardType(.numberPad)
                             #endif
+                            .textContentType(.oneTimeCode)
+                            .focused($codeFieldFocused)
+                            .onChange(of: typedCode) { _, newValue in
+                                // Number pads have no return key, and pasted
+                                // codes may contain spaces: keep six digits.
+                                let digits = String(newValue.filter(\.isNumber).prefix(6))
+                                if digits != newValue { typedCode = digits }
+                            }
                             .accessibilityLabel("Six-digit code they read aloud")
                         Button(isConfirming ? "Confirming…" : "Confirm") {
-                            isConfirming = true
-                            Task {
-                                await companion.confirmAcceptance(acceptance, typedVerificationCode: typedCode, nickname: nickname)
-                                isConfirming = false
-                                if companion.pendingAcceptance == nil {
-                                    pastedAcceptance = ""; typedCode = ""; nickname = ""
-                                }
-                            }
+                            confirm(acceptance)
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                         .disabled(typedCode.count != 6 || isConfirming)
                         .accessibilityHint("Confirms this person as a trusted approver only if the typed code matches")
                     }
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            if codeFieldFocused {
+                                Button("Done") { codeFieldFocused = false }
+                                Spacer()
+                                Button("Confirm") { confirm(acceptance) }
+                                    .disabled(typedCode.count != 6 || isConfirming)
+                            }
+                        }
+                    }
                 }
+            }
+        }
+    }
+
+    private func confirm(_ acceptance: PairingAcceptance) {
+        guard typedCode.count == 6, !isConfirming else { return }
+        codeFieldFocused = false
+        isConfirming = true
+        Task {
+            await companion.confirmAcceptance(acceptance, typedVerificationCode: typedCode, nickname: nickname)
+            isConfirming = false
+            if companion.pendingAcceptance == nil {
+                pastedAcceptance = ""; typedCode = ""; nickname = ""
             }
         }
     }
