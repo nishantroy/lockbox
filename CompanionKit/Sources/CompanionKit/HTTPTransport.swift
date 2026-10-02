@@ -430,9 +430,7 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
 // MARK: - Async client
 
 /// Async sibling of `CompanionClient`, built against `AsyncCompanionTransport`
-/// instead of the synchronous `CompanionTransport`. It intentionally has no
-/// `useApproval` — Slice B1 never consumes an approval into the lock
-/// lifecycle; that is Slice B2, reviewed separately.
+/// instead of the synchronous `CompanionTransport`.
 public struct AsyncCompanionClient: Sendable {
     public let signer: DeviceSigner
     public let transport: any AsyncCompanionTransport
@@ -579,6 +577,28 @@ public struct AsyncCompanionClient: Sendable {
                                approver: unsigned.approver, decision: unsigned.decision, issuedAt: unsigned.issuedAt,
                                consentGeneration: unsigned.consentGeneration, nonce: unsigned.nonce, signature: signature)
         guard case let .approval(value) = try await submit("approval", approval) else { throw CompanionError.malformed("relay response") }
+        return value
+    }
+
+    /// Submits kind `"use"` exactly as the sync `CompanionClient.useApproval`
+    /// does, then verifies the relay's response before returning it: the
+    /// verification's `kind` is `.verification`, its `approval`/`useID` match
+    /// what was submitted, the approval's signature is valid, it binds this
+    /// request's `requestID`/`sessionID`/`activeSetID` and the approver's
+    /// exact pairing/epoch/consent-generation binding, and its decision is
+    /// `.approved` — see `validateUseVerification`. The same `useID` and
+    /// `approval` always derive the same operation ID (`operationIdentifier`
+    /// hashes the encoded `ApprovalUse` body), so a retry after an
+    /// interrupted app session replays the relay's stored idempotent receipt
+    /// rather than submitting a second "use". R5 Slice B2a.
+    public func useApproval(_ approval: Approval, request: TrustedRequest, useID: String) async throws -> ApprovalVerification {
+        guard signer.identity == request.owner else { throw CompanionError.unauthorized }
+        let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: useID,
+                              consentGeneration: approval.consentGeneration)
+        guard case let .verification(value) = try await submit("use", use) else {
+            throw CompanionError.malformed("relay response")
+        }
+        try validateUseVerification(value, approval: approval, request: request, useID: useID)
         return value
     }
 
