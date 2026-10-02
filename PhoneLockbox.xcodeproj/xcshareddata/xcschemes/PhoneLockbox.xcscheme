@@ -78,17 +78,6 @@
                ReferencedContainer = "container:PhoneLockbox.xcodeproj">
             </BuildableReference>
          </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "819A252A1AE7368129DFDE3D"
-               BuildableName = "PhoneLockboxUITests.xctest"
-               BlueprintName = "PhoneLockboxUITests"
-               ReferencedContainer = "container:PhoneLockbox.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

@@ -148,4 +148,22 @@ schemes:
     test:
       targets:
         - PhoneLockboxTests
+        # Review P2-4: PhoneLockboxUITests is deliberately NOT a test
+        # target of this scheme (tried `skipped: true` first — Xcode
+        # refused `-only-testing:PhoneLockboxUITests` against it with
+        # "isn't a member of the specified test plan or scheme", so a
+        # skipped testable does not actually make -only-testing override
+        # it in this Xcode version). It has its own PhoneLockboxUITests
+        # scheme below instead. A bare `xcodebuild test -scheme
+        # PhoneLockbox` therefore only ever runs PhoneLockboxTests and
+        # never needs a local relay. See docs/development.md for how to
+        # run the UI tests deliberately.
+
+  PhoneLockboxUITests:
+    build:
+      targets:
+        PhoneLockbox: all
+        PhoneLockboxUITests: [test]
+    test:
+      targets:
         - PhoneLockboxUITests

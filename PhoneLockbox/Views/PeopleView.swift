@@ -292,10 +292,12 @@ private struct AcceptInviteCard: View {
     }
 
     /// Consumes `companion.prefillInviteLink` (set by
-    /// `ContentView.onOpenURL` via `CompanionCoordinator.handleIncomingCompanionLink`)
-    /// into this card's own "Paste invite link" field, then clears it so it
-    /// is applied exactly once. Opening the link never itself accepts
-    /// anything — "Accept invite" still requires an explicit tap.
+    /// `ContentView.onOpenURL` via `CompanionCoordinator.handleIncomingCompanionLink`,
+    /// which already reports an undecodable payload via `lastError` —
+    /// review P2-2) into this card's own "Paste invite link" field, then
+    /// clears it so it is applied exactly once. Opening the link never
+    /// itself accepts anything — "Accept invite" still requires an
+    /// explicit tap.
     private func applyInviteLinkPrefillIfNeeded() {
         guard let link = companion.prefillInviteLink else { return }
         pastedInvite = link

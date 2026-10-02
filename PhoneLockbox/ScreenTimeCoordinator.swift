@@ -59,6 +59,26 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// A parsed quick action is only a request to present existing UI. It is
     /// consumed by the Lockbox tab and never represents an applied policy.
     @Published private(set) var pendingQuickAction: PendingQuickAction?
+    /// Review P1: set once by `ContentView` to switch to the Lockbox tab
+    /// and clear any stale recovery path. Called synchronously, inside
+    /// `processPendingQuickActionRoute`'s `present` callback, strictly
+    /// *before* `pendingQuickAction` is assigned (and therefore before
+    /// `objectWillChange` fires for it) — never reactively from an
+    /// `onChange` keyed to the same publish. That ordering is what this
+    /// exists to guarantee: a sibling `onChange(of: pendingQuickAction)` in
+    /// `LockboxTabView` consumes the new value by appending `.recovery` to
+    /// the nav path, and SwiftUI does not define which of two `onChange`
+    /// handlers observing the same change runs first — so a *reactive*
+    /// reset in `ContentView` could run after `LockboxTabView`'s and pop
+    /// the just-appended destination (or clear a path whose append hasn't
+    /// happened yet, leaving it to land on top of a tab ContentView is
+    /// about to leave). Firing before the publish removes the ordering
+    /// question entirely. This single closure, invoked from one place
+    /// inside the coordinator, is what reaches *every* path that can
+    /// present a route — `.task`, scene activation, `onOpenURL`, and the
+    /// delivery broker's own lease-deadline retry timer re-entering
+    /// `present` on its own with no `ContentView` call in between.
+    var onWillPresentQuickAction: (() -> Void)?
     @Published private(set) var pendingWindDownNotificationCount = 0
     @Published private(set) var windDownAuthorizationStatus = "Not requested"
     @Published private(set) var safetyAssistantAcknowledgements = SafetyAssistantAcknowledgements()
@@ -1090,6 +1110,9 @@ final class ScreenTimeCoordinator: ObservableObject {
                 guard let self else { return false }
                 let pending = PendingQuickAction(id: route.id, action: route.action, claim: claim)
                 guard self.quickActionDelivery.begin(pending.deliveryIdentity) else { return false }
+                // Review P1: strictly before the publish — see the doc
+                // comment on `onWillPresentQuickAction`.
+                self.onWillPresentQuickAction?()
                 self.pendingQuickAction = pending
                 return true
             },

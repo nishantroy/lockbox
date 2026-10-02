@@ -167,11 +167,20 @@ final class CompanionPairingUITests: XCTestCase {
         XCTAssertTrue(pastedInviteField.waitForExistence(timeout: 15), "People tab's 'Paste invite link' field never appeared after opening the invite link")
         attachScreenshot(named: "02-accept-card-prefilled-from-link")
 
+        // Review P2-5: confirm the routing itself, not just its effect.
+        XCTAssertTrue(app.tabBars.buttons["People"].isSelected, "the People tab should be selected after opening the invite link")
+
         let prefilled = (pastedInviteField.value as? String) ?? ""
         XCTAssertEqual(prefilled, link, "the accept card's pasted-invite field should be prefilled with exactly the opened link")
 
-        // Opening the link must never itself accept anything.
-        XCTAssertFalse(app.staticTexts["Your code"].exists, "opening an invite link must not auto-accept it")
+        // Opening the link must never itself accept anything. A single
+        // instantaneous check only proves it hadn't happened yet at that
+        // exact moment; give auto-accept a real ~3s window to show up
+        // before concluding it didn't, via an inverted predicate
+        // expectation (review P2-5) rather than one `exists` snapshot.
+        let autoAccepted = expectation(for: NSPredicate(format: "exists == true"), evaluatedWith: app.staticTexts["Your code"])
+        autoAccepted.isInverted = true
+        await fulfillment(of: [autoAccepted], timeout: 3)
     }
 
     /// Regression test for the real product bug this uncovered and fixed in
@@ -183,48 +192,51 @@ final class CompanionPairingUITests: XCTestCase {
     /// Lockbox tab's setup screen (with its tab bar button marked
     /// `Selected`) immediately after tapping "People". That meant a user
     /// returning to the app from Messages or Settings — or from opening a
-    /// companion invite link — was thrown back to Lockbox. The fix gates
-    /// that reset on `coordinator.pendingQuickAction` actually becoming
-    /// non-nil (only then is a route actually about to be presented).
-    /// This test simulates "returning from Messages": select People,
-    /// background the app, then foreground it again, and confirm People is
-    /// still selected.
+    /// companion invite link — was thrown back to Lockbox. A first fix
+    /// gated the reset on `coordinator.pendingQuickAction` becoming non-nil
+    /// via `ContentView`'s own `onChange` of that value; an Opus review
+    /// (P1) found that this raced `LockboxTabView`'s *separate* `onChange`
+    /// of the same value (which appends `.recovery` to the nav path) with
+    /// undefined ordering, risking an appended-then-immediately-cleared
+    /// destination that would leave `pendingQuickAction` permanently
+    /// wedged. The actual fix is `ScreenTimeCoordinator.onWillPresentQuickAction`,
+    /// a hook `ContentView` sets once and the coordinator calls strictly
+    /// *before* publishing `pendingQuickAction`, removing the ordering
+    /// question entirely. This test simulates "returning from Messages":
+    /// select People, background the app, then foreground it again, and
+    /// confirm People is still selected.
     func testPeopleTabStaysSelectedAcrossBackgroundForeground() throws {
+        guard navigateToPeopleTab() else {
+            XCTFail("'People' tab never became selected")
+            return
+        }
         let peopleTabButton = app.tabBars.buttons["People"]
-        XCTAssertTrue(peopleTabButton.waitForExistence(timeout: 15), "'People' tab button never appeared")
-        peopleTabButton.tap()
-        XCTAssertTrue(peopleTabButton.isSelected, "'People' tab did not become selected after tapping it")
 
         XCUIDevice.shared.press(.home)
-        let backgroundDeadline = Date().addingTimeInterval(5)
-        while app.state == .runningForeground, Date() < backgroundDeadline {
-            usleep(100_000)
-        }
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5), "app never reported .runningBackground after pressing Home")
 
         app.activate()
-        XCTAssertTrue(peopleTabButton.waitForExistence(timeout: 15), "'People' tab button never reappeared after foregrounding")
+        let stillSelected = expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: peopleTabButton)
+        let result = XCTWaiter().wait(for: [stillSelected], timeout: 15)
         attachScreenshot(named: "03-people-tab-stays-selected-after-foreground")
-        XCTAssertTrue(peopleTabButton.isSelected, "'People' tab was not still selected after backgrounding and foregrounding the app")
+        XCTAssertEqual(result, .completed, "'People' tab was not still selected after backgrounding and foregrounding the app")
     }
 
     // MARK: - Helpers
 
-    /// Taps the People tab and confirms it actually stuck, retrying if not.
-    /// Defensive only, now that `ContentView.swift`'s unconditional tab
-    /// reset on every `.active` transition is fixed (see
-    /// `testPeopleTabStaysSelectedAcrossBackgroundForeground` above) — the
-    /// other tests here do not depend on this helper's retry to pass.
+    /// Taps the People tab exactly once and waits, via a predicate
+    /// expectation, for it to actually become selected. Deliberately not a
+    /// retry loop (review P2-6): retrying a failed tap could mask a real
+    /// regression of the review-P1 tab-reset bug this is meant to catch —
+    /// see `testPeopleTabStaysSelectedAcrossBackgroundForeground`, which
+    /// exercises that regression directly.
     @discardableResult
     private func navigateToPeopleTab() -> Bool {
         let peopleTabButton = app.tabBars.buttons["People"]
-        let deadline = Date().addingTimeInterval(15)
-        while Date() < deadline {
-            peopleTabButton.tap()
-            if peopleTabButton.waitForExistence(timeout: 2), peopleTabButton.isSelected {
-                return true
-            }
-        }
-        return peopleTabButton.isSelected
+        guard peopleTabButton.waitForExistence(timeout: 15) else { return false }
+        peopleTabButton.tap()
+        let becameSelected = expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: peopleTabButton)
+        return XCTWaiter().wait(for: [becameSelected], timeout: 15) == .completed
     }
 
     private func localRelayURL() throws -> URL {

@@ -90,6 +90,12 @@ final class CompanionCoordinator: ObservableObject {
     /// Scheme for `Invitation.shareLink`/`.fromShareLink(_:)` (registered in
     /// `project.yml`'s `CFBundleURLTypes` alongside `phonelockbox`).
     static let companionLinkScheme = "phone-lockbox-companion"
+    /// Shown for any `phone-lockbox-companion://...` link this device
+    /// doesn't recognize (review P2-1), and for a recognized invite link
+    /// whose payload doesn't actually decode once looked at (review P2-2,
+    /// `AcceptInviteCard`). Same wording in both cases: "an invite link" is
+    /// the only kind of companion link a person can currently receive.
+    static let invalidInviteLinkMessage = "This invite link isn't valid."
     /// R5 Slice B2c developer gate. Defaults to **off**; see
     /// `docs/r5-b2-plan.md` ("Developer gate"). Persisted in the App Group
     /// suite (falls back to `false` when storage is unavailable, same as
@@ -441,19 +447,32 @@ final class CompanionCoordinator: ObservableObject {
 
     // MARK: - Invite / accept / confirm
 
-    /// Routes an incoming `phone-lockbox-companion://invite/...` link
-    /// (`Invitation.shareLink`'s format) to the People tab's "Paste invite
-    /// link" prefill. Called from `ContentView.onOpenURL`. Returns `true`
-    /// when the URL was a recognized companion invite link, so the caller
-    /// knows to switch to the People tab; returns `false` for anything else
-    /// (including a malformed/expired invite — `AcceptInviteCard` reports
-    /// that the same way it would for a hand-pasted invalid link, via
-    /// `decodeInvitation` returning `nil`). This never accepts anything by
-    /// itself; it only fills a text field.
+    /// Claims any `phone-lockbox-companion://...` link for companion
+    /// handling (review P2-1): the Quick Action parser must never see one of
+    /// these, valid or not, since the two schemes share a host app and a
+    /// malformed companion link must not silently fall through to Lockbox
+    /// navigation. Returns `true` for every URL with this scheme (so the
+    /// caller always switches to the People tab), `false` only when the
+    /// scheme doesn't match at all.
+    ///
+    /// A recognized `.../invite/...` link (`Invitation.shareLink`'s format)
+    /// fills the People tab's "Paste invite link" field — but only after
+    /// also confirming the payload itself actually decodes (signature,
+    /// expiry, shape); an undecodable payload reports the same
+    /// companion-specific `lastError` as an unrecognized host, rather than
+    /// prefilling something "Accept invite" can only silently refuse
+    /// (review P2-2: it's disabled whenever `decodeInvitation` fails, which
+    /// would otherwise leave no feedback at all). This never accepts
+    /// anything by itself — accepting still requires an explicit tap.
     @discardableResult
     func handleIncomingCompanionLink(_ url: URL) -> Bool {
-        guard url.scheme == Self.companionLinkScheme, url.host == "invite" else { return false }
+        guard url.scheme == Self.companionLinkScheme else { return false }
+        guard url.host == "invite", decodeInvitation(from: url.absoluteString) != nil else {
+            lastError = Self.invalidInviteLinkMessage
+            return true
+        }
         prefillInviteLink = url.absoluteString
+        lastError = nil
         return true
     }
 

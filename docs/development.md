@@ -37,7 +37,7 @@ Review new/untracked sources as well as `git diff`. Most app implementation rema
 
 ## Companion pairing UI test (`PhoneLockboxUITests`)
 
-`PhoneLockboxUITests` (XCUITest, in the `PhoneLockbox` scheme's test action alongside `PhoneLockboxTests`) drives the owner side of companion pairing in the simulator against a **local** relay, with a scripted in-process "friend" (a fresh, in-memory `CompanionKit` identity — see `tools/relay-smoke` for the pattern it mirrors). It needs a running local relay:
+`PhoneLockboxUITests` (XCUITest) drives the owner side of companion pairing in the simulator against a **local** relay, with a scripted in-process "friend" (a fresh, in-memory `CompanionKit` identity — see `tools/relay-smoke` for the pattern it mirrors). It needs a running local relay, so it is listed in the `PhoneLockbox` scheme's test action but marked `skipped = YES` there (review P2-4): a bare `xcodebuild test -scheme PhoneLockbox` (or Xcode's own Product > Test) runs only `PhoneLockboxTests` and never needs the relay. Run the UI tests deliberately with `-only-testing:PhoneLockboxUITests`, which overrides the scheme's skip:
 
 ```bash
 lsof -nP -iTCP:8002 -sTCP:LISTEN          # confirm the port is free first
@@ -60,7 +60,7 @@ xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox \
   test
 ```
 
-The app under test is launched with a `-relayBaseURL http://127.0.0.1:8002` argument (a standard Xcode launch-argument pair, read once at launch by `CompanionCoordinator`'s DEBUG-only `relayBaseURLLaunchArgumentOverride()`), so the test needs no interaction with the Developer settings screen to point the app at the local relay. Stop the relay dev server (`Ctrl-C`, or kill the background process) once the run finishes — it is local-only infrastructure, not something to leave running.
+The app under test is launched with two DEBUG-only launch arguments, read once at launch by `CompanionCoordinator`: `-relayBaseURL http://127.0.0.1:8002` (so the test needs no interaction with the Developer settings screen to point the app at the local relay) and `-resetCompanionStateForUITests` (clears this app's companion Keychain identity, App Group keys and rollback anchors before the coordinator initializes, so each run is independent of whatever a previous — possibly interrupted — run, or another process sharing the same local relay's Postgres, left behind; otherwise a genuine relay-state regression is correctly, but unhelpfully for a test, reported as `CompanionError.relayRollback` against a stale identity's leftover anchor). Stop the relay dev server (`Ctrl-C`, or kill the background process) once the run finishes — it is local-only infrastructure, not something to leave running.
 
 The tests attach `XCTAttachment` screenshots (`lifetime: .keepAlways`) at key steps. Export them from the result bundle:
 
