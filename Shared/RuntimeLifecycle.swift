@@ -2,9 +2,17 @@ import Foundation
 
 /// Small, side-effect-free state mutations shared by app and monitor adapters.
 public enum RuntimeLifecycle {
+    /// The exact message `release` throws when nothing in `sessionIDs` was
+    /// eligible to release (every targeted session already naturally ended).
+    /// Module-internal so `applyFriendRelease` (RuntimeFriendRelease.swift)
+    /// can narrow its catch to this one documented case without duplicating,
+    /// or silently drifting from, the literal.
+    static let releaseAlreadyEndedMessage = "The current lock has already ended."
+
     /// Keep the active model bounded without dropping a durable recovery
-    /// target or a current scheduled release marker. Terminal history may
-    /// exceed the normal target when those identities must be retained.
+    /// target, a current scheduled release marker, or a session a pending
+    /// friend-release intent still references. Terminal history may exceed
+    /// the normal target when those identities must be retained.
     public static func pruneTerminalSessions(
         _ document: inout RuntimeStoreDocument,
         keeping limit: Int = 32,
@@ -14,6 +22,13 @@ public enum RuntimeLifecycle {
         var protectedIDs = Set(document.recoveryCommitment?.sessionIDs ?? [])
         if let manualRoute = document.manualRoute {
             protectedIDs.insert(manualRoute.sessionID)
+        }
+        if let pendingFriendRelease = document.pendingFriendRelease {
+            // `validate()` requires the intent's session to still exist.
+            // Protecting it here means a release elsewhere in the document
+            // (which also calls this) can never prune it out from under a
+            // pending intent that hasn't yet been normalized away.
+            protectedIDs.insert(pendingFriendRelease.sessionID)
         }
         protectedIDs.formUnion(document.releasedOccurrences.compactMap { occurrence in
             occurrence.origin == .scheduled && occurrence.end > date ? occurrence.sessionID : nil
@@ -289,7 +304,29 @@ public enum RuntimeLifecycle {
         if normalizeRecoveryCommitment(&document, at: date) {
             changed = true
         }
+        if normalizePendingFriendRelease(&document, at: date) {
+            changed = true
+        }
         return changed
+    }
+
+    /// Drops a persisted friend-release intent once its target session is no
+    /// longer `.active`/`.recoveryPending` at `date` — natural end, a
+    /// different release, or an unknown session all count the same way.
+    /// Pure; callers hold the only mutable reference, so no clock is read
+    /// here beyond the `date` already supplied by `expireNaturalSessions`.
+    @discardableResult
+    private static func normalizePendingFriendRelease(
+        _ document: inout RuntimeStoreDocument,
+        at date: Date
+    ) -> Bool {
+        guard let pending = document.pendingFriendRelease else { return false }
+        guard let session = document.sessions.first(where: { $0.id == pending.sessionID }),
+              session.isEffective(at: date) else {
+            document.pendingFriendRelease = nil
+            return true
+        }
+        return false
     }
 
     @discardableResult
@@ -324,11 +361,16 @@ public enum RuntimeLifecycle {
         return true
     }
 
+    /// `cause`/`friendUseID` are attribution metadata only; they never change
+    /// which sessions are eligible or how many are released. Existing
+    /// callers that omit them keep writing markers with a nil cause.
     public static func release(
         _ document: inout RuntimeStoreDocument,
         sessionIDs: Set<UUID>,
         at date: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        cause: RuntimeReleaseCause? = nil,
+        friendUseID: String? = nil
     ) throws {
         guard !sessionIDs.isEmpty, date.timeIntervalSinceReferenceDate.isFinite else {
             throw RuntimeValidationError.invalidConfiguration("No current lock was selected for recovery.")
@@ -344,7 +386,7 @@ public enum RuntimeLifecycle {
             document.sessions[index].state = .released
             released.insert(document.sessions[index].id)
         }
-        guard !released.isEmpty else { throw RuntimeValidationError.invalidConfiguration("The current lock has already ended.") }
+        guard !released.isEmpty else { throw RuntimeValidationError.invalidConfiguration(releaseAlreadyEndedMessage) }
         for session in document.sessions where released.contains(session.id) {
             if !document.releasedOccurrences.contains(where: { $0.sessionID == session.id }) {
                 document.releasedOccurrences.append(RuntimeReleasedOccurrence(
@@ -352,7 +394,9 @@ public enum RuntimeLifecycle {
                     origin: session.origin,
                     start: session.start,
                     end: session.end,
-                    releasedAt: date
+                    releasedAt: date,
+                    cause: cause,
+                    friendUseID: friendUseID
                 ))
             }
             if session.origin == .scheduled {

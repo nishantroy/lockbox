@@ -157,6 +157,30 @@ final class RuntimeContractsTests: XCTestCase {
         XCTAssertNoThrow(try decoded.validate())
     }
 
+    /// R5 Slice B2b hard requirement: a hand-written schema-2 document with
+    /// none of the new friend-release keys must still decode, with the new
+    /// field reading as nil.
+    func testHandWrittenSchemaTwoDocumentWithoutFriendReleaseKeysDecodes() throws {
+        let json = """
+        {
+          "schemaVersion": 2,
+          "recurringEnabledIntent": false,
+          "testLockActive": false,
+          "sessions": [],
+          "releasedOccurrences": [],
+          "suppressedOccurrenceKeys": [],
+          "manualRegistrationIntent": false,
+          "manualRegistrationActive": false,
+          "legacyRegistrationNeedsReview": false,
+          "operationStatus": {},
+          "diagnostics": []
+        }
+        """
+        let decoded = try JSONDecoder().decode(RuntimeStoreDocument.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.pendingFriendRelease)
+        XCTAssertNoThrow(try decoded.validate())
+    }
+
     func testBlockAndAllowPlansAreExplicit() throws {
         let selected = RuntimeSelectionSummary(applicationCount: 2, categoryCount: 1, webDomainCount: 1)
         let block = try RuntimePolicyPlan.make(mode: .blockSelected, selection: selected)

@@ -683,6 +683,14 @@ public struct RuntimeSession: Codable, Equatable, Sendable {
     }
 }
 
+/// The mechanism that released a session. This is diagnostic/attribution
+/// metadata only; it never changes release eligibility or ordering.
+public enum RuntimeReleaseCause: String, Codable, Sendable {
+    case recovery
+    case developer
+    case friendApproval
+}
+
 /// Terminal identity retained to suppress a late or duplicate start callback.
 public struct RuntimeReleasedOccurrence: Codable, Equatable, Sendable {
     public let sessionID: UUID
@@ -690,13 +698,32 @@ public struct RuntimeReleasedOccurrence: Codable, Equatable, Sendable {
     public let start: Date
     public let end: Date
     public let releasedAt: Date
+    /// Nil for a marker written before this field existed, or by a release
+    /// path that does not yet attribute a cause. Nil means "unknown or
+    /// legacy," not "no cause." Swift's synthesized `Decodable` decodes a
+    /// missing key as nil for an `Optional` property, so pre-R5 markers
+    /// decode unchanged.
+    public let cause: RuntimeReleaseCause?
+    /// The companion `use` identifier that authorized a `.friendApproval`
+    /// release. Nil for every other cause.
+    public let friendUseID: String?
 
-    public init(sessionID: UUID, origin: RuntimeSessionOrigin, start: Date, end: Date, releasedAt: Date) {
+    public init(
+        sessionID: UUID,
+        origin: RuntimeSessionOrigin,
+        start: Date,
+        end: Date,
+        releasedAt: Date,
+        cause: RuntimeReleaseCause? = nil,
+        friendUseID: String? = nil
+    ) {
         self.sessionID = sessionID
         self.origin = origin
         self.start = start
         self.end = end
         self.releasedAt = releasedAt
+        self.cause = cause
+        self.friendUseID = friendUseID
     }
 
     public func validate() throws {
@@ -915,6 +942,16 @@ public enum RuntimeOperation: String, Codable, Sendable {
     case conflictRejected
     case legacyMigration
     case emergencyReset
+    // Intentionally no dedicated friend-release cases (R5 Slice B2): this
+    // enum decodes strictly (an unrecognized raw value fails the whole
+    // `RuntimeDiagnostic`/`RuntimeStoreDocument` decode), so adding a case
+    // here would make a document written by a newer app undecodable by an
+    // older app or monitor extension during a staged rollout. The
+    // friend-release lifecycle instead reuses the closest existing case for
+    // each diagnostic (for example `.policyClearAttempted`/`.policyCleared`
+    // around the apply transaction, `.conflictRejected` for a no-op) and
+    // carries the specific friend-release detail — which step, which
+    // `useID`, which `NoOpReason` — in `RuntimeDiagnostic.detail`.
 }
 
 public struct RuntimeDiagnostic: Codable, Equatable, Sendable {
@@ -954,6 +991,55 @@ public struct RuntimeOperationStatus: Codable, Equatable, Sendable {
     public init() {}
 }
 
+/// A durable, at-most-one intent to release exactly one session once a
+/// trusted friend's relay `use` has been submitted and verified. Persisted so
+/// a crash between recording the intent and applying the release can be
+/// replayed safely. Fields are plain strings/UUIDs: Shared never imports
+/// CompanionKit, so the signed `Approval` payload itself never lives here —
+/// only the identifiers needed to find it again and prove the replay is the
+/// same use.
+public struct RuntimeFriendReleaseIntent: Codable, Equatable, Sendable {
+    public let sessionID: UUID
+    /// The companion active-set digest (`RuntimeActiveSet.id(for:)`) that was
+    /// current when the friend approved. Prepare fails if this no longer
+    /// matches the live enforcement set.
+    public let activeSetID: String
+    public let requestID: String
+    public let approvalID: String
+    public let useID: String
+    public let approverIdentityID: String
+    public let createdAt: Date
+
+    public init(
+        sessionID: UUID,
+        activeSetID: String,
+        requestID: String,
+        approvalID: String,
+        useID: String,
+        approverIdentityID: String,
+        createdAt: Date
+    ) {
+        self.sessionID = sessionID
+        self.activeSetID = activeSetID
+        self.requestID = requestID
+        self.approvalID = approvalID
+        self.useID = useID
+        self.approverIdentityID = approverIdentityID
+        self.createdAt = createdAt
+    }
+
+    public func validate() throws {
+        guard !activeSetID.isEmpty,
+              !requestID.isEmpty,
+              !approvalID.isEmpty,
+              !useID.isEmpty,
+              !approverIdentityID.isEmpty,
+              createdAt.timeIntervalSinceReferenceDate.isFinite else {
+            throw RuntimeValidationError.corruptSharedData
+        }
+    }
+}
+
 public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
     public static let currentSchema = 2
     public static let maximumDiagnostics = 32
@@ -988,6 +1074,12 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
     /// Fixed-delay recovery target persisted in the same runtime transaction as
     /// session state. It is decoded by RecoveryCommitment's exact validator.
     public var recoveryCommitment: RecoveryCommitment?
+    /// At most one durable friend-release intent (R5 Slice B2). Optional and
+    /// additive: a schema-2 document written before this field existed
+    /// decodes it as nil via `decodeIfPresent`, with no schema bump.
+    /// Normalization (inside `RuntimeLifecycle.expireNaturalSessions`) drops
+    /// it once its target session is no longer `.active`/`.recoveryPending`.
+    public var pendingFriendRelease: RuntimeFriendReleaseIntent?
     /// Manual DeviceActivity registration is separate from the repeating daily
     /// schedule and is never considered successful until the OS accepts it.
     public var manualRegistrationIntent: Bool
@@ -1016,6 +1108,7 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
         suppressedOccurrenceKeys = []
         scheduledActivationFence = nil
         recoveryCommitment = nil
+        pendingFriendRelease = nil
         manualRegistrationIntent = false
         manualRegistrationActive = false
         manualRoute = nil
@@ -1025,7 +1118,7 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, legacyMigrationCompleted, configuration, pendingConfiguration, draft, recurringEnabledIntent, activeOwner, policyIntent, testLockActive, sessions, releasedOccurrences, suppressedOccurrenceKeys, scheduledActivationFence, recoveryCommitment, manualRegistrationIntent, manualRegistrationActive, manualRoute, legacyRegistrationNeedsReview, operationStatus, diagnostics
+        case schemaVersion, legacyMigrationCompleted, configuration, pendingConfiguration, draft, recurringEnabledIntent, activeOwner, policyIntent, testLockActive, sessions, releasedOccurrences, suppressedOccurrenceKeys, scheduledActivationFence, recoveryCommitment, pendingFriendRelease, manualRegistrationIntent, manualRegistrationActive, manualRoute, legacyRegistrationNeedsReview, operationStatus, diagnostics
     }
 
     public init(from decoder: Decoder) throws {
@@ -1048,6 +1141,7 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
         suppressedOccurrenceKeys = try container.decodeIfPresent(Set<String>.self, forKey: .suppressedOccurrenceKeys) ?? []
         scheduledActivationFence = try container.decodeIfPresent(RuntimeScheduledActivationFence.self, forKey: .scheduledActivationFence)
         recoveryCommitment = try container.decodeIfPresent(RecoveryCommitment.self, forKey: .recoveryCommitment)
+        pendingFriendRelease = try container.decodeIfPresent(RuntimeFriendReleaseIntent.self, forKey: .pendingFriendRelease)
         manualRegistrationIntent = try container.decodeIfPresent(Bool.self, forKey: .manualRegistrationIntent) ?? false
         manualRegistrationActive = try container.decodeIfPresent(Bool.self, forKey: .manualRegistrationActive) ?? false
         manualRoute = try container.decodeIfPresent(RuntimeManualRouteBinding.self, forKey: .manualRoute)
@@ -1106,6 +1200,18 @@ public struct RuntimeStoreDocument: Codable, Equatable, Sendable {
         for session in sessions {
             try session.validate()
             guard ids.insert(session.id).inserted, keys.insert(session.occurrenceKey).inserted else {
+                throw RuntimeValidationError.corruptSharedData
+            }
+        }
+        if let pendingFriendRelease {
+            try pendingFriendRelease.validate()
+            // Only existence is required here, deliberately weaker than
+            // "currently active/recoveryPending": a session can naturally
+            // expire between a durable write and the next decode, and that
+            // staleness is cleared by normalization in
+            // `RuntimeLifecycle.expireNaturalSessions`, not by this decode
+            // gate. A reference to no known session at all is corrupt.
+            guard ids.contains(pendingFriendRelease.sessionID) else {
                 throw RuntimeValidationError.corruptSharedData
             }
         }
