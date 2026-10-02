@@ -665,6 +665,21 @@ final class CompanionCoordinator: ObservableObject {
 
     func acceptInvite(_ invitation: Invitation) async {
         guard isAvailable else { return }
+        #if DEBUG
+        // Owner-review follow-up: a parent run of
+        // `testOpeningScriptedInviteLinkShowsIncomingInvitePromptThenWaitingState`
+        // saw the incoming-invite prompt sit unchanged for 30s after
+        // tapping Accept — no error, no waiting state. Every code path in
+        // this method already gives visible feedback (the caller's
+        // `isAccepting` flag, then either `lastError` or clearing
+        // `incomingInvite`), so a silently-stuck method body never matched
+        // the evidence; a synthesized tap that never actually reached this
+        // call was the only self-consistent explanation (see
+        // `docs/r5-pairing-v2-plan.md`'s "Investigation" note). This entry
+        // log closes that ambiguity for any future recurrence: if it never
+        // appears, the tap was lost before `acceptInvite` ever ran.
+        print("[CompanionCoordinator] acceptInvite starting for inviteID=\(invitation.payload.inviteID)")
+        #endif
         do {
             let identity = try ensureIdentity(role: .trustedApprover)
             let client = makeClient(signer: try signer(for: identity))
@@ -683,6 +698,9 @@ final class CompanionCoordinator: ObservableObject {
             pendingAcceptances.append(record)
             savePendingAcceptances()
             lastError = nil; needsRepair = false
+            #if DEBUG
+            print("[CompanionCoordinator] acceptInvite succeeded for inviteID=\(invitation.payload.inviteID)")
+            #endif
         } catch { fail(error) }
     }
 
