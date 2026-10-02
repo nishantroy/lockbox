@@ -257,10 +257,10 @@ private struct DeveloperToolsSection: View {
                         .onAppear { relayURLDraft = companion.relayBaseURLString }
                         .onSubmit { applyRelayURL() }
                         .accessibilityLabel("Companion relay address")
-                        .accessibilityHint("Defaults to the local relay at 127.0.0.1 port 8002")
+                        .accessibilityHint("Defaults to the prototype relay")
                     Button("Save relay address") { applyRelayURL() }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                    Text("Prototype — local relay only. On a device, set this to your Mac's LAN address so the People tab can reach it.")
+                    Text("Defaults to the prototype relay. Change it only to test a local relay (http://127.0.0.1:8002 or your Mac's LAN address).")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                     Button("Reset relay anchors", role: .destructive) {

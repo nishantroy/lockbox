@@ -15,7 +15,7 @@
 - `Shared/SafetyAssistant.swift` and `PhoneLockbox/Views/SafetyAssistantView.swift`: local privacy-minimal safety review.
 - `CoreTests`, `RuntimeTests` and `PhoneLockboxTests`: pure core/runtime and iOS integration tests.
 
-Current deployment target: iOS 17, Swift 6. Build 17 (from `r5-relay`, installed 2026-10-02) is the latest installed QA candidate; it adds the developer-gated R5 friend-approval release (B2) on top of build 16's app icon and People tab. The deployed relay is `https://relay.example.com` (set it in Settings → Developer). Its reviewed source integrations have not yet received focused behavioral/device acceptance. Actual oldest-OS runtime/API compatibility has not been validated. Build machine: Xcode 26.6 / iPhoneOS SDK 26.5. No backend, HTTP listener, dependency port or signing secret is needed in the repository.
+Current deployment target: iOS 17, Swift 6. Build 18 (from `r5-relay`, installed 2026-10-02) is the latest installed QA candidate. It contains build 17's developer-gated R5 friend-approval release (B2), and it defaults the companion relay to the deployed `https://relay.example.com`; a stored legacy `http://127.0.0.1:8002` value is treated as the default. Override it in Settings → Developer only for local relay work. Its reviewed source integrations have not yet received focused behavioral/device acceptance. Actual oldest-OS runtime/API compatibility has not been validated. Build machine: Xcode 26.6 / iPhoneOS SDK 26.5. No backend, HTTP listener, dependency port or signing secret is needed in the repository.
 
 Development signing uses the paid team already specified in `project.yml`. App Group: `group.com.phone-lockbox`. App bundle: `com.phone-lockbox.app`; three extension identifiers are specified in YAML. Do not change identifiers casually—this can invalidate the device test baseline and storage/provisioning assumptions.
 
@@ -57,7 +57,7 @@ xcrun devicectl device process launch --device '<CoreDevice-ID>' com.phone-lockb
 
 Check each exit status. Installation can succeed while launch fails because the phone is locked; report those separately. A transient wireless timeout is not a compiler/signing defect. No new deployment is needed for documentation-only changes. Never reinstall mid scheduled-release experiment.
 
-Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the revision alongside it. Build 17 installed on 2026-10-02 (generic-iOS build, then devicectl install); launch failed only because the phone was locked; do not convert that delivery result into feature or reliability acceptance.
+Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the revision alongside it. Build 18 installed and launched on 2026-10-02 (generic-iOS build, then devicectl install); also installed on the iPhone 17 simulator to act as the friend device; do not convert that delivery result into feature or reliability acceptance.
 
 ## Review and continuation
 

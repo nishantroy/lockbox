@@ -82,7 +82,10 @@ final class CompanionCoordinator: ObservableObject {
     private static let ownerIdentityDefaultsKey = "com.phone-lockbox.companion.identity.owner.v1"
     private static let approverIdentityDefaultsKey = "com.phone-lockbox.companion.identity.approver.v1"
     private static let relayBaseURLDefaultsKey = "com.phone-lockbox.companion.relayBaseURL.v1"
-    static let defaultRelayBaseURLString = "http://127.0.0.1:8002"
+    static let defaultRelayBaseURLString = "https://relay.example.com"
+    /// Builds 16–17 defaulted to the local development relay. A stored value
+    /// equal to it is treated as "never customised" and follows the default.
+    static let legacyLocalRelayBaseURLString = "http://127.0.0.1:8002"
     private static let acceptanceLinkPrefix = "PLBX-ACCEPT:"
     /// R5 Slice B2c developer gate. Defaults to **off**; see
     /// `docs/r5-b2-plan.md` ("Developer gate"). Persisted in the App Group
@@ -120,8 +123,8 @@ final class CompanionCoordinator: ObservableObject {
     /// the relay's own `use` check are the actual authorities.
     @Published private(set) var approvalsByRequestID: [String: Approval] = [:]
 
-    /// Developer-only setting. Defaults to the local relay in
-    /// `docs/r5-relay-plan.md`; on a device, set it to the Mac's LAN address.
+    /// Developer-only setting. Defaults to the deployed prototype relay
+    /// (`docs/r5-relay-plan.md`, Deployment); override it for local relay work.
     @Published var relayBaseURLString: String {
         didSet { sharedDefaults?.set(relayBaseURLString, forKey: Self.relayBaseURLDefaultsKey) }
     }
@@ -170,7 +173,8 @@ final class CompanionCoordinator: ObservableObject {
         self.anchorStore = resolvedDefaults.map { UserDefaultsRollbackAnchorStore(defaults: $0) }
         self.makeSession = makeSession
         if let resolvedDefaults {
-            self.relayBaseURLString = resolvedDefaults.string(forKey: Self.relayBaseURLDefaultsKey) ?? Self.defaultRelayBaseURLString
+            let stored = resolvedDefaults.string(forKey: Self.relayBaseURLDefaultsKey)
+            self.relayBaseURLString = (stored == nil || stored == Self.legacyLocalRelayBaseURLString) ? Self.defaultRelayBaseURLString : stored!
             self.friendApprovalCanEndLocksEnabled = resolvedDefaults.object(forKey: Self.friendApprovalGateDefaultsKey) as? Bool ?? false
             self.lastError = nil
         } else {
@@ -327,7 +331,7 @@ final class CompanionCoordinator: ObservableObject {
     private static func describe(_ error: Error) -> String {
         switch error {
         case CompanionTransportError.unavailable, CompanionTransportError.timedOut:
-            return "Couldn't reach the local relay. Check the Developer relay address and that it's running."
+            return "Couldn't reach the relay. Check your connection and try again."
         case CompanionTransportError.malformedResponse:
             return "The relay sent back something this prototype couldn't read."
         case CompanionTransportError.server(let inner):

@@ -75,12 +75,12 @@ private struct PrototypeLabelCard: View {
             HStack(spacing: 10) {
                 Image(systemName: "network.slash")
                     .foregroundStyle(.orange)
-                Text("Prototype — local relay")
+                Text("Prototype")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Prototype, using a local relay only")
+            .accessibilityLabel("Prototype feature")
         }
     }
 }
