@@ -1073,6 +1073,16 @@ export interface InboxResponse {
   pairings: Pairing[];
   /** The current consent record (with its generation) for each pairing in `pairings`. */
   consents: RelationshipConsent[];
+  /**
+   * R5 Slice B2a (contract v1.2, additive): the relay-stored accepted
+   * `Approval` for each request in `requests` whose status is `approved`, or
+   * that has a recorded use. Same presence rule as `ownerIdentityID`/
+   * `stateRoot` -- populated only when the signer is fetching their own
+   * ledger as its owner, `undefined` (omitted from the wire body entirely,
+   * not `null`) on a helper/approver fetch. Swift's `InboxResponse.approvals`
+   * is `[Approval]?` and decodes its absence via `decodeIfPresent`.
+   */
+  approvals?: Approval[];
 }
 
 export function encodeInboxResponse(r: InboxResponse): object {
@@ -1085,6 +1095,9 @@ export function encodeInboxResponse(r: InboxResponse): object {
   if (r.ownerIdentityID !== undefined && r.stateRoot !== undefined) {
     base.ownerIdentityID = r.ownerIdentityID;
     base.stateRoot = encodeData(r.stateRoot);
+  }
+  if (r.approvals !== undefined) {
+    base.approvals = r.approvals.map(encodeApproval);
   }
   return base;
 }

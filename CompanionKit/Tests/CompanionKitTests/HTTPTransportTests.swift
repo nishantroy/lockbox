@@ -75,6 +75,16 @@ private func encodedRelayResponse(operationID: String, revision: UInt64, ownerId
     return try encoder.encode(response)
 }
 
+/// R5 Slice B2a: a `.verification` `RelayResponse`, for `useApproval` tests.
+private func encodedVerificationResponse(operationID: String, revision: UInt64,
+                                         verification: ApprovalVerification,
+                                         ownerIdentityID: String? = nil, stateRoot: Data? = nil) throws -> Data {
+    let response = try RelayResponse(operationID: operationID, revision: revision, result: .verification(verification),
+                                     ownerIdentityID: ownerIdentityID, stateRoot: stateRoot)
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+    return try encoder.encode(response)
+}
+
 private let fixedTime = Date(timeIntervalSince1970: 1_700_000_000)
 private let testBaseURL = URL(string: "http://127.0.0.1:8002")!
 
@@ -194,6 +204,220 @@ final class HTTPTransportTests: XCTestCase {
         XCTAssertNil(response.ownerIdentityID)
         XCTAssertEqual(response.pairings, [pairing])
         XCTAssertEqual(response.consents?.first?.generation, 2)
+    }
+
+    // MARK: - R5 Slice B2a: AsyncCompanionClient.useApproval
+
+    private func makeHTTPUseFixture() throws -> (owner: DeviceSigner, approver: DeviceSigner, request: TrustedRequest, approval: Approval) {
+        let ownerKeys = InMemoryDeviceKeyStore()
+        let approverKeys = InMemoryDeviceKeyStore()
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
+        let pairing = try Pairing(pairingID: "pairing-use-http", owner: ownerSigner.identity, approver: approverSigner.identity,
+                                  epoch: 1, createdAt: fixedTime, state: .active)
+        let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "session-use-http", activeSetID: "set-use-http",
+                                        startsAt: fixedTime.addingTimeInterval(-1), endsAt: fixedTime.addingTimeInterval(3_600))
+        let binding = try RequestTargetBinding(pairing: pairing, consentGeneration: 2)
+        let request = try TrustedRequest(requestID: "request-use-http", owner: ownerSigner.identity, targetBindings: [binding],
+                                         session: session, message: nil, createdAt: fixedTime,
+                                         expiresAt: fixedTime.addingTimeInterval(600))
+        let unsignedApproval = Approval(approvalID: "approval-use-http", requestID: request.requestID, pairingID: pairing.pairingID,
+                                        pairEpoch: pairing.epoch, sessionID: request.sessionID, activeSetID: request.activeSetID,
+                                        approver: approverSigner.identity, decision: .approved, issuedAt: fixedTime,
+                                        consentGeneration: binding.consentGeneration, nonce: Data(repeating: 6, count: 24), signature: Data())
+        let approvalSignature = try approverSigner.sign(domain: "\(CompanionCanonical.version).approval", fields: unsignedApproval.signingFields())
+        let approval = Approval(approvalID: unsignedApproval.approvalID, requestID: unsignedApproval.requestID,
+                                pairingID: unsignedApproval.pairingID, pairEpoch: unsignedApproval.pairEpoch,
+                                sessionID: unsignedApproval.sessionID, activeSetID: unsignedApproval.activeSetID,
+                                approver: unsignedApproval.approver, decision: unsignedApproval.decision,
+                                issuedAt: unsignedApproval.issuedAt, consentGeneration: unsignedApproval.consentGeneration,
+                                nonce: unsignedApproval.nonce, signature: approvalSignature)
+        return (ownerSigner, approverSigner, request, approval)
+    }
+
+    func testUseApprovalPostsToOperationsPathAndVerifiesTheResponse() async throws {
+        let fixture = try makeHTTPUseFixture()
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: fixture.owner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/operations")
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            XCTAssertEqual(signed.kind, "use")
+            let verification = ApprovalVerification(approval: fixture.approval, verifiedAt: fixedTime, useID: "use-http-1")
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 1, verification: verification)
+            return .init(status: 200, body: body)
+        }
+        let verification = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-http-1")
+        XCTAssertEqual(verification.useID, "use-http-1")
+        XCTAssertEqual(verification.approval, fixture.approval)
+    }
+
+    func testUseApprovalRejectsATamperedApprovalInTheResponse() async throws {
+        let fixture = try makeHTTPUseFixture()
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: fixture.owner, transport: transport, now: { fixedTime })
+        // The relay confirms a *different* approval than the one actually
+        // submitted (still validly signed by the real approver, so a naive
+        // client that only checked the signature would accept it).
+        let substituted = Approval(approvalID: "attacker-substituted-approval", requestID: fixture.approval.requestID,
+                                   pairingID: fixture.approval.pairingID, pairEpoch: fixture.approval.pairEpoch,
+                                   sessionID: fixture.approval.sessionID, activeSetID: fixture.approval.activeSetID,
+                                   approver: fixture.approval.approver, decision: .approved, issuedAt: fixedTime,
+                                   consentGeneration: fixture.approval.consentGeneration,
+                                   nonce: Data(repeating: 8, count: 24), signature: Data())
+        let substitutedSignature = try fixture.approver.sign(domain: "\(CompanionCanonical.version).approval",
+                                                              fields: substituted.signingFields())
+        let signedSubstituted = Approval(approvalID: substituted.approvalID, requestID: substituted.requestID,
+                                         pairingID: substituted.pairingID, pairEpoch: substituted.pairEpoch,
+                                         sessionID: substituted.sessionID, activeSetID: substituted.activeSetID,
+                                         approver: substituted.approver, decision: substituted.decision,
+                                         issuedAt: substituted.issuedAt, consentGeneration: substituted.consentGeneration,
+                                         nonce: substituted.nonce, signature: substitutedSignature)
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let verification = ApprovalVerification(approval: signedSubstituted, verifiedAt: fixedTime, useID: "use-http-2")
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 1, verification: verification)
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-http-2")
+            XCTFail("expected rejection of a substituted approval")
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .malformed)
+        }
+    }
+
+    func testUseApprovalRejectsAWrongUseIDInTheResponse() async throws {
+        let fixture = try makeHTTPUseFixture()
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: fixture.owner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            // Same (real, validly signed) approval, but a useID the client never asked for.
+            let verification = ApprovalVerification(approval: fixture.approval, verifiedAt: fixedTime, useID: "attacker-use-id")
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 1, verification: verification)
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-http-wrong-id")
+            XCTFail("expected rejection of a mismatched useID")
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .malformed)
+        }
+    }
+
+    func testUseApprovalRejectsAnInvalidlySignedApprovalInTheResponse() async throws {
+        let fixture = try makeHTTPUseFixture()
+        // A corrupted signature on the very approval the client itself holds
+        // and submits -- the relay simply echoes it back unchanged (so the
+        // `verification.approval == approval` and `useID` checks both pass),
+        // but `validateUseVerification`'s explicit signature check must
+        // still catch it.
+        var corruptedSignature = fixture.approval.signature
+        corruptedSignature[0] ^= 0xFF
+        let corruptedApproval = Approval(approvalID: fixture.approval.approvalID, requestID: fixture.approval.requestID,
+                                         pairingID: fixture.approval.pairingID, pairEpoch: fixture.approval.pairEpoch,
+                                         sessionID: fixture.approval.sessionID, activeSetID: fixture.approval.activeSetID,
+                                         approver: fixture.approval.approver, decision: fixture.approval.decision,
+                                         issuedAt: fixture.approval.issuedAt, consentGeneration: fixture.approval.consentGeneration,
+                                         nonce: fixture.approval.nonce, signature: corruptedSignature)
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: fixture.owner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let verification = ApprovalVerification(approval: corruptedApproval, verifiedAt: fixedTime, useID: "use-http-bad-sig")
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 1, verification: verification)
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client.useApproval(corruptedApproval, request: fixture.request, useID: "use-http-bad-sig")
+            XCTFail("expected rejection of an invalid approval signature")
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .invalidSignature)
+        }
+    }
+
+    func testUseApprovalRejectsANonApprovedDecisionInTheResponse() async throws {
+        let fixture = try makeHTTPUseFixture()
+        // A validly signed, structurally-matching approval whose decision is
+        // "declined" -- every other check passes, so this isolates the final
+        // decision == .approved guard.
+        let declinedUnsigned = Approval(approvalID: fixture.approval.approvalID, requestID: fixture.approval.requestID,
+                                        pairingID: fixture.approval.pairingID, pairEpoch: fixture.approval.pairEpoch,
+                                        sessionID: fixture.approval.sessionID, activeSetID: fixture.approval.activeSetID,
+                                        approver: fixture.approval.approver, decision: .declined, issuedAt: fixedTime,
+                                        consentGeneration: fixture.approval.consentGeneration,
+                                        nonce: Data(repeating: 13, count: 24), signature: Data())
+        let declinedSignature = try fixture.approver.sign(domain: "\(CompanionCanonical.version).approval",
+                                                           fields: declinedUnsigned.signingFields())
+        let declinedApproval = Approval(approvalID: declinedUnsigned.approvalID, requestID: declinedUnsigned.requestID,
+                                        pairingID: declinedUnsigned.pairingID, pairEpoch: declinedUnsigned.pairEpoch,
+                                        sessionID: declinedUnsigned.sessionID, activeSetID: declinedUnsigned.activeSetID,
+                                        approver: declinedUnsigned.approver, decision: declinedUnsigned.decision,
+                                        issuedAt: declinedUnsigned.issuedAt, consentGeneration: declinedUnsigned.consentGeneration,
+                                        nonce: declinedUnsigned.nonce, signature: declinedSignature)
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: fixture.owner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let verification = ApprovalVerification(approval: declinedApproval, verifiedAt: fixedTime, useID: "use-http-declined")
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 1, verification: verification)
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client.useApproval(declinedApproval, request: fixture.request, useID: "use-http-declined")
+            XCTFail("expected rejection of a non-approved decision")
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .wrongTarget)
+        }
+    }
+
+    /// R5 Slice B2a review fix (P1-1): a "use" replay (identical
+    /// operationID/body) that arrives after the owner's rollback anchor has
+    /// already advanced past the operation's original commit revision must
+    /// still succeed, returning the identical idempotent verification. Before
+    /// the fix, the relay's replay path echoed the historical
+    /// `(revision, stateRoot)` pair from the operation's first commit, which
+    /// `RollbackAnchor.accept` would reject as a regression once a later,
+    /// legitimate response had already advanced the anchor past that point —
+    /// which would permanently strand a B2c crash-recovery retry of "use".
+    func testUseApprovalReplayAfterTheAnchorAdvancesStillSucceeds() async throws {
+        let fixture = try makeHTTPUseFixture()
+        let anchorStore = InMemoryRollbackAnchorStore()
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession(),
+                                               anchorStore: anchorStore)
+        let client = AsyncCompanionClient(signer: fixture.owner, transport: transport, now: { fixedTime })
+        let ownerIdentityID = fixture.owner.identity.identityID
+        let verification = ApprovalVerification(approval: fixture.approval, verifiedAt: fixedTime, useID: "use-replay-1")
+
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 5, verification: verification,
+                                                         ownerIdentityID: ownerIdentityID, stateRoot: Data(repeating: 0x11, count: 32))
+            return .init(status: 200, body: body)
+        }
+        let first = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-replay-1")
+        XCTAssertEqual(first, verification)
+
+        // Something else (an unrelated mutation, an inbox fetch) advances
+        // the owner's accepted anchor past the "use" operation's original
+        // commit revision before the replay arrives.
+        let anchor = RollbackAnchor(store: anchorStore)
+        try anchor.accept(relayBaseURL: testBaseURL.companionAnchorKey, ownerIdentityID: ownerIdentityID,
+                          revision: 9, stateRoot: Data(repeating: 0x22, count: 32), enforceIfNoCheckpoint: true)
+
+        // The relay replays the identical "use" operation: same result, but
+        // the ledger's CURRENT revision/root (12), not the historical 5.
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let body = try! encodedVerificationResponse(operationID: signed.operationID, revision: 12, verification: verification,
+                                                         ownerIdentityID: ownerIdentityID, stateRoot: Data(repeating: 0x33, count: 32))
+            return .init(status: 200, body: body)
+        }
+        let replay = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-replay-1")
+        XCTAssertEqual(replay, verification)
+        let checkpoint = try anchor.currentCheckpoint(relayBaseURL: testBaseURL.companionAnchorKey, ownerIdentityID: ownerIdentityID)
+        XCTAssertEqual(checkpoint?.revision, 12)
     }
 
     // MARK: - Malicious relay: confirm response validation
@@ -409,7 +633,7 @@ final class HTTPTransportTests: XCTestCase {
             _ = try await client.createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime,
                                               nonce: invitation.payload.nonce)
             XCTFail("expected rollback rejection")
-        } catch CompanionTransportError.server(.staleRevision(let expected, let actual)) {
+        } catch CompanionTransportError.server(.relayRollback(.regressedRevision(let expected, let actual))) {
             XCTAssertEqual(expected, 5)
             XCTAssertEqual(actual, 3)
         }
@@ -438,11 +662,61 @@ final class HTTPTransportTests: XCTestCase {
             _ = try await client.createInvite(inviteID: invitation.payload.inviteID, validFor: 3_600, now: fixedTime,
                                               nonce: invitation.payload.nonce)
             XCTFail("expected fork rejection")
-        } catch CompanionTransportError.server(.malformed) {
-            // expected: conflicting root at same revision
+        } catch CompanionTransportError.server(.relayRollback(.conflictingRoot(let revision))) {
+            XCTAssertEqual(revision, 2)
         }
         let checkpoint = try loadCheckpoint(anchorStore, ownerIdentityID: ownerIdentityID)
         XCTAssertEqual(checkpoint?.stateRoot, originalRoot, "unchanged on a rejected fork")
+    }
+
+    /// R5 Slice B2a review fix (N2): the relay's own `stale_revision`
+    /// rejection (a benign optimistic-concurrency write race, surfaced as
+    /// an HTTP error status before any response body is even decoded) and
+    /// this device's own local anchor detecting a rollback in an otherwise
+    /// well-formed 200 response must never collapse to the same error case
+    /// — a caller needs to treat them completely differently (retry with a
+    /// fresh revision vs. never retry).
+    func testRelayStaleRevisionAndAnchorRollbackAreDistinctErrors() async throws {
+        // (1) The relay itself rejects the mutation outright: HTTP 409 with
+        // error code "stale_revision". Never reaches `RollbackAnchor` at all.
+        let (ownerSigner1, invitation1) = try makeInvite()
+        let transport1 = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client1 = AsyncCompanionClient(signer: ownerSigner1, transport: transport1, now: { fixedTime })
+        StubURLProtocol.handler = { _ in .init(status: 409, body: Data(#"{"error":"stale_revision"}"#.utf8)) }
+        do {
+            _ = try await client1.createInvite(inviteID: invitation1.payload.inviteID, validFor: 3_600, now: fixedTime,
+                                               nonce: invitation1.payload.nonce)
+            XCTFail("expected a relay-rejected stale revision")
+        } catch CompanionTransportError.server(let error) {
+            guard case .staleRevision = error else { return XCTFail("expected .staleRevision, got \(error)") }
+        }
+
+        // (2) A well-formed 200 response whose revision regresses behind
+        // this device's own already-accepted checkpoint -- an actual
+        // rollback/fork, detected locally, nothing to do with the relay's
+        // HTTP-level rejection above.
+        let (ownerSigner2, invitation2) = try makeInvite()
+        let anchorStore = InMemoryRollbackAnchorStore()
+        let ownerIdentityID2 = ownerSigner2.identity.identityID
+        let anchor = RollbackAnchor(store: anchorStore)
+        try anchor.accept(relayBaseURL: testBaseURL.absoluteString, ownerIdentityID: ownerIdentityID2,
+                          revision: 5, stateRoot: Data(repeating: 1, count: 32), enforceIfNoCheckpoint: true)
+        let transport2 = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession(), anchorStore: anchorStore)
+        let client2 = AsyncCompanionClient(signer: ownerSigner2, transport: transport2, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 2,
+                                                 ownerIdentityID: ownerIdentityID2, stateRoot: Data(repeating: 2, count: 32))
+            return .init(status: 200, body: body)
+        }
+        do {
+            _ = try await client2.createInvite(inviteID: invitation2.payload.inviteID, validFor: 3_600, now: fixedTime,
+                                               nonce: invitation2.payload.nonce)
+            XCTFail("expected an anchor rollback rejection")
+        } catch CompanionTransportError.server(let error) {
+            guard case .relayRollback = error else { return XCTFail("expected .relayRollback, got \(error)") }
+            if case .staleRevision = error { XCTFail("a locally-detected rollback must never also match .staleRevision") }
+        }
     }
 
     func testAnchorEnforcementRejectsMissingStateRootByDefault() async throws {
@@ -627,7 +901,7 @@ final class HTTPTransportTests: XCTestCase {
             _ = try await AsyncCompanionClient(signer: ownerSigner, transport: transport2, now: { fixedTime })
                 .createInvite(inviteID: invitation2.payload.inviteID, validFor: 3_600, now: fixedTime, nonce: invitation2.payload.nonce)
             XCTFail("expected the two differently-formatted base URLs to share one anchor and reject the regression")
-        } catch CompanionTransportError.server(.staleRevision(let expected, let actual)) {
+        } catch CompanionTransportError.server(.relayRollback(.regressedRevision(let expected, let actual))) {
             XCTAssertEqual(expected, 4)
             XCTAssertEqual(actual, 2)
         }

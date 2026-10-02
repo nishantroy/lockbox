@@ -497,6 +497,36 @@ public struct ApprovalVerification: Codable, Hashable, Sendable {
     }
 }
 
+/// Shared by `CompanionClient.useApproval` (sync) and
+/// `AsyncCompanionClient.useApproval` (`HTTPTransport.swift`). The relay's
+/// "use" command already enforces every one of these checks server-side
+/// before it ever returns a `.verification` result (`InMemoryRelay.swift`,
+/// the TS reducer's `"use"` case); this is the client's own defense against a
+/// malicious or buggy relay substituting a different approval, use ID, or
+/// unapproved decision in its response. R5 Slice B2a.
+func validateUseVerification(_ verification: ApprovalVerification, approval: Approval,
+                             request: TrustedRequest, useID: String) throws {
+    guard verification.approval == approval else {
+        throw CompanionError.malformed("relay use verification does not match the submitted approval")
+    }
+    guard verification.useID == useID else {
+        throw CompanionError.malformed("relay use verification carries a different use ID")
+    }
+    try verification.approval.validateSignature()
+    guard verification.approval.requestID == request.requestID,
+          verification.approval.sessionID == request.sessionID,
+          verification.approval.activeSetID == request.activeSetID,
+          let binding = request.binding(for: verification.approval.approver.identityID),
+          binding.pairingID == verification.approval.pairingID,
+          binding.pairEpoch == verification.approval.pairEpoch,
+          binding.consentGeneration == verification.approval.consentGeneration else {
+        throw CompanionError.wrongTarget
+    }
+    guard verification.approval.decision == .approved else {
+        throw CompanionError.wrongTarget
+    }
+}
+
 // MARK: - Signed relay envelope
 
 public struct SignedOperation: Codable, Hashable, Sendable {
@@ -850,10 +880,22 @@ public struct CompanionClient: Sendable {
     }
 
     public func useApproval(_ approval: Approval, request: TrustedRequest, useID: String) throws -> ApprovalVerification {
+        // This owner-identity guard, and any failure signing/submitting the
+        // command below, are ordinary definitive rejections of this call --
+        // never wrapped as `.responseVerificationFailed`, which is reserved
+        // for the relay's response itself failing local verification (R5
+        // Slice B2a review fix, N3).
         guard signer.identity == request.owner else { throw CompanionError.unauthorized }
         let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: useID,
                               consentGeneration: approval.consentGeneration)
-        guard case let .verification(value) = try submit("use", use) else { throw CompanionError.malformed("relay response") }
+        guard case let .verification(value) = try submit("use", use) else {
+            throw CompanionError.responseVerificationFailed("relay \"use\" response was not a verification")
+        }
+        do {
+            try validateUseVerification(value, approval: approval, request: request, useID: useID)
+        } catch {
+            throw CompanionError.responseVerificationFailed(String(describing: error))
+        }
         return value
     }
 

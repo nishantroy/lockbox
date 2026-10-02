@@ -21,6 +21,7 @@ import {
   type TrustedRequest,
   type Pairing,
   type RelationshipConsent,
+  type Approval,
   encodeRelayResult,
   decodeInvitation,
   decodeRelationshipConsent,
@@ -191,13 +192,42 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
         throw relayError("idempotency_conflict");
       }
       const result = prior.disposition === "rejectedExpiredRequest" ? ({ kind: "acknowledgement" } as const) : decodeStoredResult(prior.responseKind, prior.responseBody);
+      // R5 Slice B2a review fix (P1-1): return the owner's row-locked,
+      // just-verified CURRENT (revision, stateRoot) here, not
+      // `prior.committedRevision`/`prior.stateRootAfter` (the values at the
+      // time this operation first committed). Between that first commit and
+      // a later replay, the owner's revision can advance for unrelated
+      // reasons (another mutation, a retention purge), so the historical
+      // pair can be strictly behind an anchor this device already accepted
+      // from an intervening response -- `RollbackAnchor.accept` would then
+      // reject this *correct, idempotent* replay as a regression
+      // (`staleRevision`), which a B2c crash-recovery retry of "use" could
+      // never clear. `RelayResponse.stateRoot` is documented as "the
+      // canonical root *for `revision`*", not "the root this specific
+      // operation produced", so substituting the current verified pair for
+      // an unchanged `result` is within contract, not a special case.
+      //
+      // R5 Slice B2a review fix (N1, privacy): only an OWNER-signed replay
+      // gets this substitution. The replay path above intentionally never
+      // calls `authorize()` (a lost acknowledgement must return its
+      // original result even after e.g. a consent revoke would now reject
+      // the same operation), so a non-owner (approver/helper) signer who
+      // simply re-sends one of their own old operations (e.g. "approval")
+      // must not be able to read the owner's CURRENT revision/state root
+      // off that replay -- that would leak the owner's current activity
+      // timing (including after this exact approver's own pairing has
+      // since been revoked) through a request that looks, and is
+      // authorized as, entirely inert. A non-owner signer's replay keeps
+      // the historical `prior.committedRevision`/`prior.stateRootAfter`
+      // pair -- exactly what they already received the first time.
+      const isOwnerSigned = operation.signer.role === "owner";
       return {
         response: {
           operationID: prior.operationID,
-          revision: prior.committedRevision,
+          revision: isOwnerSigned ? ownerRow.revision : prior.committedRevision,
           result,
           ownerIdentityID: ownerRow.ownerID,
-          stateRoot: prior.stateRootAfter
+          stateRoot: isOwnerSigned ? ownerRow.storedStateRoot : prior.stateRootAfter
         },
         surfaceExpired: prior.disposition === "rejectedExpiredRequest"
       };
@@ -328,10 +358,17 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   const requests: TrustedRequest[] = [];
   const pairings: Pairing[] = [];
   const consents: RelationshipConsent[] = [];
+  // R5 Slice B2a (contract v1.2): populated only on an owner fetch of their
+  // own ledger -- `undefined` (omitted from the wire body) for a helper/
+  // approver fetch, same presence rule as `ownerAnchor` below. Unlike
+  // `ownerAnchor`, an owner fetch always gets a (possibly empty) array, even
+  // before any ledger row exists for them yet.
+  let approvals: Approval[] | undefined;
   let maxRevision = 0;
   let ownerAnchor: { ownerIdentityID: string; stateRoot: Buffer } | undefined;
 
   if (operation.signer.role === "owner") {
+    approvals = [];
     const row = await readOwnerLedger(pool, identityID);
     if (row) {
       maxRevision = row.revision;
@@ -344,7 +381,21 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
       const freshRoot = computeStateRoot(row.ledger, row.revision);
       if (!freshRoot.equals(row.storedStateRoot)) throw relayError("integrity_error");
       ownerAnchor = { ownerIdentityID: row.ownerID, stateRoot: freshRoot };
-      for (const record of Object.values(row.ledger.requests)) requests.push(applyExpiry(record.request, row.ledger, now));
+      for (const record of Object.values(row.ledger.requests)) {
+        const effective = applyExpiry(record.request, row.ledger, now);
+        requests.push(effective);
+        // The relay-stored accepted approval for this request, included
+        // only while the request still reads as approved, or once it has a
+        // recorded use (natural end can later flip an already-used
+        // request's status away from "approved" -- the approval must still
+        // be deliverable so a client mid-replay or showing "used" history
+        // can see it; see `use` in reducer.ts and the B2a plan's item 1).
+        const accepted = findAcceptedApproval(row.ledger, record.request.requestID);
+        if (accepted) {
+          const hasRecordedUse = Object.values(row.ledger.approvalUses).some((u) => u.requestID === record.request.requestID);
+          if (effective.status === "approved" || hasRecordedUse) approvals.push(accepted);
+        }
+      }
       for (const record of Object.values(row.ledger.pairings)) pairings.push(record.pairing);
       for (const consent of Object.values(row.ledger.relationshipConsents)) consents.push(consent);
     }
@@ -372,14 +423,33 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   requests.sort((a, b) => a.createdAt - b.createdAt);
   pairings.sort((a, b) => (a.pairingID < b.pairingID ? -1 : a.pairingID > b.pairingID ? 1 : 0));
   consents.sort((a, b) => (a.relationshipID < b.relationshipID ? -1 : a.relationshipID > b.relationshipID ? 1 : 0));
+  approvals?.sort((a, b) => (a.approvalID < b.approvalID ? -1 : a.approvalID > b.approvalID ? 1 : 0));
   return {
     ownerIdentityID: ownerAnchor?.ownerIdentityID,
     stateRoot: ownerAnchor?.stateRoot,
     revision: maxRevision,
     requests,
     pairings,
-    consents
+    consents,
+    approvals
   };
+}
+
+/**
+ * The relay-stored approval that caused `requestID` to become approved, if
+ * any (R5 Slice B2a). At most one approval can ever carry
+ * `decision === "approved"` for a given request: the `"approval"` reducer
+ * case only accepts a submission while the request's status is still
+ * `"pending"`, and the first accepted approval flips status to `"approved"`,
+ * which blocks every later approval for that request (approve or decline) --
+ * see reducer.ts's `"approval"` case. Mirrors
+ * `InMemoryCompanionRelay.acceptedApproval(forRequestID:)`.
+ */
+function findAcceptedApproval(ledger: Ledger, requestID: string): Approval | undefined {
+  for (const record of Object.values(ledger.approvals)) {
+    if (record.approval.requestID === requestID && record.approval.decision === "approved") return record.approval;
+  }
+  return undefined;
 }
 
 function applyExpiry(request: TrustedRequest, ledger: Ledger, now: number): TrustedRequest {

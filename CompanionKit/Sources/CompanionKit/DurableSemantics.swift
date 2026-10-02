@@ -115,9 +115,17 @@ public struct InboxResponse: Codable, Hashable, Sendable {
     /// pairing in `pairings`. Additive; `nil` for a relay/test double that
     /// does not populate it.
     public let consents: [RelationshipConsent]?
+    /// R5 Slice B2a: the relay-stored accepted `Approval` for each request in
+    /// `requests` whose status is `.approved`, or that has a recorded use.
+    /// Populated **only** on an owner fetch of their own ledger (same
+    /// presence rule as `ownerIdentityID`/`stateRoot`); `nil` on a pure
+    /// helper fetch or for a relay/test double that does not populate it.
+    /// Decoding tolerates its absence (contract v1.2, additive).
+    public let approvals: [Approval]?
 
     public init(ownerIdentityID: String?, revision: UInt64, requests: [TrustedRequest], stateRoot: Data? = nil,
-                pairings: [Pairing]? = nil, consents: [RelationshipConsent]? = nil) throws {
+                pairings: [Pairing]? = nil, consents: [RelationshipConsent]? = nil,
+                approvals: [Approval]? = nil) throws {
         if let ownerIdentityID { try requireIdentifier(ownerIdentityID, name: "identity ID") }
         if let stateRoot { guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid response state root") } }
         self.ownerIdentityID = ownerIdentityID
@@ -126,6 +134,7 @@ public struct InboxResponse: Codable, Hashable, Sendable {
         self.stateRoot = stateRoot
         self.pairings = pairings
         self.consents = consents
+        self.approvals = approvals
     }
 }
 

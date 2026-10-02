@@ -350,8 +350,34 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         values = values.map { request in
             var copy = request; updateExpiry(&copy); return copy
         }
+        let sortedRequests = values.sorted { $0.createdAt < $1.createdAt }
+        // R5 Slice B2a: `approvals` is populated only on an owner fetch of
+        // their own ledger (this relay has exactly one owner, so an exact
+        // identity match on `owner` is that fetch), mirroring the TS relay's
+        // `fetchInboxOperation`. `nil` on a helper/approver fetch.
+        let approvalsOut: [Approval]?
+        if operation.signer == owner {
+            approvalsOut = sortedRequests.compactMap { request -> Approval? in
+                guard let accepted = acceptedApproval(forRequestID: request.requestID) else { return nil }
+                let hasRecordedUse = usedApprovalIDs.contains(accepted.approvalID)
+                guard request.status == .approved || hasRecordedUse else { return nil }
+                return accepted
+            }.sorted { $0.approvalID < $1.approvalID }
+        } else {
+            approvalsOut = nil
+        }
         return try InboxResponse(ownerIdentityID: query.identityID, revision: revision,
-                                 requests: values.sorted { $0.createdAt < $1.createdAt })
+                                 requests: sortedRequests, approvals: approvalsOut)
+    }
+
+    /// The relay-stored approval that caused `requestID` to become approved,
+    /// if any. At most one approval can ever carry `decision == .approved`
+    /// for a given request: the "approval" case only accepts a submission
+    /// while the request's status is still `.pending`, and the first
+    /// accepted approval flips status to `.approved`, which blocks every
+    /// later approval for that request (approve or decline).
+    private func acceptedApproval(forRequestID requestID: String) -> Approval? {
+        approvals.values.first { $0.requestID == requestID && $0.decision == .approved }
     }
 
     public func consent(relationshipID: String) throws -> RelationshipConsent {
@@ -385,8 +411,27 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                   record.expectedRevision == operation.expectedRevision else {
                 throw CompanionError.operationConflict
             }
+            // R5 Slice B2a review fix (P1-1): mirrors the TS relay's replay
+            // fix in service.ts -- return the *current* relay revision, not
+            // `record.revision` (the revision at the time this operation
+            // first committed). This prototype relay never populates
+            // `ownerIdentityID`/`stateRoot` on any response (see both
+            // returns in this method), so nothing anchors off it today, but
+            // the revision field itself should still describe "the ledger's
+            // revision as of this response" consistently between the fresh
+            // and replayed paths, matching the TS relay's contract.
+            //
+            // R5 Slice B2a review fix (N1, privacy): mirrors the TS relay's
+            // additional gate -- only an OWNER-signed replay gets the
+            // current revision. This relay has exactly one owner, so an
+            // exact identity match on `owner` is that signer; a non-owner
+            // (approver) replaying their own old operation gets the
+            // historical `record.revision` instead, so they cannot read the
+            // owner's current activity level off an otherwise-inert resend.
+            // (There is still no state root to gate here -- see above.)
+            let replayRevision = operation.signer == owner ? revision : record.revision
             return try RelayResponse(operationID: operation.operationID,
-                                     revision: record.revision, result: record.response)
+                                     revision: replayRevision, result: record.response)
         }
         if let expectedRevision = operation.expectedRevision, expectedRevision != revision {
             throw CompanionError.staleRevision(expected: expectedRevision, actual: revision)

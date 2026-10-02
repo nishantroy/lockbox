@@ -41,6 +41,7 @@ All bodies are JSON as encoded by Swift `JSONEncoder` with `.sortedKeys`; binary
 | `GET /v1/health` | — | `200 {"ok":true}` with no data | — |
 
 - Re-sending the same `operationID` with an identical body returns the stored response. The same ID with a different body returns `409`.
+- On an idempotent replay signed by the **owner**, `revision`/`stateRoot` in the returned `RelayResponse` are the owner's ledger-locked **current** pair at the time of the replay, not the pair from when the operation first committed (R5 Slice B2a review fix, P1-1: this keeps a client's rollback anchor from rejecting a later, perfectly valid replay as a regression after the owner's revision has since advanced for an unrelated reason). On a replay signed by a **non-owner** (a helper/approver re-sending their own old operation), `revision`/`stateRoot` stay the historical commit-time pair instead, so a non-owner signer cannot read the owner's current activity off an otherwise-inert resend (review fix N1).
 - Error bodies are `{ "error": "<code>" }` with codes mirroring `DurableRelayError`/relay errors. No echo of input, no stack traces.
 - Never log request bodies, public keys or identifiers beyond an opaque request ID. There are no analytics.
 

@@ -227,6 +227,30 @@ public final class DurableRelayService: @unchecked Sendable {
                 }
                 let result = try DurableResultCodec.decode(kind: prior.responseKind,
                                                             body: prior.responseBody)
+                // Documented divergence from the TS relay's R5 Slice B2a
+                // review fix (P1-1, relay/src/service.ts): the TS relay's
+                // idempotent-replay path returns the owner's *current*
+                // row-locked `(revision, stateRoot)`, not the historical
+                // commit-time pair, because `RollbackAnchor.accept` folds
+                // that pair into a per-owner monotonic anchor on every
+                // response and would otherwise reject a later, perfectly
+                // valid replay as a rollback if the owner's revision had
+                // since advanced for an unrelated reason. `receipt.revision`
+                // here deliberately keeps the historical
+                // `prior.committedRevision` instead: `DurableOperationReceipt`
+                // carries no state root at all, and this reference service's
+                // checkpoint (`DurableCheckpoint.ownerRevisions` plus one
+                // whole-database root, not a per-response per-owner root) is
+                // a separate, periodic snapshot never derived from an
+                // individual `submit()` response -- nothing here anchors off
+                // this `revision` field today, so there is no equivalent bug
+                // to fix. A future adapter that layers a `RollbackAnchor`
+                // (or any other per-response anchor) on top of
+                // `DurableRelayService.submit` MUST apply the same fix as
+                // the TS relay: substitute the owner's current locked
+                // revision (and an equivalent current root) here instead of
+                // `prior.committedRevision`, or it will reproduce this exact
+                // staleness bug.
                 let receipt = DurableOperationReceipt(operationID: prior.operationID,
                                                       ownerID: prior.ownerID,
                                                       revision: prior.committedRevision,

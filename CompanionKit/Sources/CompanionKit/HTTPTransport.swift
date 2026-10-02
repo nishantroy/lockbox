@@ -224,12 +224,20 @@ public struct RollbackAnchor: Sendable {
                 throw CompanionError.malformed("relay response is missing a state root")
             }
             if let previous {
+                // R5 Slice B2a review fix (N2): a regression or fork detected
+                // here is this device's OWN local checkpoint disagreeing with
+                // the relay, never the relay's own `stale_revision` rejection
+                // of a stale `expectedRevision` (that is a distinct, benign
+                // write race surfaced via `fromTransportCode`/`.staleRevision`
+                // elsewhere). Use the dedicated `.relayRollback` case so a
+                // caller can tell the two apart and treat only this one as
+                // integrity-fatal (never retried).
                 guard revision >= previous.revision else {
-                    throw CompanionError.staleRevision(expected: previous.revision, actual: revision)
+                    throw CompanionError.relayRollback(.regressedRevision(expected: previous.revision, actual: revision))
                 }
                 if revision == previous.revision {
                     guard stateRoot == previous.stateRoot else {
-                        throw CompanionError.malformed("conflicting relay state root at revision \(revision)")
+                        throw CompanionError.relayRollback(.conflictingRoot(revision: revision))
                     }
                     return (previous, nil)
                 }
@@ -430,9 +438,7 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
 // MARK: - Async client
 
 /// Async sibling of `CompanionClient`, built against `AsyncCompanionTransport`
-/// instead of the synchronous `CompanionTransport`. It intentionally has no
-/// `useApproval` — Slice B1 never consumes an approval into the lock
-/// lifecycle; that is Slice B2, reviewed separately.
+/// instead of the synchronous `CompanionTransport`.
 public struct AsyncCompanionClient: Sendable {
     public let signer: DeviceSigner
     public let transport: any AsyncCompanionTransport
@@ -582,6 +588,39 @@ public struct AsyncCompanionClient: Sendable {
         return value
     }
 
+    /// Submits kind `"use"` exactly as the sync `CompanionClient.useApproval`
+    /// does, then verifies the relay's response before returning it: the
+    /// verification's `kind` is `.verification`, its `approval`/`useID` match
+    /// what was submitted, the approval's signature is valid, it binds this
+    /// request's `requestID`/`sessionID`/`activeSetID` and the approver's
+    /// exact pairing/epoch/consent-generation binding, and its decision is
+    /// `.approved` — see `validateUseVerification`. The same `useID` and
+    /// `approval` always derive the same operation ID (`operationIdentifier`
+    /// hashes the encoded `ApprovalUse` body), so a retry after an
+    /// interrupted app session replays the relay's stored idempotent receipt
+    /// rather than submitting a second "use". R5 Slice B2a.
+    public func useApproval(_ approval: Approval, request: TrustedRequest, useID: String) async throws -> ApprovalVerification {
+        // This owner-identity guard, and any failure signing/encoding or
+        // submitting the command below (including a relay-originated
+        // `CompanionTransportError`), are ordinary definitive/retryable
+        // outcomes for this call -- never wrapped as
+        // `.responseVerificationFailed`, which is reserved for the relay's
+        // response itself failing local verification (R5 Slice B2a review
+        // fix, N3; see `UseFailureDisposition`).
+        guard signer.identity == request.owner else { throw CompanionError.unauthorized }
+        let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: useID,
+                              consentGeneration: approval.consentGeneration)
+        guard case let .verification(value) = try await submit("use", use) else {
+            throw CompanionError.responseVerificationFailed("relay \"use\" response was not a verification")
+        }
+        do {
+            try validateUseVerification(value, approval: approval, request: request, useID: useID)
+        } catch {
+            throw CompanionError.responseVerificationFailed(String(describing: error))
+        }
+        return value
+    }
+
     public func cancel(_ request: TrustedRequest) async throws {
         guard signer.identity == request.owner else { throw CompanionError.unauthorized }
         _ = try await submit("cancel", RequestReference(requestID: request.requestID))
@@ -621,5 +660,110 @@ public struct AsyncCompanionClient: Sendable {
 
     public func fetchInbox() async throws -> [TrustedRequest] {
         try await fetchInboxResponse().requests
+    }
+
+    /// Classifies a failure from `useApproval` (R5 Slice B2a review fix,
+    /// N2) so a caller (B2c's friend-release flow) knows how to react
+    /// without re-deriving the error-code taxonomy itself:
+    /// - `.retryable`: the identical `useID`/approval may be resubmitted.
+    ///   The idempotent-replay fix (P1-1) makes this safe even if other
+    ///   activity happened on the relay in between.
+    /// - `.definitive`: a terminal command rejection. Retrying the same
+    ///   `useID`/approval will never succeed; call `abandonFriendRelease`
+    ///   and show a calm, specific message.
+    /// - `.integrityFatal`: a detected relay rollback/fork, or a `use`
+    ///   response that could not be decoded or failed local verification.
+    ///   Never retry and never silently abandon the pending intent either
+    ///   — the relay's true state is unknown, so the safe move is to leave
+    ///   the intent pending and surface this for the owner/developer.
+    public enum UseFailureDisposition: Equatable, Sendable {
+        case retryable
+        case definitive
+        case integrityFatal
+
+        public static func classify(_ error: Error) -> UseFailureDisposition {
+            if let transportError = error as? CompanionTransportError {
+                switch transportError {
+                case .unavailable, .timedOut:
+                    // Covers an HTTP 5xx too: `HTTPCompanionTransport`
+                    // already maps every 5xx status to `.unavailable`.
+                    return .retryable
+                case .malformedResponse:
+                    return .integrityFatal
+                case .server(let inner):
+                    return classify(serverError: inner)
+                }
+            }
+            if let companionError = error as? CompanionError {
+                // R5 Slice B2a review fix (N3): a bare (unwrapped)
+                // `CompanionError` reaching `useApproval`'s caller is NOT
+                // always a failed-verification `use` response -- it is also
+                // how `useApproval`'s own pre-call guards fail (the owner-
+                // identity check: `.unauthorized`; a keychain/signing
+                // failure: `.keyUnavailable`; a malformed `SignedOperation`:
+                // `.malformed`). Those are ordinary definitive rejections of
+                // THIS call, not evidence the relay's response cannot be
+                // trusted. `useApproval` wraps every actual response-
+                // verification failure as `.responseVerificationFailed`
+                // specifically so it is distinguishable here; that (and a
+                // bare `.relayRollback`, which should never actually occur
+                // but is treated the same way defensively) are the only
+                // bare cases that classify as integrity-fatal.
+                return classify(bareError: companionError)
+            }
+            // An unrecognized error type (for example `EncodingError` from
+            // `JSONEncoder` inside `submit`, which is never a
+            // `CompanionError`/`CompanionTransportError` at all) is never
+            // silently retried and never escalated to an integrity
+            // emergency over something this classifier has no specific
+            // knowledge of -- surfaced as a definitive rejection of this
+            // call instead.
+            return .definitive
+        }
+
+        private static func classify(bareError error: CompanionError) -> UseFailureDisposition {
+            switch error {
+            case .responseVerificationFailed, .relayRollback:
+                return .integrityFatal
+            case .malformed, .invalidSignature, .unknownIdentity, .unauthorized,
+                 .revokedPairing, .expired, .replay, .staleSession, .wrongTarget,
+                 .wrongVerificationCode, .rateLimited, .keyUnavailable, .alreadyPaired,
+                 .notFound, .invalidTransition, .staleRevision, .operationConflict,
+                 .missingOperationRevision, .unsupportedScope, .consentRequired:
+                return .definitive
+            }
+        }
+
+        /// A `CompanionError` the relay itself returned (wrapped in
+        /// `CompanionTransportError.server`), keyed by the same error-code
+        /// names `relay/test/fixtures/error-codes.json` and
+        /// `CompanionError.fromTransportCode(_:)` use.
+        private static func classify(serverError error: CompanionError) -> UseFailureDisposition {
+            switch error {
+            case .rateLimited, .staleRevision:
+                // `rate_limited` (429) and the relay's own `stale_revision`
+                // optimistic-concurrency rejection are both benign and
+                // retryable with a fresh attempt.
+                return .retryable
+            case .relayRollback, .responseVerificationFailed:
+                // This device's own anchor detected a rollback or fork --
+                // never the relay's `stale_revision`, which is handled
+                // above. `.responseVerificationFailed` should never actually
+                // arrive wrapped (it is always thrown bare by `useApproval`
+                // itself), but is classified the same way here for defense
+                // in depth.
+                return .integrityFatal
+            case .malformed, .invalidSignature, .unknownIdentity, .unauthorized,
+                 .revokedPairing, .expired, .replay, .staleSession, .wrongTarget,
+                 .wrongVerificationCode, .keyUnavailable, .alreadyPaired, .notFound,
+                 .invalidTransition, .operationConflict, .missingOperationRevision,
+                 .unsupportedScope, .consentRequired:
+                // Every other server-side code -- including `.malformed`
+                // (a 400, or a 413 "payload too large") -- is a definitive
+                // rejection of this specific submitted command, not an
+                // integrity failure in the relay's reported state.
+                return .definitive
+            }
+        }
     }
 }
