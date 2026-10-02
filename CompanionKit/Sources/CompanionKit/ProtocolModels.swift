@@ -880,11 +880,22 @@ public struct CompanionClient: Sendable {
     }
 
     public func useApproval(_ approval: Approval, request: TrustedRequest, useID: String) throws -> ApprovalVerification {
+        // This owner-identity guard, and any failure signing/submitting the
+        // command below, are ordinary definitive rejections of this call --
+        // never wrapped as `.responseVerificationFailed`, which is reserved
+        // for the relay's response itself failing local verification (R5
+        // Slice B2a review fix, N3).
         guard signer.identity == request.owner else { throw CompanionError.unauthorized }
         let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: useID,
                               consentGeneration: approval.consentGeneration)
-        guard case let .verification(value) = try submit("use", use) else { throw CompanionError.malformed("relay response") }
-        try validateUseVerification(value, approval: approval, request: request, useID: useID)
+        guard case let .verification(value) = try submit("use", use) else {
+            throw CompanionError.responseVerificationFailed("relay \"use\" response was not a verification")
+        }
+        do {
+            try validateUseVerification(value, approval: approval, request: request, useID: useID)
+        } catch {
+            throw CompanionError.responseVerificationFailed(String(describing: error))
+        }
         return value
     }
 

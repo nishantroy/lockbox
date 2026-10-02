@@ -1071,7 +1071,51 @@ final class CompanionKitTests: XCTestCase {
         let wrongUseIDTransport = VerificationUseIDSwappingTransport(real: relay, substituteUseID: "attacker-use-id")
         let ownerViaWrongUseID = CompanionClient(signer: owner.signer, transport: wrongUseIDTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
         XCTAssertThrowsError(try ownerViaWrongUseID.useApproval(approval, request: request, useID: "real-use-id")) { error in
-            guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
+            // R5 Slice B2a review fix (N3): `validateUseVerification`'s
+            // rejection is wrapped as `.responseVerificationFailed`, not
+            // left as a bare `.malformed`, so
+            // `UseFailureDisposition.classify` can tell it apart from a
+            // local pre-call guard failure.
+            guard case CompanionError.responseVerificationFailed = error else {
+                return XCTFail("expected responseVerificationFailed, got \(error)")
+            }
+        }
+    }
+
+    /// R5 Slice B2a review fix (N3): a tampered "use" verification response
+    /// is `.integrityFatal` end to end through `useApproval` (not only via
+    /// `UseFailureDisposition.classify` applied to a synthetic error).
+    func testTamperedVerificationResponseClassifiesAsIntegrityFatalEndToEnd() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "tamper-verification-disposition-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
+        let wrongUseIDTransport = VerificationUseIDSwappingTransport(real: relay, substituteUseID: "attacker-use-id")
+        let ownerViaWrongUseID = CompanionClient(signer: owner.signer, transport: wrongUseIDTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        do {
+            _ = try ownerViaWrongUseID.useApproval(approval, request: request, useID: "real-use-id-2")
+            XCTFail("expected a tampered verification response to be rejected")
+        } catch {
+            XCTAssertEqual(AsyncCompanionClient.UseFailureDisposition.classify(error), .integrityFatal)
+        }
+    }
+
+    /// R5 Slice B2a review fix (N3): the owner-identity guard at the top of
+    /// `useApproval` -- a local pre-call failure, not a response-
+    /// verification failure -- must classify as `.definitive`.
+    func testOwnerMismatchGuardIsDefinitive() throws {
+        let (_, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "owner-mismatch-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
+        do {
+            // `approver` is not `request.owner`, so the very first guard in
+            // `useApproval` rejects this before any network call.
+            _ = try approver.useApproval(approval, request: request, useID: "owner-mismatch-use")
+            XCTFail("expected the owner-identity guard to reject this call")
+        } catch {
+            guard case CompanionError.unauthorized = error else { return XCTFail("expected .unauthorized, got \(error)") }
+            XCTAssertEqual(AsyncCompanionClient.UseFailureDisposition.classify(error), .definitive)
         }
     }
 }

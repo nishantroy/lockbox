@@ -282,8 +282,8 @@ final class HTTPTransportTests: XCTestCase {
         do {
             _ = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-http-2")
             XCTFail("expected rejection of a substituted approval")
-        } catch CompanionError.malformed {
-            // expected
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .malformed)
         }
     }
 
@@ -301,8 +301,8 @@ final class HTTPTransportTests: XCTestCase {
         do {
             _ = try await client.useApproval(fixture.approval, request: fixture.request, useID: "use-http-wrong-id")
             XCTFail("expected rejection of a mismatched useID")
-        } catch CompanionError.malformed {
-            // expected
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .malformed)
         }
     }
 
@@ -332,8 +332,8 @@ final class HTTPTransportTests: XCTestCase {
         do {
             _ = try await client.useApproval(corruptedApproval, request: fixture.request, useID: "use-http-bad-sig")
             XCTFail("expected rejection of an invalid approval signature")
-        } catch CompanionError.invalidSignature {
-            // expected
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .invalidSignature)
         }
     }
 
@@ -367,8 +367,8 @@ final class HTTPTransportTests: XCTestCase {
         do {
             _ = try await client.useApproval(declinedApproval, request: fixture.request, useID: "use-http-declined")
             XCTFail("expected rejection of a non-approved decision")
-        } catch CompanionError.wrongTarget {
-            // expected
+        } catch CompanionError.responseVerificationFailed {
+            // expected (R5 Slice B2a review fix, N3: wrapped, not bare .wrongTarget)
         }
     }
 

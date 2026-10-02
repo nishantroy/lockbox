@@ -40,6 +40,21 @@ public enum CompanionError: Error, Equatable, Sendable {
     /// caller must not retry the same request and must not treat this as a
     /// transient condition.
     case relayRollback(RelayRollbackReason)
+    /// R5 Slice B2a review fix (N3): wraps any failure from local
+    /// verification of a relay's `"use"` response — `validateUseVerification`
+    /// rejecting the claimed `ApprovalVerification`, or the decoded result
+    /// not even being `.verification` — thrown directly by
+    /// `CompanionClient.useApproval`/`AsyncCompanionClient.useApproval`
+    /// (never by the relay, and never produced by `fromTransportCode(_:)`).
+    /// This exists specifically so it is never confused with a **bare**
+    /// `CompanionError` thrown by a *local pre-call guard* inside
+    /// `useApproval` (the owner-identity check, a keychain/signing failure,
+    /// a malformed `SignedOperation`) — those are ordinary definitive
+    /// rejections of this specific call, not evidence the relay's response
+    /// cannot be trusted. Only `.responseVerificationFailed` and
+    /// `.relayRollback` are integrity-fatal; see
+    /// `AsyncCompanionClient.UseFailureDisposition`.
+    case responseVerificationFailed(String)
 
     /// A transport may retry a command only when it can resend the exact same
     /// signed operation. These errors describe terminal command outcomes; the
@@ -51,7 +66,7 @@ public enum CompanionError: Error, Equatable, Sendable {
              .revokedPairing, .expired, .replay, .staleSession, .wrongTarget,
              .wrongVerificationCode, .rateLimited, .keyUnavailable,
              .alreadyPaired, .notFound, .invalidTransition, .unsupportedScope,
-             .consentRequired, .relayRollback:
+             .consentRequired, .relayRollback, .responseVerificationFailed:
             return false
         }
     }
@@ -82,6 +97,7 @@ public enum CompanionError: Error, Equatable, Sendable {
         // or that `fromTransportCode(_:)` ever decodes from the wire — used
         // only for local diagnostics/logging via `CompanionTransportError.code`.
         case .relayRollback: return "relay_rollback"
+        case .responseVerificationFailed: return "response_verification_failed"
         }
     }
 }
