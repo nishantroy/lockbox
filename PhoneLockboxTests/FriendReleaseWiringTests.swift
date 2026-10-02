@@ -105,13 +105,17 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertEqual(CompanionCoordinator.prepareNoOpMessage(.noMatchingPendingIntent), "This lock already ended.")
     }
 
-    func testApplyNoOpMessageCoversEveryReasonAndMatchesThePlanForTheTwoReachableCases() {
-        // These two are the only reasons `RuntimeLifecycle.applyFriendRelease`
-        // actually returns (Shared/RuntimeFriendRelease.swift); the plan's
-        // final integration notes specify this exact copy for them.
+    func testApplyNoOpMessageCoversEveryReasonAndMatchesThePlanForTheNamedCases() {
+        // `.alreadyEnded` and `.activeSetMismatch` are the plan's named
+        // terminal copy. `.noMatchingPendingIntent` is also genuinely
+        // reachable from `RuntimeLifecycle.applyFriendRelease`
+        // (Shared/RuntimeFriendRelease.swift) — for example a second,
+        // concurrent replay call after the first already cleared the
+        // intent — and falls back to the same calm "already ended" copy.
+        // `.conflictingPendingIntent` is prepare-only and exhaustively
+        // mapped here only for defense in depth.
         XCTAssertEqual(CompanionCoordinator.applyNoOpMessage(.alreadyEnded), "This lock already ended.")
         XCTAssertEqual(CompanionCoordinator.applyNoOpMessage(.activeSetMismatch), "Your locks changed; ask again.")
-        // Defensive-only cases (not actually returned by apply), still exhaustively mapped.
         XCTAssertEqual(CompanionCoordinator.applyNoOpMessage(.conflictingPendingIntent), "This lock already ended.")
         XCTAssertEqual(CompanionCoordinator.applyNoOpMessage(.noMatchingPendingIntent), "This lock already ended.")
     }
