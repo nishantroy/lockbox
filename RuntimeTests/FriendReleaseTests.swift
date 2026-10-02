@@ -83,7 +83,7 @@ final class FriendReleaseTests: XCTestCase {
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
 
         let prepareOutcome = RuntimeLifecycle.prepareFriendRelease(
-            &document, intent: friendIntent, effectiveSessionIDs: [target.id, overlapping.id], at: now
+            &document, intent: friendIntent, at: now
         )
         XCTAssertEqual(prepareOutcome, .recorded)
         XCTAssertEqual(document.pendingFriendRelease, friendIntent)
@@ -118,7 +118,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [manual.id])
         let friendIntent = intent(sessionID: manual.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [manual.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 
@@ -148,7 +148,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id])
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 
@@ -168,7 +168,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id])
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 
@@ -190,7 +190,7 @@ final class FriendReleaseTests: XCTestCase {
         let friendIntent = intent(sessionID: target.id, activeSetID: staleActiveSetID)
 
         let outcome = RuntimeLifecycle.prepareFriendRelease(
-            &document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now
+            &document, intent: friendIntent, at: now
         )
         XCTAssertEqual(outcome, .noOp(.activeSetMismatch))
         XCTAssertNil(document.pendingFriendRelease)
@@ -211,7 +211,7 @@ final class FriendReleaseTests: XCTestCase {
         try store.withTransaction { context in
             context.document.sessions = [target]
             let outcome = RuntimeLifecycle.prepareFriendRelease(
-                &context.document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now
+                &context.document, intent: friendIntent, at: now
             )
             XCTAssertEqual(outcome, .recorded)
             try context.commit()
@@ -247,16 +247,16 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id])
         let first = intent(sessionID: target.id, activeSetID: activeSetID, useID: "use-1")
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: first, effectiveSessionIDs: [target.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: first, at: now),
             .recorded
         )
 
         let second = intent(sessionID: target.id, activeSetID: activeSetID, useID: "use-2")
-        let conflict = RuntimeLifecycle.prepareFriendRelease(&document, intent: second, effectiveSessionIDs: [target.id], at: now)
+        let conflict = RuntimeLifecycle.prepareFriendRelease(&document, intent: second, at: now)
         XCTAssertEqual(conflict, .noOp(.conflictingPendingIntent))
         XCTAssertEqual(document.pendingFriendRelease, first)
 
-        let replay = RuntimeLifecycle.prepareFriendRelease(&document, intent: first, effectiveSessionIDs: [target.id], at: now)
+        let replay = RuntimeLifecycle.prepareFriendRelease(&document, intent: first, at: now)
         XCTAssertEqual(replay, .recorded)
         XCTAssertEqual(document.pendingFriendRelease, first)
     }
@@ -271,7 +271,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id])
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 
@@ -292,7 +292,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id])
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 
@@ -315,7 +315,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id, other.id])
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [target.id, other.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 
@@ -325,6 +325,278 @@ final class FriendReleaseTests: XCTestCase {
         XCTAssertEqual(document.recoveryCommitment?.sessionIDs, Set([other.id]))
         XCTAssertEqual(document.sessions.first(where: { $0.id == other.id })?.state, .recoveryPending)
         try document.validate()
+    }
+
+    func testPartialRecoveryCommitmentIsRebuiltPreservingEligibilityAfterReleasingOneOfItsTargets() throws {
+        // `requestRecovery` commits to every effective session at once, so a
+        // commitment of {target, other} is representable even though this
+        // release only ever targets `target`.
+        let target = session(id: UUID(), origin: .scheduled, start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 3_600)
+        let other = session(id: UUID(), origin: .manual, start: target.start, duration: 7_200, dataID: 2)
+        var document = RuntimeStoreDocument()
+        document.sessions = [target, other]
+        document.manualRegistrationActive = true
+        let requestedAt = target.start.addingTimeInterval(5)
+        let originalCommitment = try RecoveryCommitment(sessionIDs: [target.id, other.id], requestedAt: requestedAt)
+        document.recoveryCommitment = originalCommitment
+        document.sessions[0].state = .recoveryPending
+        document.sessions[1].state = .recoveryPending
+
+        let now = target.start.addingTimeInterval(10)
+        let activeSetID = RuntimeActiveSet.id(for: [target.id, other.id])
+        let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
+        XCTAssertEqual(
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
+            .recorded
+        )
+
+        let outcome = RuntimeLifecycle.applyFriendRelease(&document, useID: friendIntent.useID, at: now.addingTimeInterval(1))
+        guard case .released = outcome else { return XCTFail("expected a released outcome, got \(outcome)") }
+
+        // The commitment survives, now targeting only `other`, with identical
+        // eligibility — the fixed-delay recovery timer must not move.
+        XCTAssertEqual(document.recoveryCommitment?.sessionIDs, Set([other.id]))
+        XCTAssertEqual(document.recoveryCommitment?.requestedAt, originalCommitment.requestedAt)
+        XCTAssertEqual(document.recoveryCommitment?.eligibleAt, originalCommitment.eligibleAt)
+        XCTAssertEqual(document.sessions.first(where: { $0.id == other.id })?.state, .recoveryPending)
+        XCTAssertEqual(document.sessions.first(where: { $0.id == target.id })?.state, .released)
+        try document.validate()
+    }
+
+    // MARK: - Live-set recheck (not a caller-supplied claim)
+
+    func testPrepareTargetOutsideTheLiveEnforcementSetIsANoOp() throws {
+        let target = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 3_600)
+        var document = RuntimeStoreDocument()
+        document.sessions = [target]
+        let now = target.start.addingTimeInterval(10)
+        let unknownSessionID = UUID()
+        let friendIntent = intent(sessionID: unknownSessionID, activeSetID: RuntimeActiveSet.id(for: [target.id]))
+
+        let outcome = RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now)
+        XCTAssertEqual(outcome, .noOp(.alreadyEnded))
+        XCTAssertNil(document.pendingFriendRelease)
+        try document.validate()
+    }
+
+    func testPrepareManualTargetWithoutActiveManualRegistrationIsANoOpEvenThoughItIsEffective() throws {
+        let manual = session(id: UUID(), origin: .manual, start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 3_600)
+        var document = RuntimeStoreDocument()
+        document.sessions = [manual]
+        document.manualRegistrationActive = false
+        let now = manual.start.addingTimeInterval(10)
+        XCTAssertTrue(manual.isEffective(at: now))
+        // A digest over just the manual session, so a mismatch cannot also
+        // explain the rejection — only the enforcement-membership check can.
+        let friendIntent = intent(sessionID: manual.id, activeSetID: RuntimeActiveSet.id(for: [manual.id]))
+
+        let outcome = RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now)
+        XCTAssertEqual(outcome, .noOp(.alreadyEnded))
+        XCTAssertNil(document.pendingFriendRelease)
+        try document.validate()
+    }
+
+    func testApplyActiveSetMismatchBecauseAnotherSessionStartedBetweenPrepareAndApplyIsANoOp() throws {
+        let target = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 3_600)
+        var document = RuntimeStoreDocument()
+        document.sessions = [target]
+        let now = target.start.addingTimeInterval(10)
+        let friendIntent = intent(sessionID: target.id, activeSetID: RuntimeActiveSet.id(for: [target.id]))
+        XCTAssertEqual(RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now), .recorded)
+
+        // A second session starts before the apply runs, changing the live
+        // enforcement set out from under the already-prepared approval.
+        let other = session(id: UUID(), origin: .manual, start: now, duration: 3_600, dataID: 2)
+        document.sessions.append(other)
+        document.manualRegistrationActive = true
+
+        let outcome = RuntimeLifecycle.applyFriendRelease(&document, useID: friendIntent.useID, at: now.addingTimeInterval(1))
+        XCTAssertEqual(outcome, .noOp(.activeSetMismatch))
+        XCTAssertNil(document.pendingFriendRelease)
+        XCTAssertEqual(document.sessions.first(where: { $0.id == target.id })?.state, .active)
+        try document.validate()
+    }
+
+    func testManualTargetReleaseWhileScheduledSessionRemainsAppliesAndStopsTheManualRoute() throws {
+        let scheduled = session(id: UUID(), origin: .scheduled, start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 7_200, dataID: 2)
+        let manual = session(id: UUID(), origin: .manual, start: scheduled.start, duration: 3_600, dataID: 1)
+        var document = RuntimeStoreDocument()
+        document.sessions = [scheduled, manual]
+        document.manualRegistrationActive = true
+        let route = RuntimeManualRouteBinding(sessionID: manual.id, registeredStart: manual.start, registeredEnd: manual.end)
+        document.manualRoute = route
+
+        let now = manual.start.addingTimeInterval(10)
+        let activeSetID = RuntimeActiveSet.id(for: [scheduled.id, manual.id])
+        let friendIntent = intent(sessionID: manual.id, activeSetID: activeSetID)
+        XCTAssertEqual(RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now), .recorded)
+
+        let outcome = RuntimeLifecycle.applyFriendRelease(&document, useID: friendIntent.useID, at: now.addingTimeInterval(1))
+        guard case .released(let releasedID, let remaining, let effect) = outcome else {
+            return XCTFail("expected a released outcome, got \(outcome)")
+        }
+        XCTAssertEqual(releasedID, manual.id)
+        XCTAssertEqual(remaining, [scheduled.id])
+        XCTAssertEqual(effect.policyIntent, .apply)
+        XCTAssertEqual(effect.manualRouteToStop, route)
+        XCTAssertFalse(document.manualRegistrationActive)
+        XCTAssertFalse(document.manualRegistrationIntent)
+        try document.validate()
+    }
+
+    // MARK: - Whole-document no-op equality
+
+    func testConflictingPrepareNoOpChangesNothingInTheDocumentAtAll() throws {
+        let target = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 3_600)
+        var document = RuntimeStoreDocument()
+        document.sessions = [target]
+        let now = target.start.addingTimeInterval(10)
+        let activeSetID = RuntimeActiveSet.id(for: [target.id])
+        let first = intent(sessionID: target.id, activeSetID: activeSetID, useID: "use-1")
+        XCTAssertEqual(RuntimeLifecycle.prepareFriendRelease(&document, intent: first, at: now), .recorded)
+
+        let before = document
+        let second = intent(sessionID: target.id, activeSetID: activeSetID, useID: "use-2")
+        let outcome = RuntimeLifecycle.prepareFriendRelease(&document, intent: second, at: now)
+        XCTAssertEqual(outcome, .noOp(.conflictingPendingIntent))
+        XCTAssertEqual(document, before)
+    }
+
+    func testApplyWithAMismatchedUseIDChangesNothingInTheDocumentAtAll() throws {
+        let target = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 3_600)
+        var document = RuntimeStoreDocument()
+        document.sessions = [target]
+        let now = target.start.addingTimeInterval(10)
+        let activeSetID = RuntimeActiveSet.id(for: [target.id])
+        let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID, useID: "use-1")
+        XCTAssertEqual(RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now), .recorded)
+
+        let before = document
+        let outcome = RuntimeLifecycle.applyFriendRelease(&document, useID: "not-the-pending-use-id", at: now)
+        XCTAssertEqual(outcome, .noOp(.noMatchingPendingIntent))
+        XCTAssertEqual(document, before)
+    }
+
+    func testNaturalEndNoOpChangesOnlyWhatExpireNaturalSessionsAloneWouldChange() throws {
+        let target = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 600)
+        var document = RuntimeStoreDocument()
+        document.sessions = [target]
+        let now = target.start.addingTimeInterval(10)
+        let activeSetID = RuntimeActiveSet.id(for: [target.id])
+        let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
+        XCTAssertEqual(RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now), .recorded)
+
+        // The "expected" document is built by applying only the general
+        // normalization that `expireNaturalSessions` already performs
+        // (including dropping a stale `pendingFriendRelease`); nothing else.
+        var expected = document
+        _ = RuntimeLifecycle.expireNaturalSessions(&expected, at: target.end.addingTimeInterval(1))
+        XCTAssertNil(expected.pendingFriendRelease)
+
+        let outcome = RuntimeLifecycle.applyFriendRelease(&document, useID: friendIntent.useID, at: target.end.addingTimeInterval(1))
+        XCTAssertEqual(outcome, .noOp(.alreadyEnded))
+        XCTAssertEqual(document, expected)
+    }
+
+    // MARK: - Contract edges
+
+    func testValidateRejectsAPendingIntentReferencingAnUnknownSession() throws {
+        var document = RuntimeStoreDocument()
+        document.pendingFriendRelease = RuntimeFriendReleaseIntent(
+            sessionID: UUID(),
+            activeSetID: "deadbeef",
+            requestID: "req",
+            approvalID: "appr",
+            useID: "use",
+            approverIdentityID: "friend",
+            createdAt: Date(timeIntervalSinceReferenceDate: 1_000)
+        )
+        XCTAssertThrowsError(try document.validate()) { error in
+            XCTAssertEqual(error as? RuntimeValidationError, .corruptSharedData)
+        }
+        XCTAssertThrowsError(try JSONDecoder().decode(RuntimeStoreDocument.self, from: JSONEncoder().encode(document)))
+    }
+
+    func testReleasedOccurrenceJSONRoundTripPreservesCauseAndFriendUseID() throws {
+        let marker = RuntimeReleasedOccurrence(
+            sessionID: UUID(),
+            origin: .scheduled,
+            start: Date(timeIntervalSinceReferenceDate: 1_000),
+            end: Date(timeIntervalSinceReferenceDate: 2_000),
+            releasedAt: Date(timeIntervalSinceReferenceDate: 2_000),
+            cause: .friendApproval,
+            friendUseID: "use-123"
+        )
+        let data = try JSONEncoder().encode(marker)
+        let decoded = try JSONDecoder().decode(RuntimeReleasedOccurrence.self, from: data)
+        XCTAssertEqual(decoded, marker)
+        XCTAssertEqual(decoded.cause, .friendApproval)
+        XCTAssertEqual(decoded.friendUseID, "use-123")
+    }
+
+    func testPruneTerminalSessionsProtectsThePendingFriendReleaseTargetUnderTheSixtyFourMarkerCap() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        var document = RuntimeStoreDocument()
+        var protectedTargetID: UUID?
+        for index in 0..<70 {
+            let old = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: Double(index)), duration: 1)
+            var released = old
+            released.state = .released
+            document.sessions.append(released)
+            document.releasedOccurrences.append(RuntimeReleasedOccurrence(
+                sessionID: old.id,
+                origin: old.origin,
+                start: old.start,
+                end: old.end,
+                releasedAt: old.end,
+                cause: .friendApproval,
+                friendUseID: "use-\(index)"
+            ))
+            // Pick an old entry: without protection it would be among the
+            // first pruned, since pruning removes the oldest first.
+            if index == 3 { protectedTargetID = old.id }
+        }
+        document.pendingFriendRelease = RuntimeFriendReleaseIntent(
+            sessionID: protectedTargetID!,
+            activeSetID: "stale-set",
+            requestID: "req",
+            approvalID: "appr",
+            useID: "use-pending",
+            approverIdentityID: "friend",
+            createdAt: now
+        )
+
+        RuntimeLifecycle.pruneTerminalSessions(&document, at: now)
+
+        XCTAssertLessThanOrEqual(document.sessions.count, 64)
+        XCTAssertLessThanOrEqual(document.releasedOccurrences.count, 64)
+        XCTAssertNotNil(document.sessions.first(where: { $0.id == protectedTargetID }))
+        XCTAssertNotNil(document.releasedOccurrences.first(where: { $0.sessionID == protectedTargetID }))
+        XCTAssertEqual(document.pendingFriendRelease?.sessionID, protectedTargetID)
+        try document.validate()
+    }
+
+    func testPrepareAfterNaturalEndAndExactlyAtEndIsANoOp() throws {
+        let target = session(id: UUID(), start: Date(timeIntervalSinceReferenceDate: 1_000), duration: 600)
+        let activeSetID = RuntimeActiveSet.id(for: [target.id])
+        let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID)
+
+        // Exactly at `end`: `isEffective(at:)` is a half-open interval.
+        var atEnd = RuntimeStoreDocument()
+        atEnd.sessions = [target]
+        XCTAssertEqual(RuntimeLifecycle.prepareFriendRelease(&atEnd, intent: friendIntent, at: target.end), .noOp(.alreadyEnded))
+        XCTAssertNil(atEnd.pendingFriendRelease)
+        XCTAssertEqual(atEnd.sessions.first?.state, .expired)
+
+        // Well after natural end.
+        var afterEnd = RuntimeStoreDocument()
+        afterEnd.sessions = [target]
+        XCTAssertEqual(
+            RuntimeLifecycle.prepareFriendRelease(&afterEnd, intent: friendIntent, at: target.end.addingTimeInterval(5)),
+            .noOp(.alreadyEnded)
+        )
+        XCTAssertNil(afterEnd.pendingFriendRelease)
+        XCTAssertEqual(afterEnd.sessions.first?.state, .expired)
     }
 
     // MARK: - Scheduled fencing
@@ -342,7 +614,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [scheduled.id])
         let friendIntent = intent(sessionID: scheduled.id, activeSetID: activeSetID)
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [scheduled.id], at: now, calendar: calendar),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now, calendar: calendar),
             .recorded
         )
 
@@ -374,7 +646,7 @@ final class FriendReleaseTests: XCTestCase {
         let activeSetID = RuntimeActiveSet.id(for: [target.id])
         let friendIntent = intent(sessionID: target.id, activeSetID: activeSetID, useID: "use-1")
         XCTAssertEqual(
-            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, effectiveSessionIDs: [target.id], at: now),
+            RuntimeLifecycle.prepareFriendRelease(&document, intent: friendIntent, at: now),
             .recorded
         )
 

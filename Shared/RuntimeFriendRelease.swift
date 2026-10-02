@@ -84,20 +84,26 @@ public extension RuntimeLifecycle {
     /// re-prepare; rejects a second, different pending intent. Every failure
     /// path is a `.noOp`, never a throw, and makes no state change beyond the
     /// natural expiry that `expireNaturalSessions` always performs first.
+    ///
+    /// The live enforcement set is always recomputed from `document` itself
+    /// — a caller-supplied set would let a stale or forged claim bind an
+    /// approval to sessions that were never actually concurrently enforcing.
+    /// This also means a manual session that is merely `isEffective` but not
+    /// yet `manualRegistrationActive` (not actually enforcing) cannot be
+    /// targeted, matching `RuntimeSessionDecision.enforcementSessions`.
     static func prepareFriendRelease(
         _ document: inout RuntimeStoreDocument,
         intent: RuntimeFriendReleaseIntent,
-        effectiveSessionIDs: [UUID],
         at date: Date,
         calendar: Calendar = .current
     ) -> RuntimeFriendRelease.PrepareOutcome {
         _ = expireNaturalSessions(&document, at: date, calendar: calendar)
 
-        guard let session = document.sessions.first(where: { $0.id == intent.sessionID }),
-              session.isEffective(at: date) else {
+        let enforcementIDs = RuntimeSessionDecision.enforcementSessions(in: document, at: date).map(\.id)
+        guard enforcementIDs.contains(intent.sessionID) else {
             return .noOp(.alreadyEnded)
         }
-        guard RuntimeActiveSet.id(for: effectiveSessionIDs) == intent.activeSetID else {
+        guard RuntimeActiveSet.id(for: enforcementIDs) == intent.activeSetID else {
             return .noOp(.activeSetMismatch)
         }
         if let existing = document.pendingFriendRelease, existing != intent {
@@ -113,6 +119,13 @@ public extension RuntimeLifecycle {
     /// first call releases the session and clears the intent; a later replay
     /// finds no matching pending intent and returns a calm `.noOp` rather
     /// than re-releasing or throwing.
+    ///
+    /// Re-derives and rechecks the live enforcement set exactly as
+    /// `prepareFriendRelease` does, rather than trusting the set recorded at
+    /// prepare time: the live set can change between prepare and apply (a
+    /// new session can start, or the target's manual registration can drop)
+    /// and a release must never go through against a set the friend did not
+    /// actually approve.
     static func applyFriendRelease(
         _ document: inout RuntimeStoreDocument,
         useID: String,
@@ -125,12 +138,17 @@ public extension RuntimeLifecycle {
 
         _ = expireNaturalSessions(&document, at: date, calendar: calendar)
 
-        guard let session = document.sessions.first(where: { $0.id == pending.sessionID }),
-              session.isEffective(at: date) else {
-            // Natural end (or some other release) already won. Clear the
-            // stale intent so a foreground replay has nothing left to retry.
+        let enforcementIDs = RuntimeSessionDecision.enforcementSessions(in: document, at: date).map(\.id)
+        guard enforcementIDs.contains(pending.sessionID) else {
+            // Natural end (or some other release, or a dropped manual
+            // registration) already won. Clear the stale intent so a
+            // foreground replay has nothing left to retry.
             document.pendingFriendRelease = nil
             return .noOp(.alreadyEnded)
+        }
+        guard RuntimeActiveSet.id(for: enforcementIDs) == pending.activeSetID else {
+            document.pendingFriendRelease = nil
+            return .noOp(.activeSetMismatch)
         }
 
         do {
@@ -142,21 +160,58 @@ public extension RuntimeLifecycle {
                 cause: .friendApproval,
                 friendUseID: pending.useID
             )
+        } catch RuntimeValidationError.invalidConfiguration(let message) where message == RuntimeLifecycle.releaseAlreadyEndedMessage {
+            // The one documented way `release` can fail here: a race between
+            // the effectiveness recheck above and this call let natural end
+            // win in between. Convert to the same calm no-op.
+            document.pendingFriendRelease = nil
+            return .noOp(.alreadyEnded)
         } catch {
-            // `release` throws only "already ended" for an empty release
-            // set; a race between the effectiveness check above and this
-            // call converts to the same calm no-op rather than propagating.
+            // `release`'s API makes no other provision for failure with a
+            // single, already-rechecked session ID and a finite `date`; this
+            // branch is a last-resort safety net, not an expected path.
+            // `applyFriendRelease` cannot rethrow (every caller treats it as
+            // non-throwing), so map to the safe no-op direction but surface
+            // the surprise loudly in debug builds.
+            assertionFailure("RuntimeLifecycle.release threw an unexpected error in applyFriendRelease: \(error)")
             document.pendingFriendRelease = nil
             return .noOp(.alreadyEnded)
         }
         document.pendingFriendRelease = nil
 
+        // `release`'s own recovery-commitment normalization can only clear
+        // the *whole* commitment (when no target remains effective), because
+        // `RecoveryCommitment.sessionIDs` is immutable; it cannot drop just
+        // the released ID from a commitment that still targets other live
+        // sessions. A multi-target recovery request made before this exact-
+        // session release must keep targeting its other sessions with the
+        // same eligibility — not go corrupt (P1-1) or silently vanish.
+        if let commitment = document.recoveryCommitment, commitment.sessionIDs.contains(pending.sessionID) {
+            let remainingTargets = commitment.sessionIDs.subtracting([pending.sessionID])
+            if !remainingTargets.isEmpty {
+                do {
+                    document.recoveryCommitment = try RecoveryCommitment(sessionIDs: remainingTargets, requestedAt: commitment.requestedAt)
+                } catch {
+                    // `requestedAt` and `remainingTargets` both came from an
+                    // already-valid commitment, so this cannot actually
+                    // throw; keep the document safe (no commitment is always
+                    // valid) if that assumption is ever wrong.
+                    assertionFailure("Rebuilding a recovery commitment after a friend release should never fail: \(error)")
+                    document.recoveryCommitment = nil
+                }
+            }
+            // An empty remaining set was already normalized to nil by `release`.
+        }
+
+        // Mirror `confirmRecovery` exactly: the manual flags are cleared
+        // whenever no manual session remains live, regardless of whether a
+        // `manualRoute` binding happens to be present.
         let hasLiveManual = document.sessions.contains {
             $0.origin == .manual && $0.isEffective(at: date)
         }
         var manualRouteToStop: RuntimeManualRouteBinding?
-        if !hasLiveManual, let route = document.manualRoute {
-            manualRouteToStop = route
+        if !hasLiveManual {
+            manualRouteToStop = document.manualRoute
             document.manualRegistrationActive = false
             document.manualRegistrationIntent = false
         }

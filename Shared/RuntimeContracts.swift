@@ -942,12 +942,16 @@ public enum RuntimeOperation: String, Codable, Sendable {
     case conflictRejected
     case legacyMigration
     case emergencyReset
-    /// Diagnostics for the durable friend-release intent lifecycle (R5
-    /// Slice B2). These never gate enforcement; they only record what
-    /// happened for later troubleshooting.
-    case friendReleaseIntentRecorded
-    case friendReleaseApplied
-    case friendReleaseNoOp
+    // Intentionally no dedicated friend-release cases (R5 Slice B2): this
+    // enum decodes strictly (an unrecognized raw value fails the whole
+    // `RuntimeDiagnostic`/`RuntimeStoreDocument` decode), so adding a case
+    // here would make a document written by a newer app undecodable by an
+    // older app or monitor extension during a staged rollout. The
+    // friend-release lifecycle instead reuses the closest existing case for
+    // each diagnostic (for example `.policyClearAttempted`/`.policyCleared`
+    // around the apply transaction, `.conflictRejected` for a no-op) and
+    // carries the specific friend-release detail — which step, which
+    // `useID`, which `NoOpReason` — in `RuntimeDiagnostic.detail`.
 }
 
 public struct RuntimeDiagnostic: Codable, Equatable, Sendable {
