@@ -23,6 +23,7 @@ import {
   decodeSignedOperation,
   verifySignedOperationSignature,
   encodeRelayResult,
+  encodeInboxResponse,
   decodeInvitation,
   verifyInvitationSignature,
   decodeApproval,
@@ -199,6 +200,47 @@ describe("raw (actual client wire format) operations decode and verify", () => {
     const op = (vectors.rawOperations as any[]).find((o) => o.name === "raw_ack_no_expected_revision");
     const operation = decodeSignedOperation(JSON.parse(op.signedOperationJSON));
     expect(operation.expectedRevision).toBeNull();
+  });
+});
+
+describe("InboxResponse wire shape carries approvals (R5 Slice B2a, contract v1.2)", () => {
+  it("an owner inbox sample's approvals array decodes and verifies against the fixture request", () => {
+    const parsed = JSON.parse(vectors.inboxResponseSample);
+    expect(Array.isArray(parsed.approvals)).toBe(true);
+    expect(parsed.approvals).toHaveLength(1);
+    const approval = decodeApproval(parsed.approvals[0]);
+    expect(verifyApprovalSignature(approval)).toBe(true);
+    expect(approval.decision).toBe("approved");
+    const request = decodeTrustedRequest(parsed.requests[0]);
+    expect(approval.requestID).toBe(request.requestID);
+    expect(approval.sessionID).toBe(request.sessionID);
+    expect(approval.activeSetID).toBe(request.activeSetID);
+  });
+
+  it("encodeInboxResponse reproduces the same approvals fields and values as the Swift vector", () => {
+    const parsed = JSON.parse(vectors.inboxResponseSample);
+    const approval = decodeApproval(parsed.approvals[0]);
+    const request = decodeTrustedRequest(parsed.requests[0]);
+    const encoded = encodeInboxResponse({
+      ownerIdentityID: parsed.ownerIdentityID,
+      stateRoot: undefined,
+      revision: parsed.revision,
+      requests: [request],
+      pairings: [],
+      consents: [],
+      approvals: [approval]
+    });
+    // Key order differs (Swift's `.sortedKeys` vs. a TS object literal), but
+    // every field and value must agree -- re-decoding either side through
+    // `decodeApproval` and comparing proves the wire shape is equivalent,
+    // not just textually identical.
+    const reDecoded = decodeApproval((encoded as any).approvals[0]);
+    expect(reDecoded).toEqual(approval);
+  });
+
+  it("a pure helper/approver inbox sample omits the approvals key entirely", () => {
+    const parsed = JSON.parse(vectors.helperInboxResponseSample);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "approvals")).toBe(false);
   });
 });
 

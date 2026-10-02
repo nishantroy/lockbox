@@ -996,6 +996,84 @@ final class CompanionKitTests: XCTestCase {
             guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
         }
     }
+
+    // MARK: - R5 Slice B2a: owner inbox approval delivery
+
+    func testOwnerInboxIncludesTheAcceptedApprovalAndAHelperInboxOmitsIt() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "inbox-approval-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+
+        // Before approval, the owner's inbox carries the (still-pending)
+        // request but no approval for it yet.
+        let beforeOperation = try makeInboxOperation(identity: owner.signer, now: t)
+        let beforeInbox = try relay.fetchInbox(beforeOperation)
+        XCTAssertEqual(beforeInbox.approvals, [])
+
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
+
+        let ownerOperation = try makeInboxOperation(identity: owner.signer, now: t)
+        let ownerInbox = try relay.fetchInbox(ownerOperation)
+        XCTAssertEqual(ownerInbox.approvals, [approval])
+
+        let helperOperation = try makeInboxOperation(identity: approver.signer, now: t)
+        let helperInbox = try relay.fetchInbox(helperOperation)
+        XCTAssertNil(helperInbox.approvals)
+        XCTAssertTrue(helperInbox.requests.contains { $0.requestID == request.requestID })
+    }
+
+    private func makeInboxOperation(identity signer: DeviceSigner, now: Date) throws -> SignedOperation {
+        let query = InboxQuery(identityID: signer.identity.identityID, issuedAt: now)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let body = try encoder.encode(query)
+        let operationID = operationIdentifier(kind: "inbox", signer: signer.identity, body: body)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil, kind: "inbox",
+                                           signer: signer.identity, body: body, signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation", fields: unsigned.signingFields())
+        return try SignedOperation(operationID: operationID, expectedRevision: nil, kind: "inbox",
+                                   signer: signer.identity, body: body, signature: signature)
+    }
+
+    /// B2a item 2: "Same useID and approval must produce the same operation
+    /// ID, so a retry gets the stored idempotent response."
+    /// `operationIdentifier` hashes only `(kind, signer, bodyDigest)`, and the
+    /// `ApprovalUse` body is itself a pure, deterministic encoding of
+    /// `(approval, requestID, useID, consentGeneration)` -- so this is a
+    /// property of `operationIdentifier`/`ApprovalUse` encoding, independent
+    /// of the relay.
+    func testUseApprovalOperationIDIsStableForTheSameApprovalAndUseID() throws {
+        let (_, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "stable-op-id-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
+        let use = ApprovalUse(approval: approval, requestID: request.requestID, useID: "stable-use-id",
+                              consentGeneration: approval.consentGeneration)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let bodyA = try encoder.encode(use)
+        let bodyB = try encoder.encode(use)
+        XCTAssertEqual(bodyA, bodyB)
+        let idA = operationIdentifier(kind: "use", signer: owner.signer.identity, body: bodyA)
+        let idB = operationIdentifier(kind: "use", signer: owner.signer.identity, body: bodyB)
+        XCTAssertEqual(idA, idB)
+    }
+
+    /// The async client's `useApproval` applies the same response-verification
+    /// checks as the sync client (`validateUseVerification`, shared in
+    /// `ProtocolModels.swift`). Exercised here against the sync client with a
+    /// transport double that tampers with an otherwise-valid "use" response,
+    /// since both clients route through the identical shared helper.
+    func testSyncUseApprovalRejectsATamperedVerificationResponse() throws {
+        let (relay, owner, approver, pairing, session) = try harness()
+        let request = try owner.requestUnlock(requestID: "tamper-verification-request", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 600)
+        let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved)
+
+        let wrongUseIDTransport = VerificationUseIDSwappingTransport(real: relay, substituteUseID: "attacker-use-id")
+        let ownerViaWrongUseID = CompanionClient(signer: owner.signer, transport: wrongUseIDTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        XCTAssertThrowsError(try ownerViaWrongUseID.useApproval(approval, request: request, useID: "real-use-id")) { error in
+            guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
+        }
+    }
 }
 
 /// Forwards every operation to a real in-memory relay, capturing the decoded
@@ -1049,6 +1127,31 @@ private final class OwnerSwappingTransport: CompanionTransport, @unchecked Senda
         let swapped = try Pairing(pairingID: pairing.pairingID, owner: attacker, approver: pairing.approver,
                                   epoch: pairing.epoch, createdAt: pairing.createdAt, state: pairing.state)
         return try RelayResponse(operationID: response.operationID, revision: response.revision, result: .pairing(swapped))
+    }
+
+    func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
+        try real.fetchInbox(operation)
+    }
+}
+
+/// R5 Slice B2a: forwards every operation to a real in-memory relay, except
+/// that a successful "use" response has its `ApprovalVerification.useID`
+/// substituted before being returned — simulating a malicious or buggy relay
+/// confirming a different use than the one actually submitted.
+/// `CompanionClient.useApproval`/`AsyncCompanionClient.useApproval` must
+/// reject this via `validateUseVerification` before ever treating the
+/// approval as consumed.
+private final class VerificationUseIDSwappingTransport: CompanionTransport, @unchecked Sendable {
+    let real: InMemoryCompanionRelay
+    let substituteUseID: String
+    init(real: InMemoryCompanionRelay, substituteUseID: String) { self.real = real; self.substituteUseID = substituteUseID }
+
+    func submit(_ operation: SignedOperation) throws -> RelayResponse {
+        let response = try real.submit(operation)
+        guard operation.kind == "use", case let .verification(verification) = response.result else { return response }
+        let swapped = ApprovalVerification(approval: verification.approval, verifiedAt: verification.verifiedAt,
+                                           useID: substituteUseID)
+        return try RelayResponse(operationID: response.operationID, revision: response.revision, result: .verification(swapped))
     }
 
     func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {

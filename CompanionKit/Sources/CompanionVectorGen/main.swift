@@ -560,9 +560,17 @@ out["relayResultSamples"] = resultSamples
 
 let sampleRelayResponse = try RelayResponse(operationID: "op-sample-01", revision: 7, result: .acknowledgement)
 out["relayResponseSample"] = try resultJSON(sampleRelayResponse)
+// R5 Slice B2a: an owner inbox sample that also carries `approvals` (contract
+// v1.2, additive) -- the relay-stored accepted approval for the fixture
+// request, exactly as an owner fetch of their own ledger would include it.
 let sampleInboxResponse = try InboxResponse(ownerIdentityID: ownerSigner.identity.identityID, revision: 7,
-                                            requests: [trustedRequest])
+                                            requests: [trustedRequest], approvals: [signedApproval])
 out["inboxResponseSample"] = try resultJSON(sampleInboxResponse)
+
+// A pure helper/approver inbox sample omits `approvals` entirely (`nil`, not
+// an empty array) -- confirms the wire body has no "approvals" key at all.
+let sampleHelperInboxResponse = try InboxResponse(ownerIdentityID: nil, revision: 7, requests: [trustedRequest])
+out["helperInboxResponseSample"] = try resultJSON(sampleHelperInboxResponse)
 
 // MARK: - Tampered full-operation variants (built from the "invite" and "request" ops)
 
