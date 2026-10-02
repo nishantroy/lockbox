@@ -35,6 +35,14 @@ public enum OwnerAcceptanceCheck {
     /// - `acceptance.inviteID` matches `invite` (the invite this device
     ///   created, passed in by the caller);
     /// - the invite has not expired as of `now`;
+    /// - `acceptance.issuedAt` is bounded both against the invite
+    ///   (`>= invite.payload.issuedAt - 60`, i.e. not claimed to predate the
+    ///   invite by more than clock skew; `< invite.payload.expiresAt`, i.e.
+    ///   not claimed to have happened after the invite's own expiry) and
+    ///   against this device's own clock (`<= now + 60`, i.e. not claimed to
+    ///   be from the future) — P2a review follow-up P2-4: a relay-supplied
+    ///   acceptance's own timestamp was previously never checked here at
+    ///   all, only the invite's expiry against `now`;
     /// - `acceptance.verificationCode == PairingAcceptance.code(invite:approver:)`,
     ///   i.e. the code this device would itself derive for this exact invite
     ///   and approver.
@@ -59,6 +67,13 @@ public enum OwnerAcceptanceCheck {
         try invite.validateSignature()
         // The invite has not expired.
         guard now < invite.payload.expiresAt else {
+            throw CompanionError.expired
+        }
+        // The acceptance's own timestamp, bounded against both the invite
+        // and this device's clock (P2-4).
+        guard acceptance.issuedAt >= invite.payload.issuedAt.addingTimeInterval(-60),
+              acceptance.issuedAt < invite.payload.expiresAt,
+              acceptance.issuedAt <= now.addingTimeInterval(60) else {
             throw CompanionError.expired
         }
         let expectedCode = PairingAcceptance.code(invite: invite.payload, approver: acceptance.approver)

@@ -197,4 +197,53 @@ describe("R5 pairing v2: owner inbox pending-acceptance delivery", () => {
     const ledgerAfter = deserializeLedger(afterPurge.text);
     expect(Object.keys(ledgerAfter.pendingAcceptances)).not.toContain(flow.acceptanceID);
   });
+
+  // P2a review follow-up P2-3: a legacy flat row's stored root was computed
+  // once, by whatever code was live when it was written -- this version's
+  // `normalizePendingAcceptance`/inbox-filter logic must read it without
+  // ever rewriting it, so a later read (inbox fetch) or an unrelated write
+  // (any further mutation) must still verify cleanly against that
+  // untouched root rather than fail closed with `integrity_error`.
+  it("a legacy flat pendingAcceptances row, with its root computed once, still verifies on a later read and an unrelated mutation", async () => {
+    const now = BASE_NOW + 8_000;
+    const owner = makeIdentity("owner");
+    const approver = makeIdentity("trustedApprover");
+    await submitOperation(toRequest(buildOperation({ kind: "ack", payload: {}, signer: owner, expectedRevision: null })), now);
+
+    const acceptanceID = uniqueID("acceptance");
+    const inviteID = uniqueID("invite");
+    const bareAcceptanceWire = {
+      acceptanceID,
+      inviteID,
+      owner: encodeDeviceIdentityWire(owner.identity),
+      approver: encodeDeviceIdentityWire(approver.identity),
+      issuedAt: swiftDate(now),
+      verificationCode: "123456"
+    };
+
+    // Write the legacy flat row and compute+store the root exactly once,
+    // simulating a production row from before this change (no further
+    // recompute happens anywhere below).
+    await patchLedger(owner.identity.identityID, (ledger) => {
+      // @ts-expect-error -- deliberately the legacy flat shape (no
+      // `{acceptance, signature}` wrapper), what a pre-existing row looks
+      // like.
+      ledger.pendingAcceptances[acceptanceID] = decodePairingAcceptance(bareAcceptanceWire);
+    });
+
+    // A read must verify cleanly against that stored root: no
+    // `integrity_error`, and the unsigned entry is skipped rather than
+    // delivered unverifiable.
+    const inboxQueryOp = buildOperation({ kind: "inbox", payload: { identityID: owner.identity.identityID, issuedAt: swiftDate(now) }, signer: owner, expectedRevision: null });
+    const inbox = await fetchInboxOperation(toRequest(inboxQueryOp), now);
+    expect(inbox.pendingAcceptances).toEqual([]);
+
+    // An unrelated mutation (never touching pendingAcceptances) must also
+    // verify cleanly against the same untouched root and commit normally --
+    // asserting specifically that it resolves (no integrity_error, no any
+    // other failure).
+    await expect(
+      submitOperation(toRequest(buildOperation({ kind: "ack", payload: {}, signer: owner, expectedRevision: null })), now)
+    ).resolves.toBeDefined();
+  });
 });

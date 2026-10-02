@@ -54,6 +54,20 @@ final class OwnerAcceptanceCheckTests: XCTestCase {
         return SignedAcceptance(acceptance: tampered, signature: signature)
     }
 
+    /// Same consistently-signed-but-tampered pattern as
+    /// `acceptanceWithTamperedCode`, targeting `issuedAt` instead (P2a review
+    /// follow-up P2-4).
+    private func acceptanceWithTamperedIssuedAt(_ acceptance: PairingAcceptance, approverSigner: DeviceSigner, issuedAt: Date) throws -> SignedAcceptance {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var object = try JSONSerialization.jsonObject(with: encoder.encode(acceptance)) as! [String: Any]
+        object["issuedAt"] = issuedAt.timeIntervalSinceReferenceDate
+        let tamperedData = try JSONSerialization.data(withJSONObject: object)
+        let tampered = try JSONDecoder().decode(PairingAcceptance.self, from: tamperedData)
+        let signature = try approverSigner.sign(domain: "\(CompanionCanonical.version).acceptance", fields: tampered.signingFields())
+        return SignedAcceptance(acceptance: tampered, signature: signature)
+    }
+
     // MARK: - Accepting path
 
     func testVerifyAcceptsAWellFormedAcceptanceAndReturnsTheExpectedCode() throws {
@@ -126,6 +140,40 @@ final class OwnerAcceptanceCheckTests: XCTestCase {
         XCTAssertThrowsError(try OwnerAcceptanceCheck.verify(signedAcceptance: tampered, invite: h.invitation,
                                                              ownerIdentity: h.ownerSigner.identity, now: t)) {
             XCTAssertEqual($0 as? CompanionError, .wrongVerificationCode)
+        }
+    }
+
+    func testVerifyRejectsAnAcceptanceIssuedTooFarInTheFutureRelativeToThisDevicesClock() throws {
+        let h = try harness()
+        // More than 60s ahead of `now` -- still inside the invite's own
+        // validity window, but claims to be from the future.
+        let tampered = try acceptanceWithTamperedIssuedAt(h.signedAcceptance.acceptance, approverSigner: h.approverSigner,
+                                                          issuedAt: t.addingTimeInterval(120))
+        XCTAssertThrowsError(try OwnerAcceptanceCheck.verify(signedAcceptance: tampered, invite: h.invitation,
+                                                             ownerIdentity: h.ownerSigner.identity, now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+    }
+
+    func testVerifyRejectsAnAcceptanceIssuedTooLongBeforeTheInviteItself() throws {
+        let h = try harness()
+        // More than 60s before the invite's own issuedAt -- cannot really be
+        // an acceptance of this invite.
+        let tampered = try acceptanceWithTamperedIssuedAt(h.signedAcceptance.acceptance, approverSigner: h.approverSigner,
+                                                          issuedAt: h.invitation.payload.issuedAt.addingTimeInterval(-120))
+        XCTAssertThrowsError(try OwnerAcceptanceCheck.verify(signedAcceptance: tampered, invite: h.invitation,
+                                                             ownerIdentity: h.ownerSigner.identity, now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+    }
+
+    func testVerifyRejectsAnAcceptanceIssuedAtOrAfterTheInviteExpiry() throws {
+        let h = try harness()
+        let tampered = try acceptanceWithTamperedIssuedAt(h.signedAcceptance.acceptance, approverSigner: h.approverSigner,
+                                                          issuedAt: h.invitation.payload.expiresAt)
+        XCTAssertThrowsError(try OwnerAcceptanceCheck.verify(signedAcceptance: tampered, invite: h.invitation,
+                                                             ownerIdentity: h.ownerSigner.identity, now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
         }
     }
 

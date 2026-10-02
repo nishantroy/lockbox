@@ -412,7 +412,11 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
       // owner device has no use for an acceptance it cannot verify.
       for (const raw of Object.values(row.ledger.pendingAcceptances)) {
         const { acceptance, signature } = normalizePendingAcceptance(raw);
-        if (!signature) continue;
+        // P2a review follow-up P2-5: require the full 64-byte signature,
+        // matching the Swift relay's `fetchInbox` filter
+        // (`signed.signature.count == 64`) -- a truncated/corrupt signature
+        // is no more deliverable than a missing one.
+        if (!signature || signature.length !== 64) continue;
         const invite = row.ledger.invitations[acceptance.inviteID];
         if (!invite || invite.consumedAt !== null || now >= invite.invitation.payload.expiresAt) continue;
         pendingAcceptances.push({ acceptance, signature });
