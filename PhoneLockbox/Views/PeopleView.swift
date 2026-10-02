@@ -17,8 +17,17 @@ struct PeopleView: View {
 
 #if canImport(CompanionKit)
             if companion.isAvailable {
+                // R5 pairing v2 UX fix item 7: placed first, directly under
+                // the page header, so the prompt is visible without
+                // scrolling the moment an invite link is opened.
+                if let invitation = companion.incomingInvite {
+                    IncomingInviteCard(companion: companion, invitation: invitation)
+                }
                 IntroCard()
                 InviteSomeoneCard(companion: companion)
+                ForEach(companion.pendingOwnerAcceptances) { item in
+                    PendingAcceptanceCard(companion: companion, item: item)
+                }
                 AcceptInviteCard(companion: companion)
                 if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
                     AskToEndEarlyCard(coordinator: coordinator, companion: companion)
@@ -50,6 +59,13 @@ struct PeopleView: View {
                     }
                     .accessibilityElement(children: .combine)
                 }
+            }
+            if companion.isAvailable {
+                // R5 pairing v2 UX fix item 7 ("Layout"): a bottom spacer so
+                // the last card's actionable content (Confirm/Not them,
+                // Accept/Decline, End lock now, …) is never left sitting
+                // directly under the translucent tab bar.
+                Color.clear.frame(height: 24).accessibilityHidden(true)
             }
 #else
             LockboxCard {
@@ -109,7 +125,7 @@ private struct IntroCard: View {
                     Text("Set up a trusted person")
                         .font(.title3.weight(.semibold))
                 }
-                Text("Pairing uses device-held identities confirmed with a six-digit code — no account or email is required. A trusted person can approve ending one exact session early, but that approval isn't connected to your lock yet in this build. This does not use Screen Time, and app selections and usage are never shared.")
+                Text("Pairing uses device-held identities — no account or email is required. When someone accepts your invite, confirm them here with one tap; there's no code to read aloud or type. This does not use Screen Time, and app selections and usage are never shared.")
                     .font(.subheadline)
                     .foregroundStyle(LockboxTheme.secondary)
             }
@@ -117,14 +133,62 @@ private struct IntroCard: View {
     }
 }
 
+/// R5 pairing v2 UX fix item 7 ("Incoming invite"): shown as soon as this
+/// device opens a decodable, not-yet-expired invite link
+/// (`CompanionCoordinator.incomingInvite`), directly under the page header
+/// so it's in front of the friend without scrolling. Accepting still
+/// requires this explicit tap — opening the link never accepts by itself.
+private struct IncomingInviteCard: View {
+    @ObservedObject var companion: CompanionCoordinator
+    let invitation: Invitation
+    @State private var isAccepting = false
+
+    var body: some View {
+        LockboxCard {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack(spacing: 12) {
+                    LockboxIconBadge(systemImage: "person.badge.shield.checkmark.fill", color: LockboxTheme.focus)
+                    Text("You've been invited to be a trusted person")
+                        .font(.title3.weight(.semibold))
+                }
+                Text("Accepting lets you approve ending one of their locks early, only when they ask.")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+                HStack(spacing: 10) {
+                    Button(isAccepting ? "Accepting…" : "Accept") {
+                        isAccepting = true
+                        Task {
+                            await companion.acceptInvite(invitation)
+                            isAccepting = false
+                            companion.incomingInvite = nil
+                        }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    .disabled(isAccepting)
+                    .accessibilityIdentifier("incomingInvite.acceptButton")
+
+                    Button("Not now") {
+                        companion.incomingInvite = nil
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                    .disabled(isAccepting)
+                    .accessibilityIdentifier("incomingInvite.notNowButton")
+                }
+            }
+        }
+        // Deliberately no identifier on the card itself: SwiftUI's
+        // accessibility identifier can otherwise propagate down and
+        // override each child's own identifier (observed empirically — the
+        // buttons' own `incomingInvite.acceptButton`/`notNowButton`
+        // identifiers were overwritten by a card-level one here until this
+        // was removed). The two buttons above carry the identifiers tests
+        // actually need.
+    }
+}
+
 private struct InviteSomeoneCard: View {
     @ObservedObject var companion: CompanionCoordinator
-    @State private var pastedAcceptance = ""
-    @State private var typedCode = ""
-    @State private var nickname = ""
     @State private var isCreating = false
-    @State private var isConfirming = false
-    @FocusState private var codeFieldFocused: Bool
 
     var body: some View {
         LockboxCard {
@@ -146,18 +210,18 @@ private struct InviteSomeoneCard: View {
                 .accessibilityIdentifier("inviteSomeone.createInviteButton")
 
                 if let invitation = companion.pendingInvitation {
-                    // Visible and selectable, not just copyable: lets someone
-                    // manually select/copy it too, and gives this exact text
-                    // a stable, readable place to verify from (including in
-                    // the UI test, which reads this rather than the system
-                    // pasteboard — a cross-app pasteboard read from the test
-                    // process is subject to the OS's own "Allow Paste"
-                    // confirmation, which an automated run can't answer).
-                    Text(invitation.shareLink)
-                        .font(.footnote.monospaced())
+                    // R5 pairing v2 UX fix item 7 ("Invite link display"):
+                    // the visible text is a short, truncated line, not the
+                    // raw base64 blob — but the full link stays reachable
+                    // under the same accessibility identifier, via the
+                    // accessibility *value* rather than the label, so the
+                    // UI test can still read it exactly.
+                    Text("Invite link ready")
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(LockboxTheme.secondary)
-                        .textSelection(.enabled)
                         .accessibilityIdentifier("inviteSomeone.inviteLinkText")
+                        .accessibilityLabel("Invite link ready")
+                        .accessibilityValue(invitation.shareLink)
                     ShareLink(item: invitation.shareLink) {
                         Label("Share invite link", systemImage: "square.and.arrow.up")
                     }
@@ -172,64 +236,61 @@ private struct InviteSomeoneCard: View {
                     .accessibilityHint("Copies the invite link to the clipboard")
                     .accessibilityIdentifier("inviteSomeone.copyLinkButton")
                     #endif
-                }
-
-                Divider().overlay(LockboxTheme.border)
-
-                Text("Once they accept, they'll send back an acceptance code. Paste it here, then ask them to read their six-digit code aloud and type exactly what they say below — don't read it off screen yourself.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-                TextField("Paste acceptance code", text: $pastedAcceptance, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                if let acceptance = companion.decodeAcceptance(from: pastedAcceptance) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        TextField("Name for this person", text: $nickname)
-                            .textFieldStyle(.roundedBorder)
-                        TextField("Six-digit code they read aloud", text: $typedCode)
-                            .textFieldStyle(.roundedBorder)
-                            #if os(iOS)
-                            // Not `.numberPad`: it has no return key, and the
-                            // keyboard would cover the Confirm button.
-                            .keyboardType(.numbersAndPunctuation)
-                            #endif
-                            .textContentType(.oneTimeCode)
-                            .submitLabel(.go)
-                            .onSubmit { confirm(acceptance) }
-                            .focused($codeFieldFocused)
-                            .onChange(of: typedCode) { _, newValue in
-                                // Number pads have no return key, and pasted
-                                // codes may contain spaces: keep six digits.
-                                let digits = String(newValue.filter(\.isNumber).prefix(6))
-                                if digits != newValue { typedCode = digits }
-                            }
-                            .accessibilityLabel("Six-digit code they read aloud")
-                        Button(isConfirming ? "Confirming…" : "Confirm") {
-                            confirm(acceptance)
-                        }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                        .disabled(typedCode.count != 6 || isConfirming)
-                        .accessibilityHint("Confirms this person as a trusted approver only if the typed code matches")
-                    }
+                    Text("Once they accept, you'll see a card below to confirm them — no code to type or read aloud.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
                 }
             }
         }
     }
+}
 
-    private func confirm(_ acceptance: PairingAcceptance) {
-        guard typedCode.count == 6, !isConfirming else { return }
-        codeFieldFocused = false
-        isConfirming = true
-        Task {
-            await companion.confirmAcceptance(acceptance, typedVerificationCode: typedCode, nickname: nickname)
-            isConfirming = false
-            if companion.pendingAcceptance == nil {
-                pastedAcceptance = ""; typedCode = ""; nickname = ""
+/// R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2b", item 2): one
+/// verified, relay-delivered acceptance of an invite this device created.
+/// Only ever instantiated for an entry in `companion.pendingOwnerAcceptances`
+/// — a `VerifiedPendingAcceptance` already checked with `OwnerAcceptanceCheck`
+/// against this device's own stored invite.
+private struct PendingAcceptanceCard: View {
+    @ObservedObject var companion: CompanionCoordinator
+    let item: VerifiedPendingAcceptance
+    @State private var nickname = ""
+    @State private var isBusy = false
+
+    var body: some View {
+        LockboxCard {
+            VStack(alignment: .leading, spacing: 13) {
+                LockboxSectionLabel("Someone accepted your invite", systemImage: "person.fill.checkmark")
+                Text("Sent \(item.acceptance.issuedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+                TextField("Name for this person", text: $nickname)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("pendingAcceptance.nameField")
+                HStack(spacing: 10) {
+                    Button(isBusy ? "Confirming…" : "Confirm") {
+                        isBusy = true
+                        Task {
+                            await companion.confirmPendingAcceptance(item, nickname: nickname)
+                            isBusy = false
+                        }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    .disabled(isBusy)
+                    .accessibilityHint("Confirms this person as a trusted approver")
+                    .accessibilityIdentifier("pendingAcceptance.confirmButton")
+
+                    Button("Not them", role: .destructive) {
+                        companion.dismissPendingAcceptance(item)
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                    .disabled(isBusy)
+                    .accessibilityIdentifier("pendingAcceptance.notThemButton")
+                }
             }
         }
+        // Deliberately no identifier on the card itself — see the matching
+        // comment on `IncomingInviteCard`: it overwrote this card's own
+        // buttons'/field's identifiers when present.
     }
 }
 
@@ -263,45 +324,29 @@ private struct AcceptInviteCard: View {
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 .disabled(companion.decodeInvitation(from: pastedInvite) == nil)
 
-                if let acceptance = companion.pendingAcceptance {
-                    VStack(alignment: .leading, spacing: 8) {
-                        LockboxValueRow(label: "Your code", value: acceptance.verificationCode)
-                        Text("Read this code aloud to them, or share the text below, so they can type it in to confirm.")
-                            .font(.footnote)
+                if companion.pendingAcceptance != nil {
+                    // R5 pairing v2 (Slice P2b, item 5): the friend never
+                    // types or shares anything back — the owner's device
+                    // confirms from the relay-delivered acceptance alone.
+                    // The owner's name isn't known to this device, hence
+                    // "the person who invited you" rather than a name.
+                    //
+                    // Deliberately a plain `Text`, not a `Label` — a plain
+                    // `Text` registers as a `staticText` accessibility
+                    // element with no further composition, which is what
+                    // `PhoneLockboxUITests` queries by this identifier.
+                    HStack(spacing: 8) {
+                        Image(systemName: "hourglass")
                             .foregroundStyle(LockboxTheme.secondary)
-                        ShareLink(item: companion.acceptanceShareText(acceptance)) {
-                            Label("Share acceptance code", systemImage: "square.and.arrow.up")
-                        }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                        #if os(iOS)
-                        Button {
-                            copyCompanionTextToPasteboard(companion.acceptanceShareText(acceptance))
-                        } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
-                        }
-                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                        .accessibilityHint("Copies the acceptance code text to the clipboard")
-                        #endif
+                            .accessibilityHidden(true)
+                        Text("Waiting for the person who invited you to confirm")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityIdentifier("acceptInvite.waitingLabel")
                     }
-                    .accessibilityElement(children: .combine)
                 }
             }
         }
-        .onAppear { applyInviteLinkPrefillIfNeeded() }
-        .onChange(of: companion.prefillInviteLink) { _, _ in applyInviteLinkPrefillIfNeeded() }
-    }
-
-    /// Consumes `companion.prefillInviteLink` (set by
-    /// `ContentView.onOpenURL` via `CompanionCoordinator.handleIncomingCompanionLink`,
-    /// which already reports an undecodable payload via `lastError` —
-    /// review P2-2) into this card's own "Paste invite link" field, then
-    /// clears it so it is applied exactly once. Opening the link never
-    /// itself accepts anything — "Accept invite" still requires an
-    /// explicit tap.
-    private func applyInviteLinkPrefillIfNeeded() {
-        guard let link = companion.prefillInviteLink else { return }
-        pastedInvite = link
-        companion.prefillInviteLink = nil
     }
 }
 

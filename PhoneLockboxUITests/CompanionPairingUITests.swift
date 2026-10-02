@@ -32,6 +32,19 @@ import CompanionKit
 /// six-digit verification-code field or its keyboard; that is covered
 /// separately. Both tests here act as "the friend" in-process, mirroring
 /// `tools/relay-smoke`, rather than driving a second simulator.
+///
+/// R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2b") replaced the
+/// typed six-digit code with a relay-delivered, locally verified acceptance
+/// and one-tap Confirm/Not them. The tests below cover that flow end to
+/// end — `testOwnerConfirmsAPendingAcceptanceAndThePersonShowsAsPaired` and
+/// `testOwnerDismissesAPendingAcceptanceAsNotThem` script "the friend" over
+/// HTTP exactly as `testCreateInviteCopyLinkAndFriendAcceptsOverRelay` does,
+/// then drive the owner side's new pending-acceptance card —
+/// and `testOpeningScriptedInviteLinkShowsIncomingInvitePromptThenWaitingState`
+/// (renamed from an earlier version that asserted a prefilled paste field,
+/// since UX fix item 7 replaced that with a top-of-page prompt) covers the
+/// friend side: opening an invite link now shows an "accept in front of the
+/// user" prompt rather than silently prefilling a field below the fold.
 @MainActor
 final class CompanionPairingUITests: XCTestCase {
     private static let localRelayBaseURLString = "http://127.0.0.1:8002"
@@ -105,7 +118,11 @@ final class CompanionPairingUITests: XCTestCase {
         }
         attachScreenshot(named: "01-invite-created-copy-link-visible")
 
-        let linkText = (linkTextElement.label.isEmpty ? (linkTextElement.value as? String) : linkTextElement.label) ?? ""
+        // R5 pairing v2 UX fix item 7 ("Invite link display"): the visible
+        // label is now a short, truncated line ("Invite link ready"), not
+        // the raw link — the full value lives in the accessibility *value*
+        // instead, so this reads `.value`, not `.label`.
+        let linkText = (linkTextElement.value as? String) ?? ""
         XCTAssertTrue(linkText.hasPrefix("\(CompanionCoordinatorScheme.companionLinkScheme)://invite/"),
                       "Invite link text does not look like an invite link: \(linkText)")
 
@@ -131,14 +148,101 @@ final class CompanionPairingUITests: XCTestCase {
         XCTAssertEqual(acceptance.inviteID, invitation.payload.inviteID)
     }
 
+    /// R5 pairing v2 (Slice P2b) end-to-end owner flow: create an invite in
+    /// the app, have a scripted friend accept it over HTTP (mirroring the
+    /// test above), pull to refresh, and confirm the resulting
+    /// "Someone accepted your invite" card with a name. The person must then
+    /// show up as paired, and the card itself must be gone.
+    func testOwnerConfirmsAPendingAcceptanceAndThePersonShowsAsPaired() async throws {
+        guard navigateToPeopleTab() else {
+            XCTFail("'People' tab never stayed selected")
+            return
+        }
+
+        let invitation = try await createInviteInAppAndReadLink()
+
+        let friendKeyStore = InMemoryDeviceKeyStore()
+        let friendSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: friendKeyStore)
+        let transport = HTTPCompanionTransport(baseURL: try localRelayURL(), session: URLSession(configuration: .ephemeral))
+        let friendClient = AsyncCompanionClient(signer: friendSigner, transport: transport)
+        _ = try await friendClient.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
+
+        let confirmButton = app.buttons["pendingAcceptance.confirmButton"]
+        guard waitForElementAfterRepeatedRefresh(confirmButton) else {
+            XCTFail("'Someone accepted your invite' card never appeared after the friend accepted and a refresh")
+            return
+        }
+        attachScreenshot(named: "04-pending-acceptance-card-visible")
+
+        let nameField = app.textFields["pendingAcceptance.nameField"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+        nameField.tap()
+        nameField.typeText("Ari")
+
+        confirmButton.tap()
+
+        let pairedName = app.staticTexts["Ari"]
+        XCTAssertTrue(pairedName.waitForExistence(timeout: 30), "confirmed person 'Ari' never appeared in 'Your trusted people'")
+        attachScreenshot(named: "05-person-confirmed-as-paired")
+
+        // The card is removed immediately on a successful confirm — not
+        // merely until the next refresh.
+        XCTAssertFalse(confirmButton.exists, "the pending-acceptance card should be gone once confirmed")
+    }
+
+    /// R5 pairing v2 (Slice P2b): the **Not them** case. The card must
+    /// disappear immediately, and the underlying invite is discarded so
+    /// nothing can confirm from it afterward (there is no relay cancel-
+    /// invite endpoint in this protocol version — see
+    /// `CompanionCoordinator.discardStoredInvite`'s doc comment).
+    func testOwnerDismissesAPendingAcceptanceAsNotThem() async throws {
+        guard navigateToPeopleTab() else {
+            XCTFail("'People' tab never stayed selected")
+            return
+        }
+
+        let invitation = try await createInviteInAppAndReadLink()
+
+        let friendKeyStore = InMemoryDeviceKeyStore()
+        let friendSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: friendKeyStore)
+        let transport = HTTPCompanionTransport(baseURL: try localRelayURL(), session: URLSession(configuration: .ephemeral))
+        let friendClient = AsyncCompanionClient(signer: friendSigner, transport: transport)
+        _ = try await friendClient.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
+
+        let notThemButton = app.buttons["pendingAcceptance.notThemButton"]
+        guard waitForElementAfterRepeatedRefresh(notThemButton) else {
+            XCTFail("'Someone accepted your invite' card never appeared after the friend accepted and a refresh")
+            return
+        }
+        attachScreenshot(named: "06-pending-acceptance-before-not-them")
+
+        notThemButton.tap()
+
+        let cardGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: notThemButton)
+        XCTAssertEqual(XCTWaiter().wait(for: [cardGone], timeout: 10), .completed,
+                       "the pending-acceptance card should disappear immediately after 'Not them'")
+        attachScreenshot(named: "07-pending-acceptance-dismissed")
+
+        // A pull-to-refresh afterward must not resurrect the card: the
+        // underlying invite was discarded, so the same acceptance can never
+        // verify again on this device.
+        pullToRefresh()
+        let stillGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["pendingAcceptance.confirmButton"])
+        XCTAssertEqual(XCTWaiter().wait(for: [stillGone], timeout: 10), .completed,
+                       "a dismissed pending acceptance must never reappear after another refresh")
+    }
+
     /// A second, independently scripted owner identity creates its own
     /// invite directly against the local relay (not through the app's own
     /// UI at all — this mirrors another person's device). Opening the
     /// resulting `phone-lockbox-companion://invite/...` link makes *this*
     /// app instance act as the friend being invited: `ContentView.onOpenURL`
-    /// should route to the People tab with the "Paste invite link" field
-    /// already filled in, without accepting anything automatically.
-    func testOpeningScriptedInviteLinkRoutesToPeopleWithAcceptCardPrefilled() async throws {
+    /// should show the "You've been invited" prompt in front of the user —
+    /// visible without scrolling (R5 pairing v2 UX fix item 7) — rather than
+    /// silently prefilling a field below the fold, and must not accept
+    /// anything until Accept is tapped, after which the friend side shows
+    /// "Waiting for the person who invited you to confirm".
+    func testOpeningScriptedInviteLinkShowsIncomingInvitePromptThenWaitingState() async throws {
         let ownerKeyStore = InMemoryDeviceKeyStore()
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeyStore)
         let transport = HTTPCompanionTransport(baseURL: try localRelayURL(), session: URLSession(configuration: .ephemeral))
@@ -163,24 +267,38 @@ final class CompanionPairingUITests: XCTestCase {
             openConfirmation.tap()
         }
 
-        let pastedInviteField = app.textFields["acceptInvite.pastedInviteField"]
-        XCTAssertTrue(pastedInviteField.waitForExistence(timeout: 15), "People tab's 'Paste invite link' field never appeared after opening the invite link")
-        attachScreenshot(named: "02-accept-card-prefilled-from-link")
+        let acceptButton = app.buttons["incomingInvite.acceptButton"]
+        XCTAssertTrue(acceptButton.waitForExistence(timeout: 15), "the 'You've been invited' prompt never appeared after opening the invite link")
 
         // Review P2-5: confirm the routing itself, not just its effect.
         XCTAssertTrue(app.tabBars.buttons["People"].isSelected, "the People tab should be selected after opening the invite link")
 
-        let prefilled = (pastedInviteField.value as? String) ?? ""
-        XCTAssertEqual(prefilled, link, "the accept card's pasted-invite field should be prefilled with exactly the opened link")
+        // R5 pairing v2 UX fix item 7: the prompt must be visible without
+        // scrolling — `isHittable` requires the element to actually be
+        // on-screen and not obscured, not merely present in the hierarchy.
+        XCTAssertTrue(acceptButton.isHittable, "the incoming-invite Accept button must be visible without scrolling")
+        attachScreenshot(named: "02-incoming-invite-prompt-visible-without-scrolling")
 
         // Opening the link must never itself accept anything. A single
         // instantaneous check only proves it hadn't happened yet at that
         // exact moment; give auto-accept a real ~3s window to show up
         // before concluding it didn't, via an inverted predicate
         // expectation (review P2-5) rather than one `exists` snapshot.
-        let autoAccepted = expectation(for: NSPredicate(format: "exists == true"), evaluatedWith: app.staticTexts["Your code"])
+        let autoAccepted = expectation(for: NSPredicate(format: "exists == true"), evaluatedWith: app.staticTexts["acceptInvite.waitingLabel"])
         autoAccepted.isInverted = true
         await fulfillment(of: [autoAccepted], timeout: 3)
+
+        // Now tap Accept explicitly and confirm the friend side shows the
+        // new waiting state (R5 pairing v2, Slice P2b item 5) — no code to
+        // read aloud or share back.
+        acceptButton.tap()
+
+        let waitingLabel = app.staticTexts["acceptInvite.waitingLabel"]
+        XCTAssertTrue(waitingLabel.waitForExistence(timeout: 30), "'Waiting for the person who invited you to confirm' never appeared after tapping Accept")
+        attachScreenshot(named: "03-friend-side-waiting-for-confirmation")
+
+        // The prompt itself is dismissed once accepted.
+        XCTAssertFalse(app.buttons["incomingInvite.acceptButton"].exists, "the incoming-invite prompt should be gone once accepted")
     }
 
     /// Regression test for the real product bug this uncovered and fixed in
@@ -244,6 +362,59 @@ final class CompanionPairingUITests: XCTestCase {
             throw CompanionUITestError(description: "invalid local relay base URL")
         }
         return url
+    }
+
+    /// Taps "Create an invite to share" in the app and reads the resulting
+    /// link back from the app's own accessibility value (R5 pairing v2 UX
+    /// fix item 7 — the visible label is now a short, truncated line; see
+    /// the doc comment on `testCreateInviteCopyLinkAndFriendAcceptsOverRelay`).
+    /// Shared by the owner-side pending-acceptance tests.
+    private func createInviteInAppAndReadLink() async throws -> Invitation {
+        let createButton = app.buttons["inviteSomeone.createInviteButton"]
+        guard createButton.waitForExistence(timeout: 30) else {
+            throw CompanionUITestError(description: "'Create an invite to share' button never appeared")
+        }
+        createButton.tap()
+
+        let linkTextElement = app.staticTexts["inviteSomeone.inviteLinkText"]
+        guard linkTextElement.waitForExistence(timeout: 30) else {
+            throw CompanionUITestError(description: "invite link text never appeared after creating an invite")
+        }
+        let linkText = (linkTextElement.value as? String) ?? ""
+        return try Invitation.fromShareLink(linkText)
+    }
+
+    /// Simulates "pull to refresh" over the People tab's scroll content
+    /// (`.refreshable` on `LockboxScrollView`), which is how the app learns
+    /// about a relay-delivered pending acceptance outside of the one
+    /// automatic fetch on first appearance. Deliberately a slow, held
+    /// press-and-drag rather than `XCUIElement.swipeDown()`: a plain
+    /// `swipeDown()` is a fast flick (high velocity, short duration), which
+    /// SwiftUI's `.refreshable` can register as an ordinary scroll/bounce
+    /// rather than crossing its pull-to-refresh activation threshold — that
+    /// threshold depends on the touch dwelling past a distance, not on
+    /// gesture velocity. A held drag from the upper part of the screen to
+    /// well past the middle reliably crosses it.
+    private func pullToRefresh() {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
+        start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+    }
+
+    /// Pulls to refresh repeatedly until `element` appears or `timeout`
+    /// elapses. A single pull-to-refresh gesture is occasionally missed by
+    /// the simulator under load (observed empirically as an intermittent
+    /// flake); retrying the gesture itself, not just the existence check,
+    /// is what makes this reliable — a pure `waitForExistence` after one
+    /// gesture only re-polls the hierarchy, it never repeats the gesture.
+    @discardableResult
+    private func waitForElementAfterRepeatedRefresh(_ element: XCUIElement, timeout: TimeInterval = 40) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.waitForExistence(timeout: 6) { return true }
+            pullToRefresh()
+        }
+        return element.waitForExistence(timeout: 2)
     }
 
     private func attachScreenshot(named name: String) {

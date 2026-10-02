@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		088C033D0B032FBAB0FD8661 /* CompanionKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7BC707BB36F96F1716EB6078 /* CompanionKit */; };
+		093C5AC93F07AA91632E9494 /* CompanionPairingV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */; };
 		0C189D58217CC2903569661C /* TaskUnlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */; };
 		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
 		127ADDDC4FEA5FDBC2DD4FE4 /* WeekendSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */; };
@@ -155,6 +156,7 @@
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
 		30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistant.swift; sourceTree = "<group>"; };
 		35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryGate.swift; sourceTree = "<group>"; };
+		366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingV2Tests.swift; sourceTree = "<group>"; };
 		42E93866048FAF912545941E /* CompanionPairingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingUITests.swift; sourceTree = "<group>"; };
 		4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendReleaseWiringTests.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -347,6 +349,7 @@
 		5A805F511DE7EFE8BF45461A /* PhoneLockboxTests */ = {
 			isa = PBXGroup;
 			children = (
+				366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */,
 				4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */,
 				EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */,
 				007587A21F60E1CD46B8904F /* QuickActionRouteTests.swift */,
@@ -756,6 +759,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				093C5AC93F07AA91632E9494 /* CompanionPairingV2Tests.swift in Sources */,
 				EE9DA6E228EF2D19028C2BDB /* FriendReleaseWiringTests.swift in Sources */,
 				E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */,
 				3633D5BF5B4871E3827366BB /* QuickActionRouteTests.swift in Sources */,
