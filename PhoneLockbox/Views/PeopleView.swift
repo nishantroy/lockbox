@@ -477,9 +477,14 @@ private struct InboxRow: View {
                 .disabled(isBusy)
             }
             // R5 Slice B2c, gate on: an owner's own approved request can end
-            // the lock from here. With the gate off this never appears, and
-            // the row looks exactly as it did in B1.
-            if item.isMine, companion.friendApprovalCanEndLocksEnabled, item.status == .approved {
+            // the lock from here. With the gate off, the row looks exactly
+            // as it did in B1 — except a "Finishing…" status still shows if
+            // an intent for this exact request is durably pending, since the
+            // gate was necessarily on when that intent was started (review
+            // P2-12: never hide in-flight work, even if the gate changed).
+            if item.isMine, item.status == .approved,
+               CompanionCoordinator.shouldShowFriendReleaseAction(for: item, gateEnabled: companion.friendApprovalCanEndLocksEnabled)
+                || companion.friendReleaseRequestState(for: item, coordinator: coordinator) == .finishing {
                 FriendReleaseActionView(coordinator: coordinator, companion: companion, item: item)
             }
         }
@@ -508,11 +513,14 @@ private struct InboxRow: View {
     }
 }
 
-/// R5 Slice B2c. The gate-on action/status for an owner's own approved
-/// request: "End lock now" with a confirmation, "Finishing…" while the
-/// durable intent is pending, or a final "Used to end lock"/"Lock already
-/// ended" once resolved. Every state reads `ScreenTimeCoordinator` fresh —
-/// never cached — so this always reflects the authoritative document.
+/// R5 Slice B2c. The action/status for an owner's own approved request:
+/// "End lock now" with a confirmation, "Finishing…" while the durable
+/// intent for *this exact request* is pending, or a final "Used to end
+/// lock"/"Lock already ended" once resolved. State is per-request (review
+/// P2-6), and `.finishing` renders regardless of the developer gate (review
+/// P2-12) — every other state only renders while the gate is on, since
+/// `InboxRow` only instantiates this view at all when the gate is on or the
+/// state is `.finishing`.
 private struct FriendReleaseActionView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
@@ -520,8 +528,8 @@ private struct FriendReleaseActionView: View {
     @State private var isBusy = false
     @State private var showingConfirmation = false
 
-    private var state: ScreenTimeCoordinator.FriendReleaseSessionState {
-        coordinator.friendReleaseSessionState(sessionID: item.request.sessionID)
+    private var state: CompanionCoordinator.FriendReleaseRequestState {
+        companion.friendReleaseRequestState(for: item, coordinator: coordinator)
     }
 
     private var approverName: String {
@@ -536,7 +544,14 @@ private struct FriendReleaseActionView: View {
 
     var body: some View {
         switch state {
-        case .eligible:
+        case .finishing:
+            Label("Finishing…", systemImage: "hourglass")
+                .font(.footnote)
+                .foregroundStyle(LockboxTheme.secondary)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Finishing: ending this lock using the approval")
+        case .eligible where companion.friendApprovalCanEndLocksEnabled:
             Button {
                 showingConfirmation = true
             } label: {
@@ -557,25 +572,20 @@ private struct FriendReleaseActionView: View {
             } message: {
                 Text("\(approverName) approved ending this lock, which would otherwise run until \(lockEndText).")
             }
-        case .finishing:
-            Label("Finishing…", systemImage: "hourglass")
-                .font(.footnote)
-                .foregroundStyle(LockboxTheme.secondary)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Finishing: ending this lock using the approval")
-        case .usedToEnd:
+        case .usedToEnd where companion.friendApprovalCanEndLocksEnabled:
             Label("Used to end lock", systemImage: "checkmark.circle.fill")
                 .font(.footnote)
                 .foregroundStyle(LockboxTheme.focus)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .accessibilityElement(children: .combine)
-        case .alreadyEnded:
+        case .alreadyEnded where companion.friendApprovalCanEndLocksEnabled:
             Label("Lock already ended", systemImage: "checkmark.circle")
                 .font(.footnote)
                 .foregroundStyle(LockboxTheme.secondary)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .accessibilityElement(children: .combine)
+        default:
+            EmptyView()
         }
     }
 

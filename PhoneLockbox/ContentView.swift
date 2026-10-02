@@ -67,6 +67,9 @@ struct ContentView: View {
             if phase == .active {
                 coordinator.refreshAuthorization()
                 routePendingQuickActionIfNeeded()
+                // R5 Slice B2c review, P2-4: finish an interrupted friend
+                // release on every foreground, not only from the People tab.
+                Task { await companion.replayPendingFriendRelease(coordinator: coordinator) }
             }
         }
     }

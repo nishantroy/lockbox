@@ -213,6 +213,7 @@ private struct DeveloperToolsSection: View {
     @Binding var showingDesignGallery: Bool
     @State private var relayURLDraft = ""
     @State private var showingResetAnchorsConfirmation = false
+    @State private var showingDiscardFriendReleaseConfirmation = false
 
     var body: some View {
         LockboxCard {
@@ -225,6 +226,15 @@ private struct DeveloperToolsSection: View {
                     Text("Off by default. When on, the People tab lets you end your own lock from a trusted person's approval, with a confirmation. When off, the People tab behaves exactly as before: approvals are shown, but never end the lock.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
+                    if coordinator.pendingFriendReleaseIntent != nil {
+                        Button("Discard pending friend release", role: .destructive) {
+                            showingDiscardFriendReleaseConfirmation = true
+                        }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                        Text("Clears a durably pending end-lock request without ever using it. Use only if it stays stuck (for example the request or approval disappeared from the inbox).")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
                 }
 
                 Divider().overlay(LockboxTheme.border)
@@ -370,6 +380,18 @@ private struct DeveloperToolsSection: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Development-only. This clears rollback/fork protection checkpoints; a real regression or fork from the relay would go undetected until a new checkpoint is established.")
+        }
+        .confirmationDialog(
+            "Discard the pending friend release?",
+            isPresented: $showingDiscardFriendReleaseConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Discard pending friend release", role: .destructive) {
+                companion.discardPendingFriendRelease(coordinator: coordinator)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears the pending request locally without ever using it. The lock stays on until it ends some other way.")
         }
     }
 

@@ -349,6 +349,57 @@ await step("a different useID on a consumed approval is rejected as .definitive"
     }
 }
 
+// MARK: - 8g. `use` is rejected once the session is superseded (R5 Slice B2c review, P2-11)
+//
+// The relay's "use" reducer requires `ledger.currentSessionID ==
+// current.request.sessionID` (relay/src/reducer.ts); publishing a *new*
+// session for the same owner immediately moves `currentSessionID` and also
+// expires every outstanding request bound to the old session/active-set
+// (the same reducer's "session" case). This exercises that without any
+// sleep/time-based expiry: a second session supersedes the first one
+// synchronously.
+
+var supersededRequest: TrustedRequest?
+var supersededApproval: Approval?
+
+await step("owner publishes a second session, requests early end, and the helper approves it") {
+    guard let pairing, let helperConsent else { throw SmokeError.unexpected("missing pairing or helper consent") }
+    let sessionID = UUID()
+    let now = Date()
+    let activeSetID = companionActiveSetID(for: [sessionID])
+    let session = try ActiveSession(owner: ownerSigner.identity, sessionID: sessionID.uuidString,
+                                    activeSetID: activeSetID, startsAt: now, endsAt: now.addingTimeInterval(20 * 60))
+    _ = try await ownerClient.publishSession(session)
+    let newRequest = try await ownerClient.requestUnlock(requestID: UUID().uuidString, pairing: pairing,
+                                                          consent: helperConsent, session: session,
+                                                          target: helperSigner.identity.identityID, validFor: 600)
+    supersededRequest = newRequest
+    supersededApproval = try await helperClient.submitApproval(request: newRequest, pairing: pairing, decision: .approved)
+}
+
+await step("owner publishes a superseding session") {
+    let newSessionID = UUID()
+    let now = Date()
+    let activeSetID = companionActiveSetID(for: [newSessionID])
+    let session = try ActiveSession(owner: ownerSigner.identity, sessionID: newSessionID.uuidString,
+                                    activeSetID: activeSetID, startsAt: now, endsAt: now.addingTimeInterval(20 * 60))
+    _ = try await ownerClient.publishSession(session)
+}
+
+await step("use after the session is superseded is rejected as .definitive") {
+    guard let supersededRequest, let supersededApproval else { throw SmokeError.unexpected("missing request or approval") }
+    var caught: Error?
+    do {
+        _ = try await ownerClient.useApproval(supersededApproval, request: supersededRequest, useID: UUID().uuidString)
+    } catch {
+        caught = error
+    }
+    guard let caught else { throw SmokeError.unexpected("expected a rejection, but the call succeeded") }
+    guard AsyncCompanionClient.UseFailureDisposition.classify(caught) == .definitive else {
+        throw SmokeError.unexpected("expected .definitive, classify(_:) returned something else for: \(caught)")
+    }
+}
+
 // MARK: - 9. Owner revokes; helper sees the pairing revoked
 
 await step("owner revokes the pairing") {

@@ -242,10 +242,31 @@ final class ScreenTimeCoordinator: ObservableObject {
         if let released = document.releasedOccurrences.first(where: { $0.sessionID == uuid }) {
             return released.cause == .friendApproval ? .usedToEnd : .alreadyEnded
         }
-        if let session = document.sessions.first(where: { $0.id == uuid }), session.isEffective(at: currentDate()) {
+        // R5 Slice B2c review (P2-6): matches `prepareFriendRelease`'s own
+        // eligibility check exactly — the live enforcement set, not merely
+        // `isEffective`. A manual session that is `isEffective` but not yet
+        // `manualRegistrationActive` is not actually enforcing and must not
+        // read as eligible here either.
+        let now = currentDate()
+        let enforcementIDs = Set(RuntimeSessionDecision.enforcementSessions(in: document, at: now).map(\.id))
+        if enforcementIDs.contains(uuid) {
             return .eligible
         }
         return .alreadyEnded
+    }
+
+    /// The exact `useID` that released this session via a friend approval,
+    /// if any. `nil` when the session is not released-by-friend-approval
+    /// (not yet released, released by a different cause, or unknown).
+    /// Exposed so a caller can confirm a specific *request* — not just a
+    /// session — was the one that actually ended the lock, since several
+    /// requests could in principle target the same session but only one
+    /// `useID` ever actually releases it (R5 Slice B2c review, P2-6).
+    func friendReleaseUseID(forSessionID sessionID: String) -> String? {
+        guard let uuid = UUID(uuidString: sessionID) else { return nil }
+        guard let released = document.releasedOccurrences.first(where: { $0.sessionID == uuid }),
+              released.cause == .friendApproval else { return nil }
+        return released.friendUseID
     }
 
     /// The frozen absolute end of an exact session, for People tab
@@ -308,32 +329,64 @@ final class ScreenTimeCoordinator: ObservableObject {
         var outcome: RuntimeFriendRelease.ApplyOutcome = .noOp(.noMatchingPendingIntent)
         var manualRouteToStop: RuntimeManualRouteBinding?
         var shouldRegisterPending = false
-        try store.withTransaction { context in
-            let now = currentDate()
-            let result = RuntimeLifecycle.applyFriendRelease(&context.document, useID: useID, at: now, calendar: Calendar.current)
-            outcome = result
-            switch result {
-            case .noOp:
-                try context.commit()
-            case .released(let sessionID, _, let effect):
-                manualRouteToStop = effect.manualRouteToStop
-                if RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: now) {
-                    shouldRegisterPending = context.document.recurringEnabledIntent
+        var shouldReconcileAfterNoOp = false
+        do {
+            try store.withTransaction { context in
+                let now = currentDate()
+                let result = RuntimeLifecycle.applyFriendRelease(&context.document, useID: useID, at: now, calendar: Calendar.current)
+                outcome = result
+                switch result {
+                case .noOp(let reason):
+                    if reason == .alreadyEnded { shouldReconcileAfterNoOp = true }
+                    try context.commit()
+                case .released(let sessionID, _, let effect):
+                    manualRouteToStop = effect.manualRouteToStop
+                    if RuntimeLifecycle.activatePendingConfigurationIfIdle(&context.document, at: now) {
+                        shouldRegisterPending = context.document.recurringEnabledIntent
+                    }
+                    // `effect.policyIntent` is already the correct post-release
+                    // decision (Shared/RuntimeFriendRelease.swift); it is used
+                    // directly rather than re-derived here.
+                    context.document.policyIntent = effect.policyIntent
+                    context.document.record(RuntimeDiagnostic(operation: .policyClearAttempted, observedAt: now, detail: "Friend-release persisted for session \(sessionID.uuidString), use \(useID), before reconciling this app's named policy."))
+                    try context.commit()
+                    try applyEffectivePolicy(context.document, at: now)
+                    context.document.policyIntent = nil
+                    context.document.record(RuntimeDiagnostic(operation: .policyCleared, observedAt: currentDate(), detail: "Friend-release applied for use \(useID); future occurrences remain configured."), succeeded: true)
+                    try context.commit()
                 }
-                // `effect.policyIntent` is already the correct post-release
-                // decision (Shared/RuntimeFriendRelease.swift); it is used
-                // directly rather than re-derived here.
-                context.document.policyIntent = effect.policyIntent
-                context.document.record(RuntimeDiagnostic(operation: .policyClearAttempted, observedAt: now, detail: "Friend-release persisted for session \(sessionID.uuidString), use \(useID), before reconciling this app's named policy."))
-                try context.commit()
-                try applyEffectivePolicy(context.document, at: now)
-                context.document.policyIntent = nil
-                context.document.record(RuntimeDiagnostic(operation: .policyCleared, observedAt: Date(), detail: "Friend-release applied for use \(useID); future occurrences remain configured."), succeeded: true)
-                try context.commit()
             }
+        } catch {
+            // R5 Slice B2c review (P1-2): mirrors `confirmRecovery`. A throw
+            // here (most likely `applyEffectivePolicy`, after the release
+            // itself was already durably committed by the first `commit()`
+            // above) must not leave this coordinator's in-memory `document`
+            // stale relative to what is actually on disk.
+            reconcileRuntime()
+            refreshDocument()
+            throw error
+        }
+        // R5 Slice B2c review (P1-2): a no-op because natural end (or
+        // another release) already won between prepare and apply can leave
+        // other reconciliation (OS registration, policy intent) out of sync
+        // with the newly-expired session; resync exactly as other natural-
+        // end-observing paths do.
+        if shouldReconcileAfterNoOp {
+            reconcileRuntime()
         }
         if let manualRouteToStop {
-            try stopManualRouteIfOwned(store: store, expected: manualRouteToStop)
+            do {
+                try stopManualRouteIfOwned(store: store, expected: manualRouteToStop)
+            } catch {
+                // R5 Slice B2c review (P1-2): non-fatal. The release itself
+                // is already durably committed by this point; a failed OS
+                // manual-route stop only means monitoring cleanup needs a
+                // later reconciliation, and must never be reported as the
+                // release itself having failed.
+                try? store.transaction { document in
+                    document.record(RuntimeDiagnostic(operation: .registrationFailed, observedAt: currentDate(), detail: "Friend-release manual route stop failed after a committed release for use \(useID): \(error.localizedDescription)"), succeeded: false)
+                }
+            }
         }
         refreshDocument()
         if case .released = outcome {
@@ -2135,3 +2188,34 @@ private extension ScreenTimeCoordinator {
             && left.webDomainTokens == right.webDomainTokens
     }
 }
+
+/// A narrow seam over `ScreenTimeCoordinator`'s friend-release API (R5 Slice
+/// B2c review, P1-3) so `CompanionCoordinator`'s orchestration
+/// (`endLockNow`/`replayPendingFriendRelease`/`finishFriendRelease`) can be
+/// unit-tested against a fake conformer without touching FamilyControls,
+/// DeviceActivity, or a real App Group store. `ScreenTimeCoordinator` is the
+/// only production conformer; the conformance is a pure pass-through to its
+/// own methods, added rather than duplicated.
+@MainActor
+protocol FriendReleaseLifecycle: AnyObject {
+    func prepareFriendRelease(
+        sessionID: UUID,
+        activeSetID: String,
+        requestID: String,
+        approvalID: String,
+        useID: String,
+        approverIdentityID: String
+    ) throws -> RuntimeFriendRelease.PrepareOutcome
+
+    func applyFriendRelease(useID: String) throws -> RuntimeFriendRelease.ApplyOutcome
+
+    @discardableResult
+    func abandonFriendRelease(useID: String) throws -> Bool
+
+    var pendingFriendReleaseIntent: RuntimeFriendReleaseIntent? { get }
+
+    func friendReleaseSessionState(sessionID: String) -> ScreenTimeCoordinator.FriendReleaseSessionState
+    func friendReleaseUseID(forSessionID sessionID: String) -> String?
+}
+
+extension ScreenTimeCoordinator: FriendReleaseLifecycle {}

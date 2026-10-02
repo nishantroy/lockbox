@@ -120,27 +120,435 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertEqual(CompanionCoordinator.applyNoOpMessage(.noMatchingPendingIntent), "This lock already ended.")
     }
 
-    // MARK: - endLockNow's gate-off guard never touches lastError/network
-    //
-    // `endLockNow`'s very first statement is
-    // `guard isAvailable, friendApprovalCanEndLocksEnabled else { return }`
-    // (PhoneLockbox/Companion/CompanionCoordinator.swift) — before any
-    // inbox fetch, `OwnerApprovalCheck`, or `ScreenTimeCoordinator` call.
-    // A real end-to-end call here would require constructing a
-    // `ScreenTimeCoordinator`, which touches FamilyControls/DeviceActivity
-    // APIs this unhosted test bundle is not entitled for; that path is
-    // exercised instead by the parent's simulator app run and by
-    // `relay-smoke`. This asserts the gate itself stays off without ever
-    // being flipped, which is what every other action in this file relies on.
+    // MARK: - P2-10: gate-off hides the "End lock now" action
 
-    func testFriendApprovalGateStaysOffUntilExplicitlySet() throws {
-        let suiteName = "com.phone-lockbox.tests.friend-release-gate-stays-off.\(UUID().uuidString)"
+    /// `CompanionCoordinator.shouldShowFriendReleaseAction` is the exact
+    /// predicate `PeopleView`'s `InboxRow` uses to decide whether to show
+    /// the gated row at all, kept in sync with the view by construction
+    /// (review P2-10 — this replaces an earlier vacuous test that never
+    /// exercised the gate's effect on anything).
+    func testShouldShowFriendReleaseActionIsGatedOffByDefaultAndOnlyForAnOwnApprovedRequest() throws {
+        let fixture = try makeFixture()
+        var approvedOfMine = fixture.request
+        approvedOfMine.status = .approved
+        let mine = CompanionInboxItem(request: approvedOfMine, viewerIdentityID: fixture.ownerSigner.identity.identityID)
+
+        XCTAssertFalse(CompanionCoordinator.shouldShowFriendReleaseAction(for: mine, gateEnabled: false))
+        XCTAssertTrue(CompanionCoordinator.shouldShowFriendReleaseAction(for: mine, gateEnabled: true))
+
+        var pendingOfMine = fixture.request
+        pendingOfMine.status = .pending
+        let minePending = CompanionInboxItem(request: pendingOfMine, viewerIdentityID: fixture.ownerSigner.identity.identityID)
+        XCTAssertFalse(CompanionCoordinator.shouldShowFriendReleaseAction(for: minePending, gateEnabled: true),
+                       "only an approved request may show the action, gate or no gate")
+
+        let helpingWith = CompanionInboxItem(request: approvedOfMine, viewerIdentityID: fixture.approverSigner.identity.identityID)
+        XCTAssertFalse(CompanionCoordinator.shouldShowFriendReleaseAction(for: helpingWith, gateEnabled: true),
+                       "a request this device is only helping with must never show the owner-only action")
+    }
+
+    // MARK: - P1-3: selectFriendRelease (pure selection + OwnerApprovalCheck)
+
+    private struct Fixture {
+        let ownerSigner: DeviceSigner
+        let approverSigner: DeviceSigner
+        let pairing: Pairing
+        let consent: RelationshipConsent
+        let session: ActiveSession
+        let request: TrustedRequest
+    }
+
+    private func makeFixture(pairingState: PairingState = .active, consentGeneration: UInt64 = 1) throws -> Fixture {
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let pairing = try Pairing(pairingID: "pairing-\(UUID().uuidString)", owner: ownerSigner.identity,
+                                  approver: approverSigner.identity, epoch: 1, createdAt: Date(), state: pairingState)
+        let consent = try RelationshipConsent(
+            relationshipID: pairing.pairingID, pairingID: pairing.pairingID, pairEpoch: pairing.epoch,
+            owner: ownerSigner.identity, approver: approverSigner.identity,
+            ownerScopes: [.approveEarlyEnd, .receiveRequests], approverScopes: [.approveEarlyEnd, .receiveRequests],
+            ownerState: .active, approverState: .active, updatedAt: Date(), generation: consentGeneration
+        )
+        let now = Date()
+        let session = try ActiveSession(owner: ownerSigner.identity, sessionID: UUID().uuidString,
+                                        activeSetID: "set-1", startsAt: now, endsAt: now.addingTimeInterval(600))
+        let request = try TrustedRequest(requestID: "req-\(UUID().uuidString)", owner: ownerSigner.identity, pairing: pairing,
+                                         session: session, targets: [approverSigner.identity.identityID],
+                                         message: nil, createdAt: now, expiresAt: now.addingTimeInterval(300))
+        return Fixture(ownerSigner: ownerSigner, approverSigner: approverSigner, pairing: pairing,
+                       consent: consent, session: session, request: request)
+    }
+
+    /// Builds a validly-signed `Approval`, exactly mirroring
+    /// `AsyncCompanionClient.submitApproval`'s local construction (no
+    /// network): the unsigned value's `signingFields()` is what gets
+    /// signed. `signingSigner` lets a test sign with a key other than the
+    /// claimed approver's, to build a forged/substituted approval.
+    private func makeApproval(
+        request: TrustedRequest,
+        pairing: Pairing,
+        approverIdentity: DeviceIdentity,
+        signingSigner: DeviceSigner,
+        decision: ApproverDecision = .approved,
+        consentGeneration: UInt64 = 1,
+        requestID: String? = nil
+    ) throws -> Approval {
+        let nonce = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+        let unsigned = Approval(
+            approvalID: "appr-\(UUID().uuidString)", requestID: requestID ?? request.requestID, pairingID: pairing.pairingID,
+            pairEpoch: pairing.epoch, sessionID: request.sessionID, activeSetID: request.activeSetID,
+            approver: approverIdentity, decision: decision, issuedAt: Date(),
+            consentGeneration: consentGeneration, nonce: nonce, signature: Data()
+        )
+        let signature = try signingSigner.sign(domain: "\(CompanionCanonical.version).approval", fields: unsigned.signingFields())
+        return Approval(
+            approvalID: unsigned.approvalID, requestID: unsigned.requestID, pairingID: unsigned.pairingID,
+            pairEpoch: unsigned.pairEpoch, sessionID: unsigned.sessionID, activeSetID: unsigned.activeSetID,
+            approver: unsigned.approver, decision: unsigned.decision, issuedAt: unsigned.issuedAt,
+            consentGeneration: unsigned.consentGeneration, nonce: unsigned.nonce, signature: signature
+        )
+    }
+
+    private func person(for fixture: Fixture) -> CompanionPerson {
+        CompanionPerson(nickname: "Friend", localRole: .iAmOwner, pairing: fixture.pairing, consent: fixture.consent)
+    }
+
+    func testSelectFriendReleaseHappyPath() throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [approval])
+
+        let (request, selectedApproval, trustedApprover) = try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [person(for: fixture)],
+            ownerIdentity: fixture.ownerSigner.identity
+        )
+        XCTAssertEqual(request.requestID, fixture.request.requestID)
+        XCTAssertEqual(selectedApproval.approvalID, approval.approvalID)
+        XCTAssertTrue(trustedApprover.isActive)
+    }
+
+    func testSelectFriendReleaseRejectsASubstitutedApprover() throws {
+        let fixture = try makeFixture()
+        let impostor = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        // Claims to be the legitimate approver (same `DeviceIdentity`,
+        // including public key) but is actually signed by a different key.
+        let forged = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                      approverIdentity: fixture.approverSigner.identity, signingSigner: impostor)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [forged])
+
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [person(for: fixture)],
+            ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .invalidSignature)
+        }
+    }
+
+    func testSelectFriendReleaseRejectsABindingWhosePairingIDIsNotInPeople() throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [approval])
+
+        // `people` is empty: this device has no cached pairing/consent for
+        // the approver named in the request's binding.
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [], ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .unknownIdentity)
+        }
+    }
+
+    func testSelectFriendReleaseRejectsARevokedPairing() throws {
+        // The request/approval must be built while the pairing is still
+        // `.active` (`RequestTargetBinding.init(pairing:)` itself requires
+        // that); the pairing is revoked only in the locally cached
+        // `CompanionPerson` passed to `selectFriendRelease`, exactly as a
+        // real revoke-after-request would look on this device.
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [approval])
+        var revokedPerson = person(for: fixture)
+        revokedPerson.pairing.state = .revoked
+
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [revokedPerson],
+            ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .revokedPairing)
+        }
+    }
+
+    func testSelectFriendReleaseRejectsAnApprovalForADifferentRequest() throws {
+        let fixture = try makeFixture()
+        let otherFixture = try makeFixture()
+        // An approval that genuinely targets a *different* request is
+        // present in the response, but none targets `fixture.request`.
+        let otherApproval = try makeApproval(request: otherFixture.request, pairing: otherFixture.pairing,
+                                             approverIdentity: otherFixture.approverSigner.identity,
+                                             signingSigner: otherFixture.approverSigner)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request, otherFixture.request], approvals: [otherApproval])
+
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [person(for: fixture)],
+            ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .notFound)
+        }
+    }
+
+    func testSelectFriendReleaseRejectsAMissingApproval() throws {
+        let fixture = try makeFixture()
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: nil)
+
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [person(for: fixture)],
+            ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .notFound)
+        }
+    }
+
+    // MARK: - P1-3: finishFriendRelease branching, against a fake ScreenTimeCoordinator seam
+
+    /// A test double for `FriendReleaseLifecycle` (R5 Slice B2c review,
+    /// P1-3) so `finishFriendRelease`'s branching can be exercised without
+    /// FamilyControls/DeviceActivity or a real App Group store.
+    @MainActor
+    private final class FakeFriendReleaseLifecycle: FriendReleaseLifecycle {
+        var pendingFriendReleaseIntent: RuntimeFriendReleaseIntent?
+        var sessionStatesByID: [String: ScreenTimeCoordinator.FriendReleaseSessionState] = [:]
+        var useIDsBySessionID: [String: String] = [:]
+        var applyResult: Result<RuntimeFriendRelease.ApplyOutcome, Error> = .success(.noOp(.noMatchingPendingIntent))
+        var abandonResult: Result<Bool, Error> = .success(true)
+        private(set) var prepareCallCount = 0
+        private(set) var applyCallCount = 0
+        private(set) var abandonCallCount = 0
+
+        func prepareFriendRelease(sessionID: UUID, activeSetID: String, requestID: String, approvalID: String,
+                                  useID: String, approverIdentityID: String) throws -> RuntimeFriendRelease.PrepareOutcome {
+            prepareCallCount += 1
+            pendingFriendReleaseIntent = RuntimeFriendReleaseIntent(sessionID: sessionID, activeSetID: activeSetID,
+                                                                    requestID: requestID, approvalID: approvalID,
+                                                                    useID: useID, approverIdentityID: approverIdentityID,
+                                                                    createdAt: Date())
+            return .recorded
+        }
+
+        func applyFriendRelease(useID: String) throws -> RuntimeFriendRelease.ApplyOutcome {
+            applyCallCount += 1
+            pendingFriendReleaseIntent = nil
+            return try applyResult.get()
+        }
+
+        @discardableResult
+        func abandonFriendRelease(useID: String) throws -> Bool {
+            abandonCallCount += 1
+            pendingFriendReleaseIntent = nil
+            return try abandonResult.get()
+        }
+
+        func friendReleaseSessionState(sessionID: String) -> ScreenTimeCoordinator.FriendReleaseSessionState {
+            sessionStatesByID[sessionID] ?? .eligible
+        }
+
+        func friendReleaseUseID(forSessionID sessionID: String) -> String? {
+            useIDsBySessionID[sessionID]
+        }
+    }
+
+    private func makeCompanion() throws -> (CompanionCoordinator, () -> Void) {
+        let suiteName = "com.phone-lockbox.tests.friend-release-finish.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
         let companion = CompanionCoordinator(keyStore: InMemoryDeviceKeyStore(), sharedDefaults: defaults)
-        XCTAssertFalse(companion.friendApprovalCanEndLocksEnabled)
-        XCTAssertNil(companion.lastError)
-        XCTAssertTrue(companion.approvalsByRequestID.isEmpty)
+        return (companion, { defaults.removePersistentDomain(forName: suiteName) })
+    }
+
+    func testFinishFriendReleaseKeepsTheIntentOnARetryableUseFailure() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.pendingFriendReleaseIntent = RuntimeFriendReleaseIntent(
+            sessionID: UUID(uuidString: fixture.request.sessionID) ?? UUID(), activeSetID: fixture.request.activeSetID,
+            requestID: fixture.request.requestID, approvalID: approval.approvalID, useID: "use-1",
+            approverIdentityID: fixture.approverSigner.identity.identityID, createdAt: Date()
+        )
+        companion.useApprovalOverride = { _, _, _ in throw CompanionTransportError.unavailable }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertEqual(fake.applyCallCount, 0)
+        XCTAssertEqual(fake.abandonCallCount, 0)
+        XCTAssertNotNil(fake.pendingFriendReleaseIntent, "retryable must keep the intent")
+        XCTAssertEqual(companion.lastError, "Couldn't reach the relay. Pull to refresh to finish.")
+    }
+
+    func testFinishFriendReleaseAbandonsOnADefinitiveUseFailure() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.pendingFriendReleaseIntent = RuntimeFriendReleaseIntent(
+            sessionID: UUID(), activeSetID: "set", requestID: fixture.request.requestID, approvalID: approval.approvalID,
+            useID: "use-1", approverIdentityID: fixture.approverSigner.identity.identityID, createdAt: Date()
+        )
+        companion.useApprovalOverride = { _, _, _ in throw CompanionError.replay }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertEqual(fake.applyCallCount, 0)
+        XCTAssertEqual(fake.abandonCallCount, 1)
+        XCTAssertNil(fake.pendingFriendReleaseIntent, "definitive must abandon and clear the intent")
+        XCTAssertEqual(companion.lastError, "This approval was already used.")
+    }
+
+    func testFinishFriendReleaseKeepsTheIntentAndNeverAbandonsOnAnIntegrityFatalFailure() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.pendingFriendReleaseIntent = RuntimeFriendReleaseIntent(
+            sessionID: UUID(), activeSetID: "set", requestID: fixture.request.requestID, approvalID: approval.approvalID,
+            useID: "use-1", approverIdentityID: fixture.approverSigner.identity.identityID, createdAt: Date()
+        )
+        companion.useApprovalOverride = { _, _, _ in throw CompanionError.responseVerificationFailed("mismatch") }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertEqual(fake.applyCallCount, 0)
+        XCTAssertEqual(fake.abandonCallCount, 0, "integrityFatal must never abandon")
+        XCTAssertNotNil(fake.pendingFriendReleaseIntent, "integrityFatal must keep the intent")
+        XCTAssertEqual(companion.lastError, "The relay's response failed an integrity check. Nothing was changed here; this needs attention before trying again.")
+    }
+
+    func testFinishFriendReleaseApplyNoOpIsTerminalAndNotRetried() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.applyResult = .success(.noOp(.activeSetMismatch))
+        companion.useApprovalOverride = { approval, request, useID in
+            ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
+        }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertEqual(fake.applyCallCount, 1)
+        XCTAssertEqual(companion.lastError, "Your locks changed; ask again.")
+    }
+
+    /// Review P1-1 (second half): a verified `use` followed by
+    /// `.noMatchingPendingIntent` is reported as success, not "already
+    /// ended", once the durable released marker confirms this exact use
+    /// actually completed the release.
+    func testFinishFriendReleaseTreatsANoMatchingPendingIntentAsSuccessWhenTheMarkerConfirmsIt() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.applyResult = .success(.noOp(.noMatchingPendingIntent))
+        fake.sessionStatesByID[fixture.request.sessionID] = .usedToEnd
+        companion.useApprovalOverride = { approval, request, useID in
+            ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
+        }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertNil(companion.lastError, "the marker confirms this use already succeeded")
+    }
+
+    func testFinishFriendReleaseNoMatchingPendingIntentWithoutAMarkerIsStillAlreadyEnded() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        fake.applyResult = .success(.noOp(.noMatchingPendingIntent))
+        // No marker recorded for this session: unrelated/unconfirmed.
+        companion.useApprovalOverride = { approval, request, useID in
+            ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
+        }
+
+        await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+
+        XCTAssertEqual(companion.lastError, "This lock already ended.")
+    }
+
+    // MARK: - P1-1: single-flight
+
+    /// A one-shot async gate so the single-flight test is deterministic
+    /// rather than sleep-based.
+    private actor Gate {
+        private var isOpen = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func open() {
+            isOpen = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    func testSingleFlightJoinsAnInFlightCallInsteadOfSubmittingASecondUse() async throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        let gate = Gate()
+        var useCallCount = 0
+        companion.useApprovalOverride = { approval, request, useID in
+            useCallCount += 1
+            await gate.wait()
+            return ApprovalVerification(approval: approval, verifiedAt: Date(), useID: useID)
+        }
+
+        async let first: Void = companion.runSingleFlightFriendRelease {
+            await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-1", coordinator: fake)
+        }
+        // Wait for the first flight to actually register itself as
+        // in-flight before starting the second (deterministic: this flag is
+        // set synchronously, before any suspension point, inside
+        // `runSingleFlightFriendRelease`).
+        while !companion.hasFriendReleaseFlightInFlight {
+            await Task.yield()
+        }
+        async let second: Void = companion.runSingleFlightFriendRelease {
+            await companion.finishFriendRelease(request: fixture.request, approval: approval, useID: "use-2", coordinator: fake)
+        }
+        // Give the second call a chance to reach (and return from) its
+        // early-join path before releasing the first.
+        await Task.yield()
+        await gate.open()
+        _ = await (first, second)
+
+        XCTAssertEqual(useCallCount, 1, "the second call must join the in-flight work, not submit its own use")
     }
 #endif
 }
