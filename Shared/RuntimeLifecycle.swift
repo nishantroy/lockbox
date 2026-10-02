@@ -289,7 +289,29 @@ public enum RuntimeLifecycle {
         if normalizeRecoveryCommitment(&document, at: date) {
             changed = true
         }
+        if normalizePendingFriendRelease(&document, at: date) {
+            changed = true
+        }
         return changed
+    }
+
+    /// Drops a persisted friend-release intent once its target session is no
+    /// longer `.active`/`.recoveryPending` at `date` — natural end, a
+    /// different release, or an unknown session all count the same way.
+    /// Pure; callers hold the only mutable reference, so no clock is read
+    /// here beyond the `date` already supplied by `expireNaturalSessions`.
+    @discardableResult
+    private static func normalizePendingFriendRelease(
+        _ document: inout RuntimeStoreDocument,
+        at date: Date
+    ) -> Bool {
+        guard let pending = document.pendingFriendRelease else { return false }
+        guard let session = document.sessions.first(where: { $0.id == pending.sessionID }),
+              session.isEffective(at: date) else {
+            document.pendingFriendRelease = nil
+            return true
+        }
+        return false
     }
 
     @discardableResult
@@ -324,11 +346,16 @@ public enum RuntimeLifecycle {
         return true
     }
 
+    /// `cause`/`friendUseID` are attribution metadata only; they never change
+    /// which sessions are eligible or how many are released. Existing
+    /// callers that omit them keep writing markers with a nil cause.
     public static func release(
         _ document: inout RuntimeStoreDocument,
         sessionIDs: Set<UUID>,
         at date: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        cause: RuntimeReleaseCause? = nil,
+        friendUseID: String? = nil
     ) throws {
         guard !sessionIDs.isEmpty, date.timeIntervalSinceReferenceDate.isFinite else {
             throw RuntimeValidationError.invalidConfiguration("No current lock was selected for recovery.")
@@ -352,7 +379,9 @@ public enum RuntimeLifecycle {
                     origin: session.origin,
                     start: session.start,
                     end: session.end,
-                    releasedAt: date
+                    releasedAt: date,
+                    cause: cause,
+                    friendUseID: friendUseID
                 ))
             }
             if session.origin == .scheduled {
