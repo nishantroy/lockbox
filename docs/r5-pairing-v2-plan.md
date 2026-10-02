@@ -125,3 +125,23 @@ Non-blocking (P2) findings from the Opus review above, fixed in a separate commi
 - `cd relay && npm run typecheck`: passed. `npm test` against Docker Postgres 16 on 56330: **150 passed** (was 149; +1 new P2-3 regression test).
 - Neither `CompanionRelayService` nor root `swift test` were re-run for this follow-up (nothing in `CompanionRelayService/**` or outside `CompanionKit`/`relay` changed); both were already green in the prior validation above.
 - `relay-smoke` was not re-run for this follow-up (no protocol/wire change, no relay dev server was started — port 8002 was left bound to the other worktree's process throughout).
+
+## Integration: P2a (2026-10-02, parent)
+
+**Delegation:**
+- Built by a Claude **Sonnet** subagent in a worktree.
+- Reviewed by an independent Claude **Opus** subagent (medium): approve, with no P0/P1.
+- All five P2 follow-ups were fixed in `ff77e98`. The parent verified them by tests only; they were not re-reviewed.
+
+**Parent validation on merged `r5-relay`:**
+- CompanionKit: 155 passed.
+- CompanionRelayService: 18 passed.
+- Root `swift test`: 177 passed.
+- Relay typecheck passed, and `npm test` passed 150.
+
+**Production:**
+- Relay redeployed to production.
+- `tools/relay-smoke` passed all 28 steps, including inbox-delivered acceptance, then `OwnerAcceptanceCheck`, then confirm with the derived code.
+- A first `vercel deploy --prod` attempt produced no new deployment. The smoke run against the old relay failed at acceptance delivery, as expected. The second deploy succeeded.
+
+**Compatibility:** builds 16–20 still use the typed-code confirm, which is unchanged, so they keep working. The ledger-shape change is forward-only (see above).
