@@ -354,8 +354,29 @@ final class CompanionPairingV2Tests: XCTestCase {
         companion.dismissPendingAcceptance(item)
         XCTAssertNil(companion.storedInvitesForTesting[invitation.payload.inviteID])
 
+        // Owner-review follow-up: the pre-confirm guard must reject this
+        // *before* either network call is even attempted — proven
+        // explicitly here (not merely inferred from never hanging/timing
+        // out against a real relay) by installing overrides that record
+        // whether they were invoked and asserting they weren't. This also
+        // guarantees the test itself can never reach a real relay, no
+        // matter how the guard is implemented.
+        struct UnexpectedInvocation: Error {}
+        var confirmAttempted = false
+        companion.confirmPendingAcceptanceOverride = { _, _ in
+            confirmAttempted = true
+            throw UnexpectedInvocation()
+        }
+        var grantAttempted = false
+        companion.grantOwnerTrustAfterConfirmOverride = { _, _ in
+            grantAttempted = true
+            throw UnexpectedInvocation()
+        }
+
         await companion.confirmPendingAcceptance(item, nickname: "Ari", grantEarlyEndTrust: true)
 
+        XCTAssertFalse(confirmAttempted, "confirm must be refused by the pre-check, never reaching the override/relay")
+        XCTAssertFalse(grantAttempted, "the grant must never run when confirm itself was refused")
         XCTAssertTrue(companion.people.isEmpty, "a discarded acceptance must never be confirmable into a pairing")
     }
 

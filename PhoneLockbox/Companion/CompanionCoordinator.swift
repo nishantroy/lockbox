@@ -733,10 +733,20 @@ final class CompanionCoordinator: ObservableObject {
                                       ownerIdentity: ownerIdentity, now: now)
     }
 
+    #if DEBUG
     /// Test-only override for `confirmPendingAcceptance`'s `client.confirm`
     /// call (owner-review follow-up, P2-9) — mirrors `useApprovalOverride`
-    /// (R5 Slice B2c). Defaults to the real network round trip.
+    /// (R5 Slice B2c). Defaults to the real network round trip. `#if DEBUG`
+    /// (second owner-review follow-up): never compiled into a release
+    /// build, same reasoning as every other test-only seam in this file.
     var confirmPendingAcceptanceOverride: (@MainActor (_ acceptance: PairingAcceptance, _ verificationCode: String) async throws -> Pairing)?
+    #endif
+
+    private func confirmViaRelay(_ acceptance: PairingAcceptance, verificationCode: String) async throws -> Pairing {
+        let identity = try ensureIdentity(role: .owner)
+        let client = makeClient(signer: try signer(for: identity))
+        return try await client.confirm(acceptance, verificationCode: verificationCode, now: Date())
+    }
 
     /// The owner taps **Confirm** on a verified pending-acceptance card,
     /// after optionally naming the person and choosing whether to grant
@@ -783,13 +793,15 @@ final class CompanionCoordinator: ObservableObject {
         }
         do {
             let pairing: Pairing
+            #if DEBUG
             if let confirmPendingAcceptanceOverride {
                 pairing = try await confirmPendingAcceptanceOverride(item.acceptance, item.expectedVerificationCode)
             } else {
-                let identity = try ensureIdentity(role: .owner)
-                let client = makeClient(signer: try signer(for: identity))
-                pairing = try await client.confirm(item.acceptance, verificationCode: item.expectedVerificationCode, now: Date())
+                pairing = try await confirmViaRelay(item.acceptance, verificationCode: item.expectedVerificationCode)
             }
+            #else
+            pairing = try await confirmViaRelay(item.acceptance, verificationCode: item.expectedVerificationCode)
+            #endif
             let upserted = upsertConfirmedPairing(pairing, nickname: nickname.isEmpty ? nil : nickname)
             discardStoredInvite(inviteID: item.acceptance.inviteID)
             pendingOwnerAcceptances.removeAll { $0.id == item.id }
@@ -801,9 +813,19 @@ final class CompanionCoordinator: ObservableObject {
         } catch { fail(error) }
     }
 
+    #if DEBUG
     /// Test-only override for `grantOwnerTrustAfterConfirm`'s
-    /// `client.grantScopes` call (owner-review follow-up, P2-9).
+    /// `client.grantScopes` call (owner-review follow-up, P2-9). `#if
+    /// DEBUG` (second owner-review follow-up): never compiled into a
+    /// release build.
     var grantOwnerTrustAfterConfirmOverride: (@MainActor (_ pairing: Pairing, _ scopes: [CompanionScope]) async throws -> RelationshipConsent)?
+    #endif
+
+    private func grantScopesViaRelay(pairing: Pairing, scopes: [CompanionScope]) async throws -> RelationshipConsent {
+        let identity = try ensureIdentity(role: .owner)
+        let client = makeClient(signer: try signer(for: identity))
+        return try await client.grantScopes(pairing: pairing, scopes: scopes)
+    }
 
     /// Follow-up to `confirmPendingAcceptance`: grants both owner scopes
     /// (`approveEarlyEnd`, `receiveRequests`) for the just-confirmed pairing
@@ -821,13 +843,15 @@ final class CompanionCoordinator: ObservableObject {
             var scopes = Set(person.consent?.ownerScopes ?? [])
             scopes.formUnion([.approveEarlyEnd, .receiveRequests])
             let consent: RelationshipConsent
+            #if DEBUG
             if let grantOwnerTrustAfterConfirmOverride {
                 consent = try await grantOwnerTrustAfterConfirmOverride(person.pairing, Array(scopes))
             } else {
-                let identity = try ensureIdentity(role: .owner)
-                let client = makeClient(signer: try signer(for: identity))
-                consent = try await client.grantScopes(pairing: person.pairing, scopes: Array(scopes))
+                consent = try await grantScopesViaRelay(pairing: person.pairing, scopes: Array(scopes))
             }
+            #else
+            consent = try await grantScopesViaRelay(pairing: person.pairing, scopes: Array(scopes))
+            #endif
             applyOwnConsentUpdate(consent, forPairingID: pairingID)
             lastError = nil; needsRepair = false
         } catch {
@@ -1322,17 +1346,23 @@ final class CompanionCoordinator: ObservableObject {
         }
     }
 
+    #if DEBUG
     /// Submits `use` for the given approval/request/useID using this
     /// device's owner signer. Defaults to the real `AsyncCompanionClient
     /// .useApproval` round trip (built via `makeClient`); overridable only
     /// for tests (R5 Slice B2c review, P1-3) so `finishFriendRelease`'s
-    /// branching can be exercised without a network transport.
+    /// branching can be exercised without a network transport. `#if DEBUG`
+    /// (owner-review follow-up): never compiled into a release build, same
+    /// as every other test-only override in this file.
     var useApprovalOverride: (@MainActor (_ approval: Approval, _ request: TrustedRequest, _ useID: String) async throws -> ApprovalVerification)?
+    #endif
 
     private func submitUse(_ approval: Approval, request: TrustedRequest, useID: String) async throws -> ApprovalVerification {
+        #if DEBUG
         if let override = useApprovalOverride {
             return try await override(approval, request, useID)
         }
+        #endif
         guard let ownerIdentity else { throw CompanionError.unauthorized }
         let client = makeClient(signer: try signer(for: ownerIdentity))
         return try await client.useApproval(approval, request: request, useID: useID)
