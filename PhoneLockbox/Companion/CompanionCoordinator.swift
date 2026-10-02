@@ -56,12 +56,18 @@ struct CompanionInboxItem: Identifiable {
 }
 
 /// Drives the People tab. Companion pairing/consent/requests never touch
-/// `ScreenTimeCoordinator`, `FamilyControls`, or `ManagedSettings` — the only
-/// coupling to the lock itself is reading
+/// `FamilyControls` or `ManagedSettings` directly. Coupling to the lock
+/// itself is deliberately narrow: reading
 /// `ScreenTimeCoordinator.companionActiveSessionIdentity` (read-only) so an
-/// owner can name the current exact session in a request. This slice (B1)
-/// never calls `useApproval`/consumes an approval into the lock lifecycle;
-/// that is Slice B2, reviewed separately.
+/// owner can name the current exact session in a request (R5 Slice B1), and
+/// — only when the developer gate
+/// (`CompanionCoordinator.friendApprovalCanEndLocksEnabled`) is on —
+/// calling `ScreenTimeCoordinator.prepareFriendRelease`/`applyFriendRelease`/
+/// `abandonFriendRelease` to actually end one exact session from a verified
+/// approval (R5 Slice B2c). This coordinator still owns every network call,
+/// signature and `OwnerApprovalCheck`; `ScreenTimeCoordinator` only ever
+/// records/applies/abandons the durable intent under its own transaction
+/// lock and clock.
 @MainActor
 final class CompanionCoordinator: ObservableObject {
     private static let keychainService = "com.phone-lockbox.companion.keys"
@@ -78,6 +84,13 @@ final class CompanionCoordinator: ObservableObject {
     private static let relayBaseURLDefaultsKey = "com.phone-lockbox.companion.relayBaseURL.v1"
     static let defaultRelayBaseURLString = "http://127.0.0.1:8002"
     private static let acceptanceLinkPrefix = "PLBX-ACCEPT:"
+    /// R5 Slice B2c developer gate. Defaults to **off**; see
+    /// `docs/r5-b2-plan.md` ("Developer gate"). Persisted in the App Group
+    /// suite (falls back to `false` when storage is unavailable, same as
+    /// every other companion feature).
+    private static let friendApprovalGateDefaultsKey = "com.phone-lockbox.companion.friendApprovalCanEndLocks.v1"
+    /// R5 Slice B2c review, P2-6: `[requestID: useID]`.
+    private static let useIDsByRequestIDDefaultsKey = "com.phone-lockbox.companion.friendReleaseUseIDs.v1"
     private static let appGroupUnavailableMessage =
         "The shared App Group storage is unavailable. Companion features are disabled on this device."
 
@@ -98,11 +111,28 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var needsRepair = false
     @Published var pendingInvitation: Invitation?
     @Published var pendingAcceptance: PairingAcceptance?
+    /// R5 Slice B2a: the relay-stored `Approval` for each request this
+    /// device's owner identity has fetched in its own anchored inbox,
+    /// keyed by `requestID`. Populated alongside `inboxItems` on every
+    /// `refreshInbox()`/`endLockNow` fetch; used only for People tab display
+    /// (approver name) and to find the approval to act on. Never trusted as
+    /// an authorization decision by itself — `OwnerApprovalCheck.verify` and
+    /// the relay's own `use` check are the actual authorities.
+    @Published private(set) var approvalsByRequestID: [String: Approval] = [:]
 
     /// Developer-only setting. Defaults to the local relay in
     /// `docs/r5-relay-plan.md`; on a device, set it to the Mac's LAN address.
     @Published var relayBaseURLString: String {
         didSet { sharedDefaults?.set(relayBaseURLString, forKey: Self.relayBaseURLDefaultsKey) }
+    }
+
+    /// R5 Slice B2c developer gate: "Friend approval can end locks
+    /// (prototype)" in Settings. Defaults to **off**. When off, the People
+    /// tab behaves exactly as in B1 — approved requests show status only,
+    /// and `endLockNow`/the foreground replay never act. Mutating this
+    /// never itself ends a lock.
+    @Published var friendApprovalCanEndLocksEnabled: Bool {
+        didSet { sharedDefaults?.set(friendApprovalCanEndLocksEnabled, forKey: Self.friendApprovalGateDefaultsKey) }
     }
 
     private let keyStore: any DeviceKeyStore
@@ -114,6 +144,18 @@ final class CompanionCoordinator: ObservableObject {
     private let sharedDefaults: UserDefaults?
     private let anchorStore: (any RollbackAnchorStore)?
     private let makeSession: @Sendable () -> URLSession
+    /// R5 Slice B2c review, P1-1: the single in-flight friend-release
+    /// `Task`, shared by `endLockNow` and `replayPendingFriendRelease`.
+    private var friendReleaseFlight: Task<Void, Never>?
+    /// R5 Slice B2c review, R2-3: the `requestID` the current
+    /// `friendReleaseFlight` is actually working on, set only by the call
+    /// that *starts* the flight (never by one that joins it).
+    private var friendReleaseFlightRequestID: String?
+    /// R5 Slice B2c review, P2-6: the `useID` this coordinator generated for
+    /// each `requestID` it has attempted `endLockNow` for, so a later
+    /// released marker can be attributed to the exact request that caused
+    /// it (not merely the session). Persisted so this survives relaunch.
+    private var useIDsByRequestID: [String: String] = [:]
 
     /// `false` only when the App Group suite is unavailable. The People tab
     /// should treat every companion action as disabled in that state.
@@ -129,6 +171,7 @@ final class CompanionCoordinator: ObservableObject {
         self.makeSession = makeSession
         if let resolvedDefaults {
             self.relayBaseURLString = resolvedDefaults.string(forKey: Self.relayBaseURLDefaultsKey) ?? Self.defaultRelayBaseURLString
+            self.friendApprovalCanEndLocksEnabled = resolvedDefaults.object(forKey: Self.friendApprovalGateDefaultsKey) as? Bool ?? false
             self.lastError = nil
         } else {
             // Fail visibly and stay disabled — never substitute a random
@@ -136,6 +179,7 @@ final class CompanionCoordinator: ObservableObject {
             // Keychain keys without durable, App Group-backed storage to
             // remember them in.
             self.relayBaseURLString = Self.defaultRelayBaseURLString
+            self.friendApprovalCanEndLocksEnabled = false
             self.lastError = Self.appGroupUnavailableMessage
         }
         if resolvedDefaults != nil {
@@ -144,6 +188,7 @@ final class CompanionCoordinator: ObservableObject {
             loadPendingAcceptances()
             pendingAcceptances = CompanionTrustMerge.pruneExpiredPendingAcceptances(pendingAcceptances, now: Date())
             savePendingAcceptances()
+            loadUseIDsByRequestID()
         }
     }
 
@@ -202,6 +247,49 @@ final class CompanionCoordinator: ObservableObject {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(pendingAcceptances) else { return }
         sharedDefaults.set(data, forKey: Self.pendingAcceptancesDefaultsKey)
+    }
+
+    private func loadUseIDsByRequestID() {
+        guard let sharedDefaults, let data = sharedDefaults.data(forKey: Self.useIDsByRequestIDDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        useIDsByRequestID = decoded
+    }
+
+    private func saveUseIDsByRequestID() {
+        guard let sharedDefaults else { return }
+        guard let data = try? JSONEncoder().encode(useIDsByRequestID) else { return }
+        sharedDefaults.set(data, forKey: Self.useIDsByRequestIDDefaultsKey)
+    }
+
+    /// R5 Slice B2c review, P2-6: records which `useID` this coordinator
+    /// generated for `requestID`, so a later released marker can be
+    /// attributed to the exact request that caused it.
+    private func recordUseID(_ useID: String, forRequestID requestID: String) {
+        useIDsByRequestID[requestID] = useID
+        saveUseIDsByRequestID()
+    }
+
+    /// Keeps `useIDsByRequestID` from growing unboundedly and drops entries
+    /// for requests this device's owner identity no longer sees in its own
+    /// ledger at all (R5 Slice B2c review, R2-4). Called after every
+    /// successful owner-anchored inbox fetch with that fetch's own
+    /// `response.requests`, never with a helper-side listing.
+    private func pruneUseIDsByRequestID(presentRequestIDs: Set<String>) {
+        let before = useIDsByRequestID
+        useIDsByRequestID = useIDsByRequestID.filter { presentRequestIDs.contains($0.key) }
+        if useIDsByRequestID.count > 64 {
+            // Dictionaries carry no reliable ordering, so this is a
+            // defensive cap on pathological growth, not a precise
+            // least-recently-used eviction; the filter above already
+            // handles the common case of stale/purged requests.
+            let overflow = useIDsByRequestID.count - 64
+            for key in useIDsByRequestID.keys.prefix(overflow) {
+                useIDsByRequestID.removeValue(forKey: key)
+            }
+        }
+        if useIDsByRequestID != before {
+            saveUseIDsByRequestID()
+        }
     }
 
     /// Looks up a known person's display name for `identityID`, wherever it
@@ -264,6 +352,12 @@ final class CompanionCoordinator: ObservableObject {
             || detail.localizedCaseInsensitiveContains("owner identity")
             || detail.localizedCaseInsensitiveContains("anchor"):
             return "The relay's response failed an integrity check (\(detail)). Treating this as untrusted; nothing was changed here."
+        // R5 Slice B2c: both are integrity-fatal (`AsyncCompanionClient.UseFailureDisposition`)
+        // and never retried or abandoned automatically — see `finishFriendRelease`.
+        case .relayRollback:
+            return "This device's own record of the relay disagrees with what it just reported. Nothing was changed; this needs attention before trying again."
+        case .responseVerificationFailed:
+            return "The relay's response to that action failed a local safety check. Nothing was changed; this needs attention before trying again."
         default: return "The relay rejected that action (\(error.transportCode))."
         }
     }
@@ -507,6 +601,427 @@ final class CompanionCoordinator: ObservableObject {
         } catch { fail(error) }
     }
 
+    // MARK: - End lock now (R5 Slice B2c)
+    //
+    // Gated by `friendApprovalCanEndLocksEnabled` (off by default). No
+    // release ever happens without a verified `use` response: `coordinator
+    // .applyFriendRelease` is only ever called after `useApproval` has
+    // returned and been locally re-verified by `AsyncCompanionClient` itself.
+
+    /// Per-request People tab state (R5 Slice B2c review, P2-6): keyed by
+    /// the request, not merely the session it targets, so two different
+    /// requests that happen to target the same session are never confused
+    /// with each other.
+    enum FriendReleaseRequestState: Equatable {
+        case eligible
+        case finishing
+        case usedToEnd
+        case alreadyEnded
+    }
+
+    /// Whether the People tab's gate-on "End lock now" row should be shown
+    /// at all for this item. A pure, testable predicate (R5 Slice B2c
+    /// review, P2-10) kept in sync with the view by construction — the view
+    /// calls this instead of inlining the same three conditions.
+    static func shouldShowFriendReleaseAction(for item: CompanionInboxItem, gateEnabled: Bool) -> Bool {
+        gateEnabled && item.isMine && item.status == .approved
+    }
+
+    /// The state `FriendReleaseActionView` renders for one inbox item,
+    /// independent of the developer gate (the gate only decides whether the
+    /// *row* appears at all; `.finishing` is shown regardless — P2-12).
+    func friendReleaseRequestState(for item: CompanionInboxItem, coordinator: any FriendReleaseLifecycle) -> FriendReleaseRequestState {
+        if let pending = coordinator.pendingFriendReleaseIntent, pending.requestID == item.request.requestID {
+            return .finishing
+        }
+        switch coordinator.friendReleaseSessionState(sessionID: item.request.sessionID) {
+        case .eligible, .finishing:
+            // `.finishing` here means a *different* request's intent is
+            // pending against the same session; this request itself is
+            // still eligible (a tap will get a calm "already in progress"
+            // no-op from `prepareFriendRelease`, never a confusing state).
+            return .eligible
+        case .usedToEnd:
+            // Only attribute the release to *this* request if the useID
+            // this coordinator generated for it is the one that actually
+            // released the session — another request's approval could have
+            // released the same session instead.
+            if let ourUseID = useIDsByRequestID[item.request.requestID],
+               coordinator.friendReleaseUseID(forSessionID: item.request.sessionID) == ourUseID {
+                return .usedToEnd
+            }
+            return .alreadyEnded
+        case .alreadyEnded:
+            return .alreadyEnded
+        }
+    }
+
+    /// Pure selection + local authorization check for `endLockNow`/the
+    /// foreground replay: finds the named request and its delivered
+    /// approval in an already-fetched owner-anchored inbox response,
+    /// resolves the approver's locally cached pairing/consent, and runs
+    /// `OwnerApprovalCheck.verify` before any mutation or network `use`
+    /// call. No I/O — every input is already in hand. `internal` (not
+    /// `private`) so `PhoneLockboxTests` can exercise it directly (R5 Slice
+    /// B2c review, P1-3).
+    ///
+    /// `approvalID`, when given, pins selection to that *exact* approval
+    /// rather than merely the first one found for `requestID` (R5 Slice B2c
+    /// review, R2-5) — required for a foreground replay, which must never
+    /// silently substitute a newer approval for the one a pending intent
+    /// was actually prepared against.
+    static func selectFriendRelease(
+        response: InboxResponse,
+        requestID: String,
+        approvalID: String? = nil,
+        people: [CompanionPerson],
+        ownerIdentity: DeviceIdentity
+    ) throws -> (request: TrustedRequest, approval: Approval, trustedApprover: OwnerApprovalCheck.TrustedApprover) {
+        guard let request = response.requests.first(where: { $0.requestID == requestID }) else {
+            throw CompanionError.notFound
+        }
+        let matchedApproval: Approval?
+        if let approvalID {
+            matchedApproval = response.approvals?.first(where: { $0.requestID == requestID && $0.approvalID == approvalID })
+        } else {
+            matchedApproval = response.approvals?.first(where: { $0.requestID == requestID })
+        }
+        guard let approval = matchedApproval else {
+            throw CompanionError.notFound
+        }
+        guard let targetBinding = request.binding(for: approval.approver.identityID),
+              let person = people.first(where: { $0.pairing.pairingID == targetBinding.pairingID }),
+              let consent = person.consent else {
+            throw CompanionError.unknownIdentity
+        }
+        let trustedApprover = OwnerApprovalCheck.TrustedApprover(pairing: person.pairing, consent: consent)
+        try OwnerApprovalCheck.verify(approval: approval, request: request, trustedApprover: trustedApprover, ownerIdentity: ownerIdentity)
+        return (request, approval, trustedApprover)
+    }
+
+    /// The owner taps **End lock now** on their own approved request. Checks
+    /// the approval against this device's own trusted-person cache with
+    /// `OwnerApprovalCheck` (never trusting the inbox fetch alone), persists
+    /// a durable intent through `coordinator.prepareFriendRelease`, then
+    /// submits `use` and applies the release once verified. Every step uses
+    /// the **latest** owner-anchored inbox fetch, never a possibly stale
+    /// cached `item`/`approvalsByRequestID` entry. Single-flight with the
+    /// foreground replay (R5 Slice B2c review, P1-1): a second call while
+    /// one is already running joins it instead of starting a duplicate.
+    func endLockNow(_ item: CompanionInboxItem, coordinator: any FriendReleaseLifecycle) async {
+        guard isAvailable, friendApprovalCanEndLocksEnabled else { return }
+        if friendReleaseFlight != nil, friendReleaseFlightRequestID != item.request.requestID {
+            // R5 Slice B2c review (R2-3): joining another request's
+            // in-flight work would silently wait and then surface whatever
+            // error that unrelated flight produces. Say so plainly instead
+            // of joining — only a flight for this *same* request is worth
+            // waiting on.
+            lastError = Self.prepareNoOpMessage(.conflictingPendingIntent)
+            return
+        }
+        await runSingleFlightFriendRelease(requestID: item.request.requestID) { [weak self] in
+            await self?.performEndLockNow(item, coordinator: coordinator)
+        }
+    }
+
+    private func performEndLockNow(_ item: CompanionInboxItem, coordinator: any FriendReleaseLifecycle) async {
+        guard item.isMine else {
+            lastError = "This is a request you're helping with, not your own request."
+            return
+        }
+        guard let ownerIdentity, item.request.owner == ownerIdentity else {
+            lastError = "This request doesn't belong to this device's owner identity."
+            return
+        }
+        do {
+            let signer = try signer(for: ownerIdentity)
+            let client = makeClient(signer: signer)
+            let response = try await client.fetchInboxResponse()
+            for approval in response.approvals ?? [] { approvalsByRequestID[approval.requestID] = approval }
+            _ = applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
+            pruneUseIDsByRequestID(presentRequestIDs: Set(response.requests.map(\.requestID)))
+            let (request, approval, _) = try Self.selectFriendRelease(
+                response: response, requestID: item.request.requestID, people: people, ownerIdentity: ownerIdentity
+            )
+            guard let sessionUUID = UUID(uuidString: request.sessionID) else {
+                lastError = "This request's session identifier could not be read."
+                return
+            }
+            // R5 Slice B2c review (P2-3): the gate may have been turned off
+            // during the inbox round trip above; re-check immediately before
+            // ever persisting a durable intent.
+            guard friendApprovalCanEndLocksEnabled else { return }
+            let useID = UUID().uuidString
+            recordUseID(useID, forRequestID: request.requestID)
+            let prepareOutcome = try coordinator.prepareFriendRelease(
+                sessionID: sessionUUID,
+                activeSetID: request.activeSetID,
+                requestID: request.requestID,
+                approvalID: approval.approvalID,
+                useID: useID,
+                approverIdentityID: approval.approver.identityID
+            )
+            switch prepareOutcome {
+            case .recorded:
+                lastError = nil
+            case .noOp(let reason):
+                lastError = Self.prepareNoOpMessage(reason)
+                return
+            }
+            await finishFriendRelease(request: request, approval: approval, useID: useID, coordinator: coordinator)
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// Foreground replay: if a friend-release intent is durably pending (the
+    /// app was interrupted after `prepareFriendRelease` but before a verified
+    /// `use`), re-verifies it against the latest inbox and retries `use`
+    /// with the same `useID`, then finishes the release. Safe to call
+    /// unconditionally on every foreground/pull-to-refresh — it never starts
+    /// a new release; only an explicit `endLockNow` tap does that.
+    /// Deliberately not gated on `friendApprovalCanEndLocksEnabled`:
+    /// finishing a use the owner already started is the one automatic step
+    /// the plan allows, regardless of the gate's current value. Single-
+    /// flight with `endLockNow` (P1-1): joins an in-flight call instead of
+    /// racing it into a second `use` submission.
+    func replayPendingFriendRelease(coordinator: any FriendReleaseLifecycle) async {
+        guard isAvailable, let pending = coordinator.pendingFriendReleaseIntent, ownerIdentity != nil else { return }
+        await runSingleFlightFriendRelease(requestID: pending.requestID) { [weak self] in
+            await self?.performReplayPendingFriendRelease(coordinator: coordinator)
+        }
+    }
+
+    private func performReplayPendingFriendRelease(coordinator: any FriendReleaseLifecycle) async {
+        // Re-read the pending intent now that this call actually owns the
+        // single flight: it may have been resolved by whichever call this
+        // one joined above.
+        guard let pending = coordinator.pendingFriendReleaseIntent, let ownerIdentity else { return }
+        let response: InboxResponse
+        do {
+            let signer = try signer(for: ownerIdentity)
+            let client = makeClient(signer: signer)
+            response = try await client.fetchInboxResponse()
+        } catch {
+            // A transport/local failure fetching the inbox is not surfaced
+            // as a blocking error on every foreground; it is retried on the
+            // next foreground or explicit tap.
+            return
+        }
+        for approval in response.approvals ?? [] { approvalsByRequestID[approval.requestID] = approval }
+        _ = applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
+        pruneUseIDsByRequestID(presentRequestIDs: Set(response.requests.map(\.requestID)))
+        // R5 Slice B2c review (P2-2, pinned precisely by R2-5): re-select
+        // and re-verify from scratch (never trust the approval cached when
+        // this intent was first prepared), pinning selection itself to the
+        // *exact* `approvalID` this intent was prepared against — never
+        // just the first approval found for the request, which could by
+        // then be a newer, different approval. `approver.identityID` is
+        // checked too, as defense in depth.
+        guard let (request, approval, _) = try? Self.selectFriendRelease(
+            response: response, requestID: pending.requestID, approvalID: pending.approvalID,
+            people: people, ownerIdentity: ownerIdentity
+        ), approval.approver.identityID == pending.approverIdentityID else {
+            // R5 Slice B2c review (P2-5): calm, explicit status rather than
+            // silence, since this can otherwise look like nothing is
+            // happening indefinitely. Never abandons automatically --
+            // `discardPendingFriendRelease` is the explicit developer
+            // escape hatch for a durably stuck intent.
+            lastError = Self.pendingReleaseUnavailableMessage
+            return
+        }
+        await finishFriendRelease(request: request, approval: approval, useID: pending.useID, coordinator: coordinator)
+    }
+
+    /// Developer-only escape hatch (R5 Slice B2c review, P2-5): clears a
+    /// durably pending friend-release intent without ever submitting `use`.
+    /// For the case where the request/approval it depends on will never
+    /// reappear in the inbox (declined elsewhere, expired, purged). Never
+    /// releases anything by itself. Refuses while a friend-release flight is
+    /// in progress (R5 Slice B2c review, R2-2) — `hasFriendReleaseFlightInFlight`
+    /// also disables the Settings button for the same reason, but this guard
+    /// keeps the method itself safe even if called directly (for example a
+    /// confirmation dialog that was already showing when a flight started).
+    func discardPendingFriendRelease(coordinator: any FriendReleaseLifecycle) {
+        guard !hasFriendReleaseFlightInFlight else { return }
+        guard let pending = coordinator.pendingFriendReleaseIntent else { return }
+        do {
+            _ = try coordinator.abandonFriendRelease(useID: pending.useID)
+            lastError = nil
+        } catch {
+            lastError = "Couldn't discard the pending request: \(error.localizedDescription)"
+        }
+    }
+
+    static let pendingReleaseUnavailableMessage = "This request is no longer available; the lock stays on until it ends."
+
+    /// Shared tail of `endLockNow`/`replayPendingFriendRelease`: submits
+    /// `use` (via `submitUse`, overridable in tests), classifies any failure
+    /// with `AsyncCompanionClient.UseFailureDisposition`, and applies the
+    /// release only on a verified response. `internal` (not `private`) so
+    /// `PhoneLockboxTests` can exercise its branching directly (R5 Slice B2c
+    /// review, P1-3).
+    func finishFriendRelease(request: TrustedRequest, approval: Approval, useID: String, coordinator: any FriendReleaseLifecycle) async {
+        do {
+            let verification = try await submitUse(approval, request: request, useID: useID)
+            _ = verification
+            do {
+                let applyOutcome = try coordinator.applyFriendRelease(useID: useID)
+                switch applyOutcome {
+                case .released:
+                    lastError = nil
+                case .noOp(let reason):
+                    // R5 Slice B2c review (P1-1, tightened by R2-1): a
+                    // verified `use` followed by `.noMatchingPendingIntent`
+                    // most often means a concurrent flight already applied
+                    // this exact release (the intent it was keyed on is
+                    // already gone). Confirm via the durable released
+                    // marker's cause *and* its exact `useID` -- `.usedToEnd`
+                    // alone only proves *some* friend approval released this
+                    // session, not that it was *this* `useID` -- before
+                    // reporting success instead of a confusing "already
+                    // ended".
+                    if reason == .noMatchingPendingIntent,
+                       coordinator.friendReleaseSessionState(sessionID: request.sessionID) == .usedToEnd,
+                       coordinator.friendReleaseUseID(forSessionID: request.sessionID) == useID {
+                        lastError = nil
+                    } else {
+                        lastError = Self.applyNoOpMessage(reason)
+                    }
+                }
+            } catch {
+                fail(error)
+            }
+        } catch {
+            switch AsyncCompanionClient.UseFailureDisposition.classify(error) {
+            case .retryable:
+                lastError = "Couldn't reach the relay. Pull to refresh to finish."
+            case .definitive:
+                let message = Self.definitiveUseFailureMessage(error)
+                do {
+                    _ = try coordinator.abandonFriendRelease(useID: useID)
+                    lastError = message
+                } catch let abandonError {
+                    // R5 Slice B2c review (P2-8): handle/report rather than
+                    // silently swallow -- the pending intent may now be
+                    // stuck until a developer uses "Discard pending friend
+                    // release".
+                    lastError = "\(message) This device could not clear the pending request locally (\(abandonError.localizedDescription)); use Discard pending friend release in Settings if it stays stuck."
+                }
+            case .integrityFatal:
+                lastError = "The relay's response failed an integrity check. Nothing was changed here; this needs attention before trying again."
+            }
+        }
+    }
+
+    /// Submits `use` for the given approval/request/useID using this
+    /// device's owner signer. Defaults to the real `AsyncCompanionClient
+    /// .useApproval` round trip (built via `makeClient`); overridable only
+    /// for tests (R5 Slice B2c review, P1-3) so `finishFriendRelease`'s
+    /// branching can be exercised without a network transport.
+    var useApprovalOverride: (@MainActor (_ approval: Approval, _ request: TrustedRequest, _ useID: String) async throws -> ApprovalVerification)?
+
+    private func submitUse(_ approval: Approval, request: TrustedRequest, useID: String) async throws -> ApprovalVerification {
+        if let override = useApprovalOverride {
+            return try await override(approval, request, useID)
+        }
+        guard let ownerIdentity else { throw CompanionError.unauthorized }
+        let client = makeClient(signer: try signer(for: ownerIdentity))
+        return try await client.useApproval(approval, request: request, useID: useID)
+    }
+
+    /// Ensures `endLockNow` and the foreground replay never race each other
+    /// into two concurrent `use` submissions: only one friend-release flight
+    /// runs at a time, and a second caller awaits the one already running
+    /// instead of starting its own (R5 Slice B2c review, P1-1). `internal`
+    /// (not `private`) so `PhoneLockboxTests` can exercise it directly.
+    /// `requestID`, when given, tags the flight this call *starts* (a
+    /// caller that instead *joins* an existing flight does not change its
+    /// tag) — `endLockNow` reads `friendReleaseFlightRequestID` to tell
+    /// "the same request is already in flight" from "a different one is"
+    /// (R2-3).
+    func runSingleFlightFriendRelease(requestID: String? = nil, _ work: @escaping () async -> Void) async {
+        if let inFlight = friendReleaseFlight {
+            // R5 Slice B2c review (R2-3/determinism): incremented
+            // synchronously, before any suspension point, so a caller
+            // waiting on this count (tests) sees it the instant a joiner
+            // commits to waiting rather than starting its own flight.
+            friendReleaseFlightJoinCount += 1
+            await inFlight.value
+            return
+        }
+        friendReleaseFlightRequestID = requestID
+        let task = Task { await work() }
+        friendReleaseFlight = task
+        hasFriendReleaseFlightInFlight = true
+        await task.value
+        friendReleaseFlight = nil
+        friendReleaseFlightRequestID = nil
+        hasFriendReleaseFlightInFlight = false
+    }
+
+    /// `true` while a friend-release flight (`endLockNow`/the foreground
+    /// replay) is running. `@Published` so the Settings "Discard pending
+    /// friend release" button can disable itself while one is in flight
+    /// (R5 Slice B2c review, R2-2); also used directly by
+    /// `PhoneLockboxTests`.
+    @Published private(set) var hasFriendReleaseFlightInFlight = false
+
+    /// Test-only: incremented each time a caller joins an already-in-flight
+    /// friend-release flight instead of starting its own (R5 Slice B2c
+    /// review, determinism fix for the single-flight test).
+    private(set) var friendReleaseFlightJoinCount = 0
+
+    /// Copy for `prepareFriendRelease`'s no-op outcomes — shown immediately
+    /// after an owner's tap, before any network call. `internal` (not
+    /// `private`) so `PhoneLockboxTests` can assert this mapping directly.
+    static func prepareNoOpMessage(_ reason: RuntimeFriendRelease.NoOpReason) -> String {
+        switch reason {
+        case .alreadyEnded: return "This lock already ended."
+        case .activeSetMismatch: return "This approval is for a different lock."
+        case .conflictingPendingIntent: return "Another end-lock request is already in progress."
+        case .noMatchingPendingIntent: return "This lock already ended."
+        }
+    }
+
+    /// Copy for `applyFriendRelease`'s no-op outcomes — every one is
+    /// terminal (the durable intent is already cleared); never retried.
+    /// `internal` (not `private`) so `PhoneLockboxTests` can assert this
+    /// mapping directly.
+    static func applyNoOpMessage(_ reason: RuntimeFriendRelease.NoOpReason) -> String {
+        switch reason {
+        case .alreadyEnded: return "This lock already ended."
+        case .activeSetMismatch: return "Your locks changed; ask again."
+        case .conflictingPendingIntent: return "This lock already ended."
+        case .noMatchingPendingIntent: return "This lock already ended."
+        }
+    }
+
+    /// Calm, specific copy for a **definitive** `use` rejection (R5 Slice
+    /// B2c review, P2-8), falling back to the generic `describe(_:)` for
+    /// any code not named here.
+    static func definitiveUseFailureMessage(_ error: Error) -> String {
+        let companionError: CompanionError?
+        switch error {
+        case let direct as CompanionError:
+            companionError = direct
+        case let transport as CompanionTransportError:
+            if case .server(let inner) = transport { companionError = inner } else { companionError = nil }
+        default:
+            companionError = nil
+        }
+        switch companionError {
+        case .replay:
+            return "This approval was already used."
+        case .expired:
+            return "This approval expired; ask again."
+        case .revokedPairing, .consentRequired:
+            return "This friend can no longer approve early ends."
+        default:
+            return Self.describe(error)
+        }
+    }
+
     // MARK: - Foreground refresh
 
     /// Fetches this device's owner and/or approver inbox and, from each
@@ -532,7 +1047,12 @@ final class CompanionCoordinator: ObservableObject {
                 let client = makeClient(signer: signer)
                 let response = try await client.fetchInboxResponse()
                 items += response.requests.map { CompanionInboxItem(request: $0, viewerIdentityID: ownerIdentity.identityID) }
+                // Owner-fetch only (contract v1.2); never present on a helper
+                // fetch. Merged in (never wiped by a failed/helper-only
+                // fetch) — display-only, see `approvalsByRequestID`.
+                for approval in response.approvals ?? [] { approvalsByRequestID[approval.requestID] = approval }
                 rejectionCount += applyInboxSnapshot(response, viewerIdentity: ownerIdentity)
+                pruneUseIDsByRequestID(presentRequestIDs: Set(response.requests.map(\.requestID)))
                 anyFetchSucceeded = true
             } catch { encounteredError = error }
         }

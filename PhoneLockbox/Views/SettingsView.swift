@@ -213,11 +213,36 @@ private struct DeveloperToolsSection: View {
     @Binding var showingDesignGallery: Bool
     @State private var relayURLDraft = ""
     @State private var showingResetAnchorsConfirmation = false
+    @State private var showingDiscardFriendReleaseConfirmation = false
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 14) {
                 LockboxSectionLabel("Developer", systemImage: "wrench.and.screwdriver")
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Friend approval can end locks (prototype)", isOn: $companion.friendApprovalCanEndLocksEnabled)
+                        .tint(LockboxTheme.accent)
+                    Text("Off by default. When on, the People tab lets you end your own lock from a trusted person's approval, with a confirmation. When off, the People tab behaves exactly as before: approvals are shown, but never end the lock.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    if coordinator.pendingFriendReleaseIntent != nil {
+                        Button("Discard pending friend release", role: .destructive) {
+                            showingDiscardFriendReleaseConfirmation = true
+                        }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                        // R5 Slice B2c review (R2-2): never discard out from
+                        // under an in-progress `use` attempt.
+                        .disabled(companion.hasFriendReleaseFlightInFlight)
+                        Text(companion.hasFriendReleaseFlightInFlight
+                             ? "A friend-release attempt is in progress; wait for it to finish before discarding."
+                             : "Clears a durably pending end-lock request without ever using it. Use only if it stays stuck (for example the request or approval disappeared from the inbox).")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
+                }
+
+                Divider().overlay(LockboxTheme.border)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Companion relay address")
@@ -360,6 +385,18 @@ private struct DeveloperToolsSection: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Development-only. This clears rollback/fork protection checkpoints; a real regression or fork from the relay would go undetected until a new checkpoint is established.")
+        }
+        .confirmationDialog(
+            "Discard the pending friend release?",
+            isPresented: $showingDiscardFriendReleaseConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Discard pending friend release", role: .destructive) {
+                companion.discardPendingFriendRelease(coordinator: coordinator)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears the pending request locally without ever using it. The lock stays on until it ends some other way.")
         }
     }
 
