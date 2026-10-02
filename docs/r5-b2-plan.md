@@ -1,6 +1,6 @@
 # R5 Slice B2 — friend approval releases the exact session
 
-Status: **B2b merged on `r5-relay` 2026-10-02 (Opus high review approved after one fix round; root `swift test` 177 passed). B2a in review fixes; B2c not started.** Builds on Slices A and B1 on `r5-relay` (see [R5 relay plan](r5-relay-plan.md)). Nothing here is deployed or device-tested.
+Status: **B2a and B2b merged on `r5-relay` (2026-10-02); B2c not started.** See [integration results](#integration-results-b2a--b2b-2026-10-02).
 
 ## Goal
 
@@ -197,3 +197,35 @@ No app, extension or CompanionKit code. Shared stays free of CompanionKit types,
 - `natural_end` client.
 - APNs.
 - R6 notices and summaries.
+
+## Integration results: B2a + B2b (2026-10-02)
+
+**Delegation actually used:**
+- Builders were Claude **Sonnet** subagents in isolated worktrees.
+- Reviewers were independent Claude **Opus** subagents that wrote none of the code. No Luna/Terra models were used.
+- **B2b** (Opus, high): approve with fixes, then one fix round, then approve.
+- **B2a** (Opus, medium): approve with fixes, then three fix rounds, then approve. Each fix round was re-checked:
+  1. **Idempotent `use` replay vs. rollback anchor.** The relay now returns the owner's current `(revision, stateRoot)` on an owner-signed replay. A helper replay keeps the commit-time pair (privacy).
+  2. **Distinct anchor-violation error.** Added `CompanionError.relayRollback`.
+  3. **`AsyncCompanionClient.UseFailureDisposition.classify`.** Pre-network local errors are `definitive`. Only `responseVerificationFailed`, `relayRollback` and `malformedResponse` are `integrityFatal`.
+- Both worktrees were created at a stale base (`9d5ed89`); each builder fast-forwarded to `6338a2a` before working. No work was lost.
+
+**API as merged (for B2c):**
+- **`prepareFriendRelease`** (B2b) computes the enforcement set itself. Apply rechecks it, and every apply no-op is terminal.
+- No new `RuntimeOperation` cases were added, for downgrade safety.
+- **`OwnerApprovalCheck.verify(approval:request:trustedApprover:ownerIdentity:)`** with `TrustedApprover.init(pairing:consent:)`.
+- **`AsyncCompanionClient.useApproval(_:request:useID:)`.**
+- **`UseFailureDisposition`:**
+  - `retryable`: transport errors, 5xx, `rate_limited`, relay `stale_revision`. Retry with the same `useID`.
+  - `definitive`: call `abandonFriendRelease`.
+  - `integrityFatal`: keep the intent and neither retry nor abandon; show an integrity error.
+- **`describeCompanionError`** needs a `.relayRollback` case.
+
+**Parent validation on the merged branch:**
+- `swift test --package-path CompanionKit`: 140 passed.
+- `swift test --package-path CompanionRelayService`: 18 passed. The first run crashed with signal 11 from stale SwiftPM incremental state; it passed after removing `CompanionRelayService/.build`.
+- Root `swift test`: 177 passed.
+- Relay `npm run typecheck` passed, and `npm test` passed 139 against Docker Postgres 16.
+- `xcodegen generate`: the only diff adds `Shared/RuntimeFriendRelease.swift` to the app and monitor targets. The iOS simulator build succeeded.
+- Production relay redeployed with B2a. `tools/relay-smoke` against `https://relay.example.com` passed all 17 steps.
+- The smoke tool does not yet exercise approval delivery or `use`. That is added with B2c.

@@ -53,6 +53,7 @@
 		A5041E1560903C6CE7A3BC4C /* GalleryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15617864C3787EEB6026FE8B /* GalleryModel.swift */; };
 		A6B54197F91197D40CA7C41A /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		AE5D9BA60885B38A0B0AAF8E /* ScreenTimeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */; };
+		B2F831A7C4E52EAD729F3C94 /* RuntimeFriendRelease.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */; };
 		B3CC6F984D164E57CF206DA4 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21D938BBE7A7D516BD85A479 /* PeopleView.swift */; };
 		B4EEA8A51B9A187E1BCD7A80 /* QuickActionDeliveryBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 275E0C2CA974AD242E8BC60D /* QuickActionDeliveryBroker.swift */; };
 		B55944F134064144A9BB1053 /* ConfigurationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */; };
@@ -60,6 +61,7 @@
 		BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */; };
 		C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		CC7FACFAFEEBA8A8C4901727 /* GalleryTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84197D5D974050762C5DC97 /* GalleryTheme.swift */; };
+		CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */; };
 		DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4937C609973AA395FE5785C2 /* LockboxPolicy.swift */; };
 		E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */; };
 		E4EE663BF81E00D83BB7D66D /* DeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -172,6 +174,7 @@
 		96DADA707D1D0A3DA8934C5A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationEditorView.swift; sourceTree = "<group>"; };
 		A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxLiveActivity.swift; sourceTree = "<group>"; };
+		A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeFriendRelease.swift; sourceTree = "<group>"; };
 		B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEngine.swift; sourceTree = "<group>"; };
 		C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionRoute.swift; sourceTree = "<group>"; };
 		C7F44B15683DBC4D4CC9AE5C /* MonitorExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorExtension.swift; sourceTree = "<group>"; };
@@ -326,6 +329,7 @@
 				739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */,
 				2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */,
 				B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */,
+				A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */,
 				63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */,
 				4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */,
 				D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */,
@@ -620,6 +624,7 @@
 				7CD4DC55BA690B9BBCBC0782 /* RecoveryCommitment.swift in Sources */,
 				92A6E33D92356CC70A15EED4 /* RuntimeContracts.swift in Sources */,
 				C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */,
+				B2F831A7C4E52EAD729F3C94 /* RuntimeFriendRelease.swift in Sources */,
 				2B3F75B0611C6C2B3E834F4A /* RuntimeLifecycle.swift in Sources */,
 				5FE2806A4ED9CC173077DCBD /* RuntimeOccurrence.swift in Sources */,
 				23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */,
@@ -659,6 +664,7 @@
 				73999F7904BC73C3342983E1 /* RecoveryView.swift in Sources */,
 				6080D7DA4E834C9154753BAD /* RuntimeContracts.swift in Sources */,
 				A6B54197F91197D40CA7C41A /* RuntimeEngine.swift in Sources */,
+				CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */,
 				5E0E4133A5633F9B658EC1B4 /* RuntimeLifecycle.swift in Sources */,
 				833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */,
 				17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */,
