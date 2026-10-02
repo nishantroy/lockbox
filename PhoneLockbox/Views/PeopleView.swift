@@ -146,6 +146,18 @@ private struct InviteSomeoneCard: View {
                 .accessibilityIdentifier("inviteSomeone.createInviteButton")
 
                 if let invitation = companion.pendingInvitation {
+                    // Visible and selectable, not just copyable: lets someone
+                    // manually select/copy it too, and gives this exact text
+                    // a stable, readable place to verify from (including in
+                    // the UI test, which reads this rather than the system
+                    // pasteboard — a cross-app pasteboard read from the test
+                    // process is subject to the OS's own "Allow Paste"
+                    // confirmation, which an automated run can't answer).
+                    Text(invitation.shareLink)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(LockboxTheme.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("inviteSomeone.inviteLinkText")
                     ShareLink(item: invitation.shareLink) {
                         Label("Share invite link", systemImage: "square.and.arrow.up")
                     }

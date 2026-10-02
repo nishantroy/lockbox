@@ -69,26 +69,38 @@ struct ContentView: View {
         }
         .task {
             coordinator.refreshAuthorization()
-            routePendingQuickActionIfNeeded()
+            coordinator.processPendingQuickActionRoute()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 coordinator.refreshAuthorization()
-                routePendingQuickActionIfNeeded()
+                // Scene reactivation is an explicit additional retry trigger
+                // for the durable Quick Action queue (docs/quick-actions.md),
+                // independent of whether anything is actually pending — this
+                // call must run every time. It must NOT, by itself, switch
+                // tabs or clear the Lockbox nav path; see the `onChange`
+                // below for that.
+                coordinator.processPendingQuickActionRoute()
                 // R5 Slice B2c review, P2-4: finish an interrupted friend
                 // release on every foreground, not only from the People tab.
                 Task { await companion.replayPendingFriendRelease(coordinator: coordinator) }
             }
         }
-    }
-
-    private func routePendingQuickActionIfNeeded() {
-        // Every queued route is navigation-only. Selecting the Lockbox tab and
-        // clearing an old recovery path happen before claiming presentation;
-        // enforcement and recovery state remain untouched.
-        selectedTab = 0
-        lockboxPath = []
-        coordinator.processPendingQuickActionRoute()
+        .onChange(of: coordinator.pendingQuickAction) { _, newValue in
+            // Switch to Lockbox, and clear any stale recovery path, only
+            // when a Quick Action route is actually about to be presented —
+            // never unconditionally on every launch/foreground. Previously
+            // this ran on every `.active` transition regardless of whether
+            // anything was pending, which threw the user back to the
+            // Lockbox tab on any return to the app (for example, from
+            // Messages after accepting a companion invite on the People
+            // tab), and could undo People-tab routing from an opened
+            // invite link. Every queued route remains navigation-only;
+            // enforcement and recovery state are untouched here either way.
+            guard newValue != nil else { return }
+            selectedTab = 0
+            lockboxPath = []
+        }
     }
 
     @Environment(\.scenePhase) private var scenePhase

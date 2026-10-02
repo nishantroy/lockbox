@@ -207,6 +207,22 @@ final class CompanionCoordinator: ObservableObject {
         if let override = Self.relayBaseURLLaunchArgumentOverride() {
             self.relayBaseURLString = override
         }
+        // UI-test-only full reset: `-resetCompanionStateForUITests` clears
+        // this app's companion identity (the Keychain-held private keys),
+        // every companion App Group key, and the rollback anchors, before
+        // anything below loads them — so a UI test gets a brand-new
+        // owner/approver identity and a clean anchor on every launch,
+        // regardless of what a previous (possibly interrupted) test run,
+        // or another process sharing the same local relay's Postgres, left
+        // behind. Without this, a real relay-state regression (for
+        // example, another test suite truncating the shared local
+        // database) is correctly, but unhelpfully, reported as
+        // `CompanionError.relayRollback` against a stale identity's
+        // leftover anchor. Never compiled into a release build, and never
+        // reachable from any production UI.
+        if ProcessInfo.processInfo.arguments.contains("-resetCompanionStateForUITests") {
+            Self.resetCompanionStateForUITests(keyStore: self.keyStore, sharedDefaults: resolvedDefaults, anchorStore: self.anchorStore)
+        }
         #endif
         if resolvedDefaults != nil {
             loadIdentities()
@@ -396,6 +412,30 @@ final class CompanionCoordinator: ObservableObject {
         guard let index = arguments.firstIndex(of: "-relayBaseURL"), index + 1 < arguments.count else { return nil }
         let value = arguments[index + 1]
         return URL(string: value) != nil ? value : nil
+    }
+
+    /// Backs the `-resetCompanionStateForUITests` launch argument. Deletes
+    /// any existing owner/approver private key from the Keychain, clears
+    /// every companion App Group key this coordinator owns (identities,
+    /// paired people, pending acceptances, the friend-approval gate, and
+    /// the friend-release use-ID map), and resets every rollback-anchor
+    /// checkpoint. Deliberately leaves `relayBaseURLDefaultsKey` alone — the
+    /// `-relayBaseURL` override above already governs that independently.
+    /// Best-effort: a failure to delete one Keychain item does not stop the
+    /// rest of the reset.
+    private static func resetCompanionStateForUITests(keyStore: any DeviceKeyStore, sharedDefaults: UserDefaults?,
+                                                      anchorStore: (any RollbackAnchorStore)?) {
+        guard let sharedDefaults else { return }
+        for key in [ownerIdentityDefaultsKey, approverIdentityDefaultsKey] {
+            guard let data = sharedDefaults.data(forKey: key),
+                  let identity = try? JSONDecoder().decode(DeviceIdentity.self, from: data) else { continue }
+            try? keyStore.deletePrivateKey(for: identity.identityID)
+        }
+        for key in [ownerIdentityDefaultsKey, approverIdentityDefaultsKey, peopleDefaultsKey,
+                    pendingAcceptancesDefaultsKey, friendApprovalGateDefaultsKey, useIDsByRequestIDDefaultsKey] {
+            sharedDefaults.removeObject(forKey: key)
+        }
+        try? anchorStore?.resetAll()
     }
     #endif
 

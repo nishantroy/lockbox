@@ -1,5 +1,4 @@
 import XCTest
-import UIKit
 import CompanionKit
 
 /// End-to-end UI coverage for the owner's two reported pairing problems
@@ -13,6 +12,14 @@ import CompanionKit
 /// 2. There was no way to get the raw link text off the device other than
 ///    the system share sheet. Fixed by adding a visible "Copy link" button
 ///    next to the invite `ShareLink` (`PeopleView.InviteSomeoneCard`).
+///
+/// The first test reads the invite link from a visible, selectable `Text`
+/// in the app's own UI (`inviteSomeone.inviteLinkText`) rather than the
+/// system pasteboard: a cross-app pasteboard *read* (this test process is
+/// a different app from `com.phone-lockbox.app`) triggers iOS's "Allow
+/// Paste" confirmation, which an automated run cannot answer and which is
+/// reliably denied (`PBErrorDomain` code 13). The "Copy link" button is
+/// still tapped (exercising the pasteboard write), just not read back.
 ///
 /// This target runs against a local relay (`relay/`, `npm run dev`,
 /// `http://127.0.0.1:8002`); the app is launched with a `-relayBaseURL`
@@ -34,7 +41,17 @@ final class CompanionPairingUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-relayBaseURL", Self.localRelayBaseURLString]
+        app.launchArguments += [
+            "-relayBaseURL", Self.localRelayBaseURLString,
+            // Makes each test independent of whatever a previous run (or
+            // another process sharing the same local relay's Postgres)
+            // left behind: a fresh owner/approver identity and a clean
+            // rollback anchor every launch, rather than one that can
+            // legitimately — but unhelpfully, for a test — trip
+            // `CompanionError.relayRollback` against stale local state.
+            // DEBUG-only; see `CompanionCoordinator.resetCompanionStateForUITests`.
+            "-resetCompanionStateForUITests",
+        ]
         app.launch()
         self.app = app
     }
@@ -43,15 +60,26 @@ final class CompanionPairingUITests: XCTestCase {
         app = nil
     }
 
-    /// Create an invite in the app, use the new "Copy link" button to get
-    /// its text onto the pasteboard, decode it exactly as a friend's device
-    /// would (`Invitation.fromShareLink`), and have a fresh, in-memory-only
-    /// friend identity accept it over HTTP against the local relay —
-    /// mirroring `tools/relay-smoke`'s "owner creates an invite" /
-    /// "helper accepts the invite" steps, but with the invite coming from
-    /// the real app's pasteboard rather than another in-process client.
+    /// Create an invite in the app, read its link text directly from the
+    /// app's own UI (`inviteSomeone.inviteLinkText`, a selectable `Text`
+    /// showing `invitation.shareLink`), decode it exactly as a friend's
+    /// device would (`Invitation.fromShareLink`), and have a fresh,
+    /// in-memory-only friend identity accept it over HTTP against the local
+    /// relay — mirroring `tools/relay-smoke`'s "owner creates an invite" /
+    /// "helper accepts the invite" steps. Also taps "Copy link" (exercising
+    /// the `UIPasteboard` write), but deliberately does not assert the
+    /// pasteboard's contents: reading the system pasteboard back from this
+    /// test's own process is a *different app* (the XCTest runner) from the
+    /// one that wrote it (`com.phone-lockbox.app`), which triggers iOS's
+    /// "Allow Paste" cross-app confirmation — unanswerable, and reliably
+    /// denied (`PBErrorDomain` code 13, "Operation not authorized"), in an
+    /// automated run. Reading the link from the app's own accessibility
+    /// tree instead sidesteps that entirely.
     func testCreateInviteCopyLinkAndFriendAcceptsOverRelay() async throws {
-        app.tabBars.buttons["People"].tap()
+        guard navigateToPeopleTab() else {
+            XCTFail("'People' tab never stayed selected")
+            return
+        }
 
         // Generous timeouts: creating an invite is a real signed network
         // round trip to the relay, and `continueAfterFailure = false` does
@@ -65,18 +93,26 @@ final class CompanionPairingUITests: XCTestCase {
         }
         createButton.tap()
 
+        let linkTextElement = app.staticTexts["inviteSomeone.inviteLinkText"]
+        guard linkTextElement.waitForExistence(timeout: 30) else {
+            XCTFail("invite link text never appeared after creating an invite")
+            return
+        }
         let copyButton = app.buttons["inviteSomeone.copyLinkButton"]
-        guard copyButton.waitForExistence(timeout: 30) else {
-            XCTFail("'Copy link' button never appeared after creating an invite")
+        guard copyButton.waitForExistence(timeout: 5) else {
+            XCTFail("'Copy link' button never appeared alongside the invite link text")
             return
         }
         attachScreenshot(named: "01-invite-created-copy-link-visible")
 
-        copyButton.tap()
-
-        let linkText = try waitForPasteboardString(timeout: 15)
+        let linkText = (linkTextElement.label.isEmpty ? (linkTextElement.value as? String) : linkTextElement.label) ?? ""
         XCTAssertTrue(linkText.hasPrefix("\(CompanionCoordinatorScheme.companionLinkScheme)://invite/"),
-                      "Copied pasteboard text does not look like an invite link: \(linkText)")
+                      "Invite link text does not look like an invite link: \(linkText)")
+
+        // Still exercises the Copy button's pasteboard write (item d); its
+        // *contents* are deliberately not asserted here — see the doc
+        // comment above.
+        copyButton.tap()
 
         let invitation = try Invitation.fromShareLink(linkText)
 
@@ -138,24 +174,64 @@ final class CompanionPairingUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Your code"].exists, "opening an invite link must not auto-accept it")
     }
 
+    /// Regression test for the real product bug this uncovered and fixed in
+    /// `ContentView.swift`: its `.onChange(of: scenePhase)` used to reset
+    /// `selectedTab`/`lockboxPath` to the Lockbox tab on *every* transition
+    /// to `.active`, even when no Quick Action route was pending — found
+    /// from `UITests3.xcresult`'s captured UI hierarchy on a failure of
+    /// `testCreateInviteCopyLinkAndFriendAcceptsOverRelay`, which showed the
+    /// Lockbox tab's setup screen (with its tab bar button marked
+    /// `Selected`) immediately after tapping "People". That meant a user
+    /// returning to the app from Messages or Settings — or from opening a
+    /// companion invite link — was thrown back to Lockbox. The fix gates
+    /// that reset on `coordinator.pendingQuickAction` actually becoming
+    /// non-nil (only then is a route actually about to be presented).
+    /// This test simulates "returning from Messages": select People,
+    /// background the app, then foreground it again, and confirm People is
+    /// still selected.
+    func testPeopleTabStaysSelectedAcrossBackgroundForeground() throws {
+        let peopleTabButton = app.tabBars.buttons["People"]
+        XCTAssertTrue(peopleTabButton.waitForExistence(timeout: 15), "'People' tab button never appeared")
+        peopleTabButton.tap()
+        XCTAssertTrue(peopleTabButton.isSelected, "'People' tab did not become selected after tapping it")
+
+        XCUIDevice.shared.press(.home)
+        let backgroundDeadline = Date().addingTimeInterval(5)
+        while app.state == .runningForeground, Date() < backgroundDeadline {
+            usleep(100_000)
+        }
+
+        app.activate()
+        XCTAssertTrue(peopleTabButton.waitForExistence(timeout: 15), "'People' tab button never reappeared after foregrounding")
+        attachScreenshot(named: "03-people-tab-stays-selected-after-foreground")
+        XCTAssertTrue(peopleTabButton.isSelected, "'People' tab was not still selected after backgrounding and foregrounding the app")
+    }
+
     // MARK: - Helpers
+
+    /// Taps the People tab and confirms it actually stuck, retrying if not.
+    /// Defensive only, now that `ContentView.swift`'s unconditional tab
+    /// reset on every `.active` transition is fixed (see
+    /// `testPeopleTabStaysSelectedAcrossBackgroundForeground` above) — the
+    /// other tests here do not depend on this helper's retry to pass.
+    @discardableResult
+    private func navigateToPeopleTab() -> Bool {
+        let peopleTabButton = app.tabBars.buttons["People"]
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            peopleTabButton.tap()
+            if peopleTabButton.waitForExistence(timeout: 2), peopleTabButton.isSelected {
+                return true
+            }
+        }
+        return peopleTabButton.isSelected
+    }
 
     private func localRelayURL() throws -> URL {
         guard let url = URL(string: Self.localRelayBaseURLString) else {
             throw CompanionUITestError(description: "invalid local relay base URL")
         }
         return url
-    }
-
-    private func waitForPasteboardString(timeout: TimeInterval) throws -> String {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let value = UIPasteboard.general.string, !value.isEmpty {
-                return value
-            }
-            usleep(100_000)
-        }
-        throw CompanionUITestError(description: "pasteboard never contained a copied string within \(timeout)s")
     }
 
     private func attachScreenshot(named name: String) {
