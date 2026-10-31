@@ -55,10 +55,10 @@ struct ContentView: View {
         .tint(LockboxTheme.accent)
         .lockboxScreen()
         .onOpenURL { url in
-            // A `phone-lockbox-companion://invite/...` link (shared via the
-            // People tab, whether this device created the invite or a
-            // friend shared theirs) routes to People with the "Paste invite
-            // link" field prefilled. It never auto-accepts anything.
+            // A `phone-lockbox-companion://i/<token>` link (shared from the
+            // People tab) routes to People, which looks the invite up and
+            // shows "‹Name› invited you" with Accept / Not now. Opening it
+            // never accepts anything by itself.
             if companion.handleIncomingCompanionLink(url) {
                 selectedTab = 1
                 return

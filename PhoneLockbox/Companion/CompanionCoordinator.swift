@@ -320,8 +320,14 @@ final class CompanionCoordinator: ObservableObject {
             approverDisplayName = resolvedDefaults?.string(forKey: Self.approverDisplayNameDefaultsKey) ?? ""
             if let data = resolvedDefaults?.data(forKey: Self.seenJoinedDefaultsKey),
                let ids = try? JSONDecoder().decode([String].self, from: data) { seenJoinedPairingIDs = Set(ids) }
-            issuedInvites = self.inviteStore.load()
+            loadIssuedInvites()
+            // Stale secrets from a previous owner identity serve no purpose.
+            if ownerIdentity == nil, !inviteStoreFailed, !issuedInvites.isEmpty {
+                issuedInvites = [:]
+                self.inviteStore.removeAll()
+            }
             pruneIssuedInvites(now: Date())
+            restorePendingInvite()
             recomputeJoinedNotices()
                         loadUseIDsByRequestID()
         }
@@ -373,7 +379,35 @@ final class CompanionCoordinator: ObservableObject {
         sharedDefaults.set(data, forKey: Self.peopleDefaultsKey)
     }
 
-    private func saveIssuedInvites() { inviteStore.save(issuedInvites) }
+    /// `true` when the last read of the invite store failed (locked or
+    /// unreadable Keychain). While set, nothing is written to the store and
+    /// owner-side people keep whatever verified state they already had.
+    private(set) var inviteStoreFailed = false
+    static let inviteStoreReadFailedMessage =
+        "Couldn't read this device's saved invites just now. Your trusted people are unchanged; try again after unlocking your phone."
+
+    private func loadIssuedInvites() {
+        switch inviteStore.load() {
+        case .found(let invites): issuedInvites = invites; inviteStoreFailed = false
+        case .notFound: issuedInvites = [:]; inviteStoreFailed = false
+        case .failed: issuedInvites = [:]; inviteStoreFailed = true
+        }
+    }
+
+    /// Never writes while the store is unreadable (it could overwrite the real item).
+    @discardableResult
+    private func saveIssuedInvites() -> Bool {
+        guard !inviteStoreFailed else { return false }
+        return inviteStore.save(issuedInvites)
+    }
+
+    /// After a relaunch, shows the newest unexpired unused invite's link again.
+    private func restorePendingInvite() {
+        let now = Date()
+        pendingInvite = issuedInvites.values
+            .filter { now < $0.invitation.payload.expiresAt && !inviteHasPerson($0) }
+            .max { $0.invitation.payload.issuedAt < $1.invitation.payload.issuedAt }
+    }
 
     private func saveSeenJoinedPairingIDs() {
         guard let sharedDefaults, let data = try? JSONEncoder().encode(seenJoinedPairingIDs.sorted()) else { return }
@@ -394,6 +428,7 @@ final class CompanionCoordinator: ObservableObject {
     /// owner check needs it every fetch); drops unused invites a retention
     /// window after they expire, and caps how many unused ones are kept.
     private func pruneIssuedInvites(now: Date) {
+        guard !inviteStoreFailed else { return }
         let before = issuedInvites.count
         var unmatched: [IssuedInvite] = []
         for (id, issued) in issuedInvites where !inviteHasPerson(issued) {
@@ -601,6 +636,10 @@ final class CompanionCoordinator: ObservableObject {
     #endif
 
     #if DEBUG
+    /// Test-only: replaces the relay `createInvite` call (inviteID, ownerName).
+    var issueInviteOverride: (@MainActor (_ inviteID: String, _ ownerName: String) async throws -> IssuedInvite)?
+    /// Test-only: replaces the friend-side `revokeScopes` call.
+    var revokeScopesOverride: (@MainActor (_ pairing: Pairing, _ scopes: [CompanionScope]) async throws -> RelationshipConsent)?
     /// Test-only seams (never compiled into release): inspect/seed state without a relay round trip.
     var issuedInvitesForTesting: [String: IssuedInvite] { issuedInvites }
     func insertIssuedInviteForTesting(_ issued: IssuedInvite) {
@@ -656,17 +695,36 @@ final class CompanionCoordinator: ObservableObject {
             lastError = "Add your name first, so the person you invite knows it's from you."
             return
         }
+        if inviteStoreFailed { loadIssuedInvites() }
+        guard !inviteStoreFailed else { lastError = Self.inviteStoreReadFailedMessage; return }
         do {
             let identity = try ensureIdentity(role: .owner)
-            let client = makeClient(signer: try signer(for: identity))
-            let issued = try await client.createInvite(inviteID: UUID().uuidString, validFor: Self.inviteLifetime, now: Date(),
+            let issued: IssuedInvite
+            #if DEBUG
+            if let issueInviteOverride {
+                issued = try await issueInviteOverride(UUID().uuidString, ownerDisplayName)
+            } else {
+                let client = makeClient(signer: try signer(for: identity))
+                issued = try await client.createInvite(inviteID: UUID().uuidString, validFor: Self.inviteLifetime, now: Date(),
                                                        ownerDisplayName: ownerDisplayName)
+            }
+            #else
+            let client = makeClient(signer: try signer(for: identity))
+            issued = try await client.createInvite(inviteID: UUID().uuidString, validFor: Self.inviteLifetime, now: Date(),
+                                                   ownerDisplayName: ownerDisplayName)
+            #endif
             // Kept (token included, in the Keychain) for as long as the
             // pairing it creates exists: `JoinedAcceptanceCheck` needs it on
             // every inbox fetch to prove who joined.
             issuedInvites[issued.invitation.payload.inviteID] = issued
             pruneIssuedInvites(now: Date())
-            saveIssuedInvites()
+            // The link is shown only once it is safely stored; otherwise a
+            // pairing could never be verified later.
+            guard saveIssuedInvites() else {
+                issuedInvites.removeValue(forKey: issued.invitation.payload.inviteID)
+                lastError = "Couldn't save the invite securely on this device, so it wasn't shown. Try again."
+                return
+            }
             pendingInvite = issued
             lastError = nil; needsRepair = false
         } catch { fail(error) }
@@ -734,8 +792,10 @@ final class CompanionCoordinator: ObservableObject {
     #endif
 
     private func lookupViaRelay(token: String) async throws -> Invitation {
-        let identity = try ensureIdentity(role: .trustedApprover)
-        let client = makeClient(signer: try signer(for: identity))
+        // Lookup is unauthenticated: an ephemeral in-memory signer keeps this
+        // device from minting a persistent friend identity until Accept.
+        let ephemeral = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let client = makeClient(signer: ephemeral)
         return try await client.lookupInvite(token: token)
     }
 
@@ -830,8 +890,8 @@ final class CompanionCoordinator: ObservableObject {
                 lastError = "The relay returned a pairing that doesn't match this invite; ignoring it."
                 return false
             }
+            guard upsertAcceptedPairing(pairing) else { return false }
             rememberApproverDisplayName(displayName)
-            upsertAcceptedPairing(pairing)
             incomingInvite = .none
             lastError = nil; needsRepair = false
             return true
@@ -859,14 +919,24 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     /// Friend side: the pairing returned by `acceptInvite`, stored directly.
-    private func upsertAcceptedPairing(_ pairing: Pairing) {
+    @discardableResult
+    private func upsertAcceptedPairing(_ pairing: Pairing) -> Bool {
         if let index = people.firstIndex(where: { $0.pairing.pairingID == pairing.pairingID }) {
-            people[index].pairing = pairing
+            // Advance-only: never overwrite an existing record with a different owner/approver or an older epoch.
+            switch CompanionTrustMerge.decide(pairing: pairing, viewerIdentityID: pairing.approver.identityID,
+                                              existingPairing: people[index].pairing, pendingAcceptances: []) {
+            case .update(let updated): people[index].pairing = updated
+            case .unchanged: break
+            case .add, .rejected:
+                lastError = "The relay returned a pairing that conflicts with one already stored; ignoring it."
+                return false
+            }
         } else {
             people.append(CompanionPerson(nickname: CompanionPerson.defaultName(for: pairing, role: .iAmApprover),
                                           localRole: .iAmApprover, pairing: pairing, consent: nil))
         }
         savePeople()
+        return true
     }
 
     // MARK: - People lists (one row per person)
@@ -893,12 +963,31 @@ final class CompanionCoordinator: ObservableObject {
 
     // MARK: - Opt out (friend)
 
-    /// Friend side: withdraws both scopes ("Stop being a trusted person").
+    /// Friend side: withdraws both scopes ("Stop being a trusted person") in
+    /// one call per pairing, for every active pairing with this owner (a
+    /// friend who accepted twice has two).
     func stopBeingTrustedPerson(for person: CompanionPerson) async {
         guard isAvailable, person.localRole == .iAmApprover else { return }
-        await setApproverAccept(.approveEarlyEnd, enabled: false, for: person)
-        guard lastError == nil, let refreshed = people.first(where: { $0.id == person.id }) else { return }
-        await setApproverAccept(.receiveRequests, enabled: false, for: refreshed)
+        do {
+            let identity = try ensureIdentity(role: .trustedApprover)
+            let group = people.filter { $0.localRole == .iAmApprover && $0.pairing.state == .active
+                && $0.pairing.owner.identityID == person.pairing.owner.identityID }
+            for member in group {
+                let scopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]
+                let consent: RelationshipConsent
+                #if DEBUG
+                if let revokeScopesOverride {
+                    consent = try await revokeScopesOverride(member.pairing, scopes)
+                } else {
+                    consent = try await makeClient(signer: try signer(for: identity)).revokeScopes(pairing: member.pairing, scopes: scopes)
+                }
+                #else
+                consent = try await makeClient(signer: try signer(for: identity)).revokeScopes(pairing: member.pairing, scopes: scopes)
+                #endif
+                applyOwnConsentUpdate(consent, forPairingID: member.pairing.pairingID)
+            }
+            lastError = nil; needsRepair = false
+        } catch { fail(error) }
     }
 
     /// Approver side: accept or revoke exactly one scope for `person`.
@@ -1129,25 +1218,31 @@ final class CompanionCoordinator: ObservableObject {
         guard let request = response.requests.first(where: { $0.requestID == requestID }) else {
             throw CompanionError.notFound
         }
-        let matchedApproval: Approval?
-        if let approvalID {
-            matchedApproval = response.approvals?.first(where: { $0.requestID == requestID && $0.approvalID == approvalID })
-        } else {
-            matchedApproval = response.approvals?.first(where: { $0.requestID == requestID })
+        // With no pinned `approvalID`, take the first approval that verifies
+        // (a stale or forged one earlier in the list must not hide a good one);
+        // with none verifying, report the first failure.
+        let candidates = (response.approvals ?? []).filter {
+            $0.requestID == requestID && (approvalID == nil || $0.approvalID == approvalID)
         }
-        guard let approval = matchedApproval else {
-            throw CompanionError.notFound
+        guard !candidates.isEmpty else { throw CompanionError.notFound }
+        var firstError: Error?
+        for approval in candidates {
+            do {
+                // Approvals are accepted only from people the join check verified.
+                guard let targetBinding = request.binding(for: approval.approver.identityID),
+                      let person = people.first(where: { $0.pairing.pairingID == targetBinding.pairingID }),
+                      person.localRole == .iAmOwner, person.joinVerified,
+                      let consent = person.consent else {
+                    throw CompanionError.unknownIdentity
+                }
+                let trustedApprover = OwnerApprovalCheck.TrustedApprover(pairing: person.pairing, consent: consent)
+                try OwnerApprovalCheck.verify(approval: approval, request: request, trustedApprover: trustedApprover, ownerIdentity: ownerIdentity)
+                return (request, approval, trustedApprover)
+            } catch {
+                if firstError == nil { firstError = error }
+            }
         }
-        // Approvals are accepted only from people the join check verified.
-        guard let targetBinding = request.binding(for: approval.approver.identityID),
-              let person = people.first(where: { $0.pairing.pairingID == targetBinding.pairingID }),
-              person.localRole == .iAmOwner, person.joinVerified,
-              let consent = person.consent else {
-            throw CompanionError.unknownIdentity
-        }
-        let trustedApprover = OwnerApprovalCheck.TrustedApprover(pairing: person.pairing, consent: consent)
-        try OwnerApprovalCheck.verify(approval: approval, request: request, trustedApprover: trustedApprover, ownerIdentity: ownerIdentity)
-        return (request, approval, trustedApprover)
+        throw firstError ?? CompanionError.notFound
     }
 
     /// The owner taps **End lock now** on their own approved request. Checks
@@ -1507,7 +1602,10 @@ final class CompanionCoordinator: ObservableObject {
     private(set) var refreshCallCountForTesting = 0
     #endif
 
-    func refreshInbox() async {
+    func refreshInbox() async { await refreshInbox(followUp: false) }
+
+    /// `followUp` marks the single bounded extra flight scheduled after a capped one.
+    private func refreshInbox(followUp: Bool) async {
         guard isAvailable else { return }
         #if DEBUG
         refreshCallCountForTesting += 1
@@ -1532,10 +1630,18 @@ final class CompanionCoordinator: ObservableObject {
             // timer, pull-to-refresh, mutations) can never keep one flight
             // looping forever; anything still flagged is picked up by the
             // next caller.
+            let capped = self.refreshNeedsAnotherPass
             self.refreshNeedsAnotherPass = false
             // Cleared here, with no suspension since the loop check, so a
             // later caller can never join a finished flight.
             self.refreshFlight = nil
+            // A caller that joined during the last allowed pass may have
+            // changed something the final fetch predates: run exactly one
+            // follow-up flight (never chained), so it is not left stale until
+            // the next poll.
+            if capped && !followUp {
+                Task { @MainActor [weak self] in await self?.refreshInbox(followUp: true) }
+            }
         }
         refreshFlight = flight
         await flight.value
@@ -1582,6 +1688,7 @@ final class CompanionCoordinator: ObservableObject {
     private func performInboxRefresh() async {
         isRefreshing = true
         defer { isRefreshing = false }
+        if inviteStoreFailed { loadIssuedInvites() }
         pruneIssuedInvites(now: Date())
         var items: [CompanionInboxItem] = []
         var encounteredError: Error?
@@ -1625,6 +1732,8 @@ final class CompanionCoordinator: ObservableObject {
             : nil
         if let encounteredError {
             fail(encounteredError)
+        } else if inviteStoreFailed && ownerIdentity != nil {
+            lastError = Self.inviteStoreReadFailedMessage
         } else if anyFetchSucceeded || (ownerIdentity == nil && approverIdentity == nil) {
             lastError = nil; needsRepair = false
         }
@@ -1649,7 +1758,9 @@ final class CompanionCoordinator: ObservableObject {
     func applyInboxSnapshot(_ response: InboxResponse, viewerIdentity: DeviceIdentity) -> Int {
         let isOwnerView = viewerIdentity.role == .owner
         var verifiedIDs: Set<String> = []
-        if isOwnerView {
+        // A local Keychain read error must never demote people who were verified before.
+        let canVerify = !(isOwnerView && inviteStoreFailed)
+        if isOwnerView && canVerify {
             let result = JoinedAcceptanceCheck.verifiedPairings(in: response, invites: issuedInvites, ownerIdentity: viewerIdentity)
             verifiedIDs = Set(result.verified.map(\.pairingID))
             integrityNotice = result.integrityWarnings.isEmpty ? nil : Self.integrityNoticeText
@@ -1688,7 +1799,7 @@ final class CompanionCoordinator: ObservableObject {
 
             guard let resolvedPairing,
                   let currentIndex = people.firstIndex(where: { $0.pairing.pairingID == resolvedPairing.pairingID }) else { continue }
-            if isOwnerView { people[currentIndex].joinVerified = verifiedIDs.contains(resolvedPairing.pairingID) }
+            if isOwnerView && canVerify { people[currentIndex].joinVerified = verifiedIDs.contains(resolvedPairing.pairingID) }
             // Never accept consent for an owner-side pairing that hasn't verified.
             if isOwnerView && !people[currentIndex].joinVerified { continue }
             guard let candidateConsent = consentsByPairingID[resolvedPairing.pairingID] else { continue }

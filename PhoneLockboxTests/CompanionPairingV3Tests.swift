@@ -206,7 +206,7 @@ final class CompanionPairingV3Tests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "p3b.\(UUID().uuidString)"))
         let launched = CompanionCoordinator(keyStore: InMemoryDeviceKeyStore(), sharedDefaults: defaults, inviteStore: store)
         XCTAssertTrue(launched.issuedInvitesForTesting.isEmpty)
-        XCTAssertTrue(store.load().isEmpty)
+        XCTAssertTrue(store.invites.isEmpty)
     }
 
     func testAJoinedPersonKeepsItsInviteEvenAfterItExpires() throws {
@@ -235,20 +235,156 @@ final class CompanionPairingV3Tests: XCTestCase {
         XCTAssertEqual(CompanionCoordinator.idleRefreshInterval, 30)
     }
 
-    func testALoopingRefreshFlightIsCappedSoATimerCannotSpinIt() async throws {
+    func testALoopingRefreshFlightIsCappedWithOneBoundedFollowUp() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "p3b.\(UUID().uuidString)"))
         let coordinator = CompanionCoordinator(keyStore: InMemoryDeviceKeyStore(), sharedDefaults: defaults,
                                                inviteStore: InMemoryIssuedInviteStore())
+        let cap = CompanionCoordinator.maxRefreshPasses
         var passes = 0
-        // Every pass triggers one more refresh call while the flight is running.
+        // While the first flight runs, every pass is joined by one more refresh call.
         coordinator.inboxFetchGateForTesting = { [unowned coordinator] in
             passes += 1
+            guard passes <= cap else { return }
             let target = coordinator.refreshCallCountForTesting + 1
             Task { await coordinator.refreshInbox() }
             while coordinator.refreshCallCountForTesting < target { await Task.yield() }
         }
         await coordinator.refreshInbox()
-        XCTAssertEqual(passes, CompanionCoordinator.maxRefreshPasses)
+        // The caller that joined during the last pass gets exactly one follow-up flight.
+        while passes < cap + 1 { await Task.yield() }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(passes, cap + 1, "capped at \(cap) passes, then one follow-up, never chained")
+    }
+
+    // MARK: - Invite store robustness, trust demotion, friend-side stop
+
+    func testAKeychainReadErrorKeepsVerifiedPeopleVerifiedAndNeverOverwritesTheStore() async throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        rig.coordinator.insertIssuedInviteForTesting(join.issued)
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [join.consent], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(rig.coordinator.trustedApprovers.count, 1)
+
+        rig.store.failLoads = true   // e.g. errSecInteractionNotAllowed while the phone is locked
+        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertTrue(relaunched.inviteStoreFailed)
+        // An inbox without the acceptance would normally demote them; a local read error must not.
+        relaunched.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [join.consent], acceptances: []),
+                                      viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(relaunched.trustedApprovers.count, 1, "still verified")
+        XCTAssertNil(relaunched.integrityNotice)
+
+        // Nothing is written while the store is unreadable...
+        _ = relaunched.setOwnerDisplayName("Owner")
+        relaunched.insertIssuedInviteForTesting(try makeJoin(rig).issued)
+        XCTAssertEqual(rig.store.invites.count, 1, "the real item was not overwritten")
+        // ...and creating a new invite says so instead of proceeding.
+        relaunched.issueInviteOverride = { _, _ in XCTFail("must not reach the relay"); throw CompanionError.unauthorized }
+        await relaunched.createInvite()
+        XCTAssertEqual(relaunched.lastError, CompanionCoordinator.inviteStoreReadFailedMessage)
+        XCTAssertNil(relaunched.pendingInvite)
+    }
+
+    func testAnInviteIsNotShownWhenItCannotBeSavedSecurely() async throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Owner"))
+        rig.coordinator.issueInviteOverride = { _, _ in join.issued }
+        rig.store.failSaves = true
+        await rig.coordinator.createInvite()
+        XCTAssertNil(rig.coordinator.pendingInvite)
+        XCTAssertEqual(rig.coordinator.lastError, "Couldn't save the invite securely on this device, so it wasn't shown. Try again.")
+        XCTAssertTrue(rig.coordinator.issuedInvitesForTesting.isEmpty)
+
+        rig.store.failSaves = false
+        await rig.coordinator.createInvite()
+        XCTAssertNotNil(rig.coordinator.pendingInvite)
+        XCTAssertNil(rig.coordinator.lastError)
+    }
+
+    func testAnOutstandingInviteIsShownAgainAfterRelaunch() throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        rig.coordinator.insertIssuedInviteForTesting(join.issued)
+        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertEqual(relaunched.pendingInvite?.invitation.payload.inviteID, join.issued.invitation.payload.inviteID)
+    }
+
+    func testInvitesAreDroppedAtLaunchWhenThereIsNoOwnerIdentity() throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        let store = InMemoryIssuedInviteStore()
+        store.invites = [join.issued.invitation.payload.inviteID: join.issued]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "p3b.\(UUID().uuidString)"))
+        _ = CompanionCoordinator(keyStore: InMemoryDeviceKeyStore(), sharedDefaults: defaults, inviteStore: store)
+        XCTAssertTrue(store.invites.isEmpty)
+    }
+
+    func testAPreviouslyVerifiedPersonBecomesUnverifiedWhenTheAcceptanceDisappears() throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        rig.coordinator.insertIssuedInviteForTesting(join.issued)
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [join.consent], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(rig.coordinator.trustedApprovers.count, 1)
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [join.consent], acceptances: []),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertTrue(rig.coordinator.trustedApprovers.isEmpty)
+        XCTAssertTrue(rig.coordinator.trustedPeople.isEmpty)
+        XCTAssertTrue(rig.coordinator.hasUnverifiedOwnerPeople)
+    }
+
+    func testStoppingBeingATrustedPersonRevokesBothScopesOncePerPairingWithThatOwner() async throws {
+        let rig = try makeOwnerRig()
+        let first = try makeJoin(rig), second = try makeJoin(rig)
+        let friend = try makeFriend()
+        friend.testOnlySeedPerson(first.pairing, nickname: "Owner", role: .iAmApprover, consent: first.consent, joinVerified: false)
+        friend.testOnlySeedPerson(second.pairing, nickname: "Owner", role: .iAmApprover, consent: second.consent, joinVerified: false)
+        var calls: [(String, Set<CompanionScope>)] = []
+        friend.revokeScopesOverride = { pairing, scopes in
+            calls.append((pairing.pairingID, Set(scopes)))
+            let source = pairing.pairingID == first.pairing.pairingID ? first.consent : second.consent
+            return try RelationshipConsent(
+                relationshipID: pairing.pairingID, pairingID: pairing.pairingID, pairEpoch: 1, owner: pairing.owner, approver: pairing.approver,
+                ownerScopes: source.ownerScopes, approverScopes: [], ownerState: .active, approverState: .active,
+                updatedAt: Date(), generation: source.generation + 1)
+        }
+        XCTAssertEqual(friend.helpingPeople.count, 1, "one row for one owner")
+        await friend.stopBeingTrustedPerson(for: try XCTUnwrap(friend.helpingPeople.first))
+        XCTAssertNil(friend.lastError)
+        XCTAssertEqual(calls.count, 2, "one revoke call per pairing, not one per scope")
+        XCTAssertTrue(calls.allSatisfy { $0.1 == [.approveEarlyEnd, .receiveRequests] })
+        XCTAssertTrue(friend.people.allSatisfy(\.approverStoppedHelping))
+    }
+
+    func testFriendSideAdvanceOnlyRuleRejectsAConflictingAcceptResponse() async throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        let friend = try makeFriend()
+        let friendIdentity = try friend.ensureApproverIdentityForTesting()
+        let make = { (epoch: UInt64, approver: DeviceIdentity) in
+            try Pairing(pairingID: "fixed-pairing", owner: rig.ownerSigner.identity, approver: approver, epoch: epoch,
+                        createdAt: Date(), state: .active, ownerDisplayName: "Owner", approverDisplayName: "Sam")
+        }
+        friend.testOnlySeedPerson(try make(2, friendIdentity), nickname: "Owner", role: .iAmApprover, joinVerified: false)
+        friend.acceptInviteOverride = { _, _, _ in try make(1, friendIdentity) }   // older epoch
+        let incoming = IncomingInvite(invitation: join.issued.invitation, token: join.issued.token)
+        let accepted = await friend.acceptIncomingInvite(incoming, name: "Sam")
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(friend.people.first?.pairing.epoch, 2, "the stored record was not overwritten")
+    }
+
+    func testNobodyCanBeAskedHintWordingDoesNotClaimNobodyJoined() throws {
+        // Joined but not yet fully trusted: people exist, trustedApprovers is empty.
+        // (The view distinguishes the two cases from exactly these two values.)
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        rig.coordinator.insertIssuedInviteForTesting(join.issued)
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(rig.coordinator.trustedPeople.count, 1)
+        XCTAssertTrue(rig.coordinator.trustedApprovers.isEmpty)
     }
 
     // MARK: - Display names

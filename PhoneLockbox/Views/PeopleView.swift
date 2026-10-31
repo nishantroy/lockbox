@@ -134,8 +134,12 @@ private struct PrototypeLabelCard: View {
 /// Backs the "Copy link" button next to the invite `ShareLink`: a visible,
 /// explicit alternative to the share sheet for a link that didn't open when
 /// tapped in Messages.
-private func copyCompanionTextToPasteboard(_ text: String) {
-    UIPasteboard.general.string = text
+@MainActor private func copyCompanionTextToPasteboard(_ text: String) {
+    // Local to this device (no Universal Clipboard) and gone after an hour,
+    // the invite's own lifetime.
+    UIPasteboard.general.setItems([["public.utf8-plain-text": text]],
+                                  options: [.localOnly: true,
+                                            .expirationDate: Date().addingTimeInterval(CompanionCoordinator.inviteLifetime)])
 }
 #endif
 
@@ -268,6 +272,16 @@ private struct InviteSomeoneCard: View {
 
     private var needsName: Bool { companion.ownerDisplayName.isEmpty }
 
+    /// The raw link (a bearer secret) is exposed to accessibility only in
+    /// DEBUG builds, where UI tests read it; release builds expose a non-secret value.
+    private static func linkAccessibilityValue(_ link: String) -> String {
+        #if DEBUG
+        return link
+        #else
+        return "Ready to share"
+        #endif
+    }
+
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
@@ -334,7 +348,7 @@ private struct InviteSomeoneCard: View {
                         .foregroundStyle(LockboxTheme.secondary)
                         .accessibilityIdentifier("inviteSomeone.inviteLinkText")
                         .accessibilityLabel("Invite link ready")
-                        .accessibilityValue(issued.shareLink)
+                        .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
                     ShareLink(item: issued.shareLink) {
                         Label("Share invite link", systemImage: "square.and.arrow.up")
                     }
@@ -526,7 +540,12 @@ private struct AskToEndEarlyCard: View {
             VStack(alignment: .leading, spacing: 13) {
                 LockboxSectionLabel("Ask to end early", systemImage: "arrow.uturn.backward.circle")
                 if let session = coordinator.companionActiveSessionIdentity {
-                    if trusted.isEmpty {
+                    if trusted.isEmpty && !companion.trustedPeople.isEmpty {
+                        Text("Nobody can be asked right now. Check Your trusted people below.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityIdentifier("askToEnd.noneAvailableHint")
+                    } else if trusted.isEmpty {
                         Text("No one is a trusted person yet. Invite someone above; once they tap Accept, you can ask them to end this lock early.")
                             .font(.footnote)
                             .foregroundStyle(LockboxTheme.secondary)

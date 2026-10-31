@@ -11,9 +11,19 @@ import Security
 /// lives in the Keychain, never in plain `UserDefaults` (pairing v3,
 /// `docs/r5-pairing-v3-plan.md`, P3a review follow-up 2).
 protocol IssuedInviteStore: AnyObject {
-    func load() -> [String: IssuedInvite]
-    func save(_ invites: [String: IssuedInvite])
+    func load() -> IssuedInviteLoad
+    /// `false` when the write did not happen; the caller must treat the invite as not stored.
+    @discardableResult func save(_ invites: [String: IssuedInvite]) -> Bool
     func removeAll()
+}
+
+/// A read must tell "nothing stored yet" from "could not read" (for example the
+/// Keychain is locked, or the item no longer decodes). On `.failed` the app
+/// keeps its previously verified people as they are and never writes over the item.
+enum IssuedInviteLoad {
+    case found([String: IssuedInvite])
+    case notFound
+    case failed
 }
 
 /// Keychain-backed store: one generic-password item holding the JSON map,
@@ -32,27 +42,31 @@ final class KeychainIssuedInviteStore: IssuedInviteStore {
          kSecAttrAccount as String: account]
     }
 
-    func load() -> [String: IssuedInvite] {
+    func load() -> IssuedInviteLoad {
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let decoded = try? JSONDecoder().decode([String: IssuedInvite].self, from: data) else { return [:] }
-        return decoded
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return .notFound }
+        // Anything else (errSecInteractionNotAllowed while locked, decode failure, ...) is an error, not "empty".
+        guard status == errSecSuccess, let data = result as? Data,
+              let decoded = try? JSONDecoder().decode([String: IssuedInvite].self, from: data) else { return .failed }
+        return .found(decoded)
     }
 
-    func save(_ invites: [String: IssuedInvite]) {
-        if invites.isEmpty { removeAll(); return }
+    @discardableResult
+    func save(_ invites: [String: IssuedInvite]) -> Bool {
+        if invites.isEmpty { removeAll(); return true }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(invites) else { return }
+        guard let data = try? encoder.encode(invites) else { return false }
         let status = SecItemUpdate(baseQuery as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        guard status == errSecItemNotFound else { return }
+        if status == errSecSuccess { return true }
+        guard status == errSecItemNotFound else { return false }
         var add = baseQuery
         add[kSecValueData as String] = data
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(add as CFDictionary, nil)
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
     func removeAll() {
@@ -64,9 +78,20 @@ final class KeychainIssuedInviteStore: IssuedInviteStore {
 /// (non-Keychain) key store. Reference type so two coordinators can share it
 /// to model a relaunch.
 final class InMemoryIssuedInviteStore: IssuedInviteStore {
-    private var invites: [String: IssuedInvite] = [:]
-    func load() -> [String: IssuedInvite] { invites }
-    func save(_ invites: [String: IssuedInvite]) { self.invites = invites }
+    var invites: [String: IssuedInvite] = [:]
+    /// Test hooks: simulate a locked/broken Keychain.
+    var failLoads = false
+    var failSaves = false
+    func load() -> IssuedInviteLoad {
+        if failLoads { return .failed }
+        return invites.isEmpty ? .notFound : .found(invites)
+    }
+    @discardableResult
+    func save(_ invites: [String: IssuedInvite]) -> Bool {
+        if failSaves { return false }
+        self.invites = invites
+        return true
+    }
     func removeAll() { invites = [:] }
 }
 #endif
