@@ -20,7 +20,13 @@ final class CompanionLocalRelayFlowTests: XCTestCase {
         request.timeoutInterval = 2
         do {
             let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
-            if (response as? HTTPURLResponse)?.statusCode == 200 { return }
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
+                // The local relay rate-limits to 60 requests/minute per IP
+                // and each flow here spends ~20; spacing the tests keeps the
+                // suite from tripping `rate_limited`.
+                try await Task.sleep(nanoseconds: 22_000_000_000)
+                return
+            }
         } catch {}
         throw XCTSkip("no local relay on 127.0.0.1:8002")
     }
@@ -150,6 +156,22 @@ final class CompanionLocalRelayFlowTests: XCTestCase {
         async let second: Void = owner.refreshInbox()
         _ = await (first, second)
         XCTAssertNil(owner.lastError)
+    }
+
+    /// A refresh requested right after a mutation must not be satisfied by
+    /// an older in-flight fetch whose response predates that mutation.
+    func testRefreshAfterMutationIsNotSatisfiedByStaleInFlightFetch() async throws {
+        try await requireRelay()
+        let owner = try makeDevice("owner"), friend = try makeDevice("friend")
+        try await pairFullyTrusted(owner: owner, friend: friend)
+        let early = Task { await owner.refreshInbox() } // flight starts before the request exists
+        await Task.yield()
+        await owner.requestEarlyEnd(sessionID: UUID().uuidString, activeSetID: UUID().uuidString,
+                                    start: Date().addingTimeInterval(-300), end: Date().addingTimeInterval(3_600),
+                                    to: owner.trustedApprovers)
+        XCTAssertNil(owner.lastError)
+        XCTAssertEqual(owner.inboxItems.count, 1, "post-mutation refresh must reflect the new request")
+        await early.value
     }
 }
 #endif

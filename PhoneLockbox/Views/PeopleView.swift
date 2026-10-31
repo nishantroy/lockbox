@@ -86,7 +86,9 @@ struct PeopleView: View {
         }
         .refreshable {
             await companion.refreshInbox()
-            await companion.replayPendingFriendRelease(coordinator: coordinator)
+            // Detached from the (cancellable) refresh closure; it has its
+            // own single-flight guard.
+            Task { await companion.replayPendingFriendRelease(coordinator: coordinator) }
         }
 #endif
     }

@@ -205,6 +205,9 @@ final class CompanionCoordinator: ObservableObject {
     /// R5 Slice B2c review, P1-1: the single in-flight friend-release
     /// `Task`, shared by `endLockNow` and `replayPendingFriendRelease`.
     private var friendReleaseFlight: Task<Void, Never>?
+    /// Single-flight inbox refresh (see `refreshInbox`).
+    private var refreshFlight: Task<Void, Never>?
+    private var refreshNeedsAnotherPass = false
     /// R5 Slice B2c review, R2-3: the `requestID` the current
     /// `friendReleaseFlight` is actually working on, set only by the call
     /// that *starts* the flight (never by one that joins it).
@@ -465,7 +468,7 @@ final class CompanionCoordinator: ObservableObject {
     private func fail(_ error: Error) {
         // A cancelled caller is not a relay failure and must never raise a
         // banner (see `refreshInbox`).
-        if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+        if error is CancellationError {
             #if DEBUG
             print("[CompanionCoordinator] fail ignored (cancelled): \(String(reflecting: error))")
             #endif
@@ -1019,6 +1022,8 @@ final class CompanionCoordinator: ObservableObject {
         people.filter { $0.localRole == .iAmOwner && $0.pairing.state == .active && $0.isFullyTrustedForEarlyEnd }
     }
 
+    static let minimumAskLeadTime: TimeInterval = 30
+
     func requestEarlyEnd(sessionID: String, activeSetID: String, start: Date, end: Date,
                         to targets: [CompanionPerson]) async {
         guard isAvailable else { return }
@@ -1028,6 +1033,13 @@ final class CompanionCoordinator: ObservableObject {
         }
         do {
             let identity = try ensureIdentity(role: .owner)
+            // Checked before publishing anything: a lock that is over (or
+            // about to be) has no request worth sending, and a request must
+            // outlive the round trip to be answerable.
+            guard end.timeIntervalSinceNow >= Self.minimumAskLeadTime else {
+                lastError = end.timeIntervalSinceNow > 0 ? "This lock is about to end." : "That lock has already ended, so there's nothing left to ask about."
+                return
+            }
             let client = makeClient(signer: try signer(for: identity))
             let session = try ActiveSession(owner: identity, sessionID: sessionID, activeSetID: activeSetID,
                                             startsAt: start, endsAt: end)
@@ -1531,18 +1543,26 @@ final class CompanionCoordinator: ObservableObject {
     func refreshInbox() async {
         guard isAvailable else { return }
         if let flight = refreshFlight {
+            // Arriving mid-flight: the in-flight fetch may predate whatever
+            // the caller just changed, so demand one more pass and wait for
+            // the final one.
+            refreshNeedsAnotherPass = true
             await flight.value
             return
         }
         let flight = Task { @MainActor [weak self] in
-            if let self { await self.performInboxRefresh() }
+            guard let self else { return }
+            repeat {
+                self.refreshNeedsAnotherPass = false
+                await self.performInboxRefresh()
+            } while self.refreshNeedsAnotherPass
+            // Cleared here, with no suspension since the loop check, so a
+            // later caller can never join a finished flight.
+            self.refreshFlight = nil
         }
         refreshFlight = flight
         await flight.value
-        refreshFlight = nil
     }
-
-    private var refreshFlight: Task<Void, Never>?
 
     private func performInboxRefresh() async {
         isRefreshing = true
