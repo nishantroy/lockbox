@@ -31,6 +31,15 @@ xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox \
 git diff --check
 ```
 
+The `CODE_SIGNING_ALLOWED=NO` build above is **compile-only**: it has no App Group entitlement, so the app shows "The Phone Lockbox App Group is unavailable" and companion pairing fails (build-22 QA, 2026-10-31, first showed as "couldn't reach the relay"). For a simulator **install** for hands-on QA, build signed into its own folder and install that:
+
+```bash
+xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox \
+  -destination 'generic/platform=iOS Simulator' \
+  -configuration Debug -derivedDataPath DerivedData-simsigned build
+xcrun simctl install <simulator-id> DerivedData-simsigned/Build/Products/Debug-iphonesimulator/PhoneLockbox.app
+```
+
 Use separate derived data from SwiftPM's `.build/`; do not repeatedly delete caches. A simulator build does not demonstrate Screen Time enforcement. For iOS unit-test execution, discover a valid simulator with `xcrun simctl list devices available`, then use its ID with `xcodebuild ... test`. Do not reuse guessed simulator IDs.
 
 Review new/untracked sources as well as `git diff`. Most app implementation remains untracked at this handoff; no reset/clean or blind staging of build artifacts.

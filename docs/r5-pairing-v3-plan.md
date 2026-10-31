@@ -246,3 +246,14 @@ After merging `r5-relay` (only conflict: this doc, both sections kept):
 Nits: lookup uses an ephemeral in-memory signer so no friend identity is minted before Accept; the hint when people joined but none is fully trusted reads "Nobody can be asked right now. Check Your trusted people below."; after relaunch the newest unexpired unused invite becomes `pendingInvite` again (link shown, fast polling matches what is visible); stored invites are purged at launch when no owner identity exists; ContentView mention fixed. New tests: verified person demoted when the acceptance disappears; friend-side stop; read-error handling; save-failure handling; relaunch restore; purge.
 
 Validation (compile-only): `xcodegen generate` then `xcodebuild build-for-testing -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -derivedDataPath /Users/nishantroy/code/.build-cache/phone-lockbox/agent-a8417ae781fc1e795/DerivedData CODE_SIGNING_ALLOWED=NO` gave **TEST BUILD SUCCEEDED**. Not run: any simulator test, unit or UI.
+
+## Build-22 owner QA (2026-10-31)
+
+Owner's iPhone 15 Pro (owner role) plus the iPhone 17 Pro Max simulator (friend role), both on the production relay running v3. **Passed:** invite, open link, friend Accept with no owner confirm, a lock added, Ask sent, friend approve and decline. **Install issue, not a code defect:** the first simulator install was the compile-only build without an App Group, so Accept failed locally and was shown as "couldn't reach the relay". Reinstalled a signed simulator build; `docs/development.md` now gives the command.
+
+Follow-ups from this QA (UX/bug batch, not yet built):
+1. **Copy link** sets `.localOnly`, so Universal Clipboard never gets the link (owner pastes on the Mac). Drop `.localOnly`, keep the 1-hour expiry, and add visible "Copied" feedback plus a haptic (owner feedback: the button gave too little visible feedback).
+2. Local failures (App Group/identity storage) are shown as "couldn't reach the relay". Map them to an accurate message.
+3. Opening an invite link scrolls to partway down the Accept card, cutting off its heading. Scroll to the top of the card.
+4. The owner's phone kept offering an expired invite's link. Show it as expired, with a one-tap new invite.
+5. On a fresh install, the friend first sees owner-setup copy, and "Got an invite link?" is near the bottom.
