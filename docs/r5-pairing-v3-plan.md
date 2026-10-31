@@ -443,3 +443,19 @@ Builder: Claude Sonnet (`claude-sonnet-5-5`). Fixes after the Opus review of 3de
 - **P2-4** An invalid paste cancels `inviteLookupTask`; the paste card is hidden while a link is open, so unrelated clipboard text cannot replace a live invite.
 - **UI tests:** `waitUntilHittable` (predicate) replaces direct `isHittable` asserts after scrolls; a `focus(_:)` helper waits for the field to be hittable, taps, waits for the keyboard and retries the tap once; `setUp` activates the app if it is not in the foreground after launch. The "People tab never stayed selected" failure was most likely the App Switcher left behind by the first failure. The new scroll code only runs with an open link or a new waiting item, so it should not affect tab selection.
 - **Validation run:** CompanionKit `swift test` 161 tests, 0 failures; root `swift test` 177 tests, 0 failures; `build-for-testing` for both schemes and the Release build succeeded. App unit and UI suites not run (no simulator).
+
+### P3d pre-push suites (2026-10-31, iPhone Air simulator, local relay `dev:test`)
+
+- **Run on 3dea6ff.**
+  - Unit suite: no tests executed (simulator launcher error "server died").
+  - UI suite: 2/4 failed. Friend name-field focus failed with two name fields on screen (review P2-2); the following test failed on tab selection after the App Switcher was left open.
+  - Fixed by the builder in af4748a.
+- **Run on af4748a.**
+  - UI suite: **4/4 passed**.
+  - Unit suite: 138 tests, 2 failures, both test mistakes:
+    - expecting the owner layout after a friend dismissed an invite with nobody paired;
+    - an ID match across fixture items that share one request ID.
+  - Fixed by the parent in 1bfd9dc (test-only).
+- **Final, 1bfd9dc.** Unit suite: **138 tests, 0 failures, 1 skipped**. The UI suite result above stands, since the later change touched only unit tests.
+- **Merged** into `r5-relay` as 8ccaf7a. The merged tree is identical to the tested `p3d-ux` tree.
+- **Code review:** Opus review of 3dea6ff and 20397f9. 20397f9 approved. P3d changes requested (P1-1 Waiting history, P2-1 to P2-4), all fixed in af4748a.
