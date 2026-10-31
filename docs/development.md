@@ -101,3 +101,16 @@ Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the 
 - [Sol review](reviews/2026-09-10-sol.md) covers the whole working tree at handoff.
 - Use local privacy-minimal diagnostics, not remote analytics or raw app-token dumps.
 - Preserve a tested developer cleanup route until bounded sessions and automatic release are proven. Do not claim the current immediate test or dashboard Lock now has an automatic end.
+
+## Worktree builds and cleanup
+
+Builders and reviewers in git worktrees keep all build output outside the worktree, under `/Users/nishantroy/code/.build-cache/phone-lockbox/<worktree-name>/`, one folder per worktree:
+
+```bash
+C=/Users/nishantroy/code/.build-cache/phone-lockbox/$(basename "$PWD")
+xcodebuild ... -derivedDataPath "$C/DerivedData" ...
+swift test --scratch-path "$C/spm-root"
+(cd CompanionKit && swift test --scratch-path "$C/spm-companionkit")
+```
+
+When a slice merges, the parent removes the worktree (`git worktree remove --force <path>`; the branch stays) and its cache folder. `tools/worktree-cache-report.sh` lists worktrees, sizes, unmerged commits and orphaned cache folders without deleting anything.
