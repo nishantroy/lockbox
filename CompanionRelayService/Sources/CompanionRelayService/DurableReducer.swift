@@ -29,8 +29,8 @@ enum DurableProtocolReducer {
             guard signer == owner, invitation.payload.owner == owner else { throw CompanionError.unauthorized }
             try invitation.validate(at: now)
             guard ledger.invitations[invitation.payload.inviteID] == nil else { throw CompanionError.replay }
-            // A token hash identifies exactly one invite (the lookup key).
-            guard !ledger.invitations.values.contains(where: { $0.invitation.payload.tokenHash == invitation.payload.tokenHash }) else {
+            // A lookup key identifies exactly one invite.
+            guard !ledger.invitations.values.contains(where: { $0.invitation.payload.lookupKey == invitation.payload.lookupKey }) else {
                 throw CompanionError.replay
             }
             ledger.invitations[invitation.payload.inviteID] = DurableInvitationRecord(invitation: invitation)
@@ -44,24 +44,31 @@ enum DurableProtocolReducer {
             guard signer == acceptance.approver else { throw CompanionError.unauthorized }
             try acceptance.validate()
             guard acceptance.owner == owner else { throw CompanionError.unauthorized }
-            // Unknown invite, wrong token and a bad signature are one indistinguishable failure.
+            // Unknown invite, wrong lookup key and a bad signature are one indistinguishable
+            // failure. The relay never sees the token; the owner verifies `tokenProof`.
             guard let record = ledger.invitations[acceptance.inviteID],
                   record.invitation.payload.owner == owner,
-                  InviteToken.matches(acceptance.token, hash: record.invitation.payload.tokenHash),
+                  InviteToken.constantTimeEqual(acceptance.lookupKey, record.invitation.payload.lookupKey),
                   verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance.v3",
                          fields: acceptance.signingFields(), key: acceptance.approver.publicKey) else {
                 throw CompanionError.unauthorized
             }
             let invitePayload = record.invitation.payload
-            guard record.consumedAt == nil else { throw CompanionError.replay }
-            guard now < invitePayload.expiresAt,
-                  acceptance.issuedAt <= now.addingTimeInterval(60),
-                  acceptance.issuedAt >= invitePayload.issuedAt.addingTimeInterval(-60),
-                  acceptance.issuedAt < invitePayload.expiresAt else { throw CompanionError.expired }
+            guard acceptance.issuedAt <= now.addingTimeInterval(CompanionLimits.pairingClockSkew) else {
+                throw CompanionError.malformed("acceptance is from the future")
+            }
+            let pairingID = Pairing.derivedID(inviteID: acceptance.inviteID, approverIdentityID: acceptance.approver.identityID)
+            if record.consumedAt != nil {
+                // A retry of a lost response under a new operation ID returns this same approver's pairing.
+                if let existing = ledger.pairings[pairingID]?.pairing, existing.state == .active, existing.approver == acceptance.approver {
+                    return .pairing(existing)
+                }
+                throw CompanionError.replay
+            }
+            guard now < invitePayload.expiresAt else { throw CompanionError.expired }
             guard acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invitePayload.grantedScopes else {
                 throw CompanionError.consentRequired
             }
-            let pairingID = Pairing.derivedID(inviteID: acceptance.inviteID, approverIdentityID: acceptance.approver.identityID)
             guard ledger.pairings[pairingID] == nil else { throw CompanionError.replay }
             let epoch = try checkedPairingEpoch(ledger.pairingEpochs[pairingID] ?? 0)
             let pairing = try Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver,

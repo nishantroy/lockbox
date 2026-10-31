@@ -119,6 +119,8 @@ public enum CompanionLimits {
     public static let maxMessageBytes = 280
     public static let maxTargets = 16
     public static let maxInviteLifetime: TimeInterval = 7 * 24 * 60 * 60
+    /// Tolerated device clock skew when a friend or the relay checks an invite or acceptance time (seconds).
+    public static let pairingClockSkew: TimeInterval = 300
     public static let maxRequestLifetime: TimeInterval = 24 * 60 * 60
     public static let maxSessionLifetime: TimeInterval = 7 * 24 * 60 * 60
     public static let maxSnapshotRecords = 10_000

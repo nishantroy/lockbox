@@ -52,17 +52,18 @@ import {
   upsertRetentionMarkers,
   chargeGlobalRateLimits,
   GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
-  GLOBAL_RATE_LIMIT_MAX,
+  globalRateLimitMax,
+  rateLimitMax,
   AmbiguousOwnerError,
   InviteTokenConflictError,
   recordInviteToken,
-  deleteInviteToken,
+  consumeInviteToken,
   findInviteToken,
   OwnerRowConflictError,
   PairingRoutingConflictError,
   type StoredOperation
 } from "./db.js";
-import { canonicalFramed, digest, COMPANION_VERSION, inviteTokenHash, isWellFormedInviteToken } from "./canonical.js";
+import { canonicalFramed, digest, COMPANION_VERSION, isWellFormedLookupKey, fromBase64url } from "./canonical.js";
 import { timingSafeEqual } from "node:crypto";
 
 /** 5-minute freshness window for an inbox query that supplies `issuedAt` (see `decodeInboxQuery`). */
@@ -160,7 +161,7 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
   // owner transaction), this also bounds e.g. a flood of `ack`s from fresh
   // random identities, each of which would otherwise unconditionally create
   // a new `companion_owner` row before any per-owner limiter ever runs.
-  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
+  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, globalRateLimitMax());
   if (!allowed) throw relayError("rate_limited");
 
   const resolved = await resolveOwner(operation);
@@ -273,16 +274,17 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
       // Pairing v3: index the invite by its token hash in the same transaction.
       const payload = reduced.result.value.payload;
       try {
-        await recordInviteToken(client, payload.tokenHash, ownerRow.ownerID, payload.inviteID, payload.expiresAt);
+        await recordInviteToken(client, payload.lookupKey, ownerRow.ownerID, payload.inviteID, payload.expiresAt);
       } catch (error) {
         if (error instanceof InviteTokenConflictError) throw relayError("replay");
         throw error;
       }
     }
     if (operation.kind === "accept" && reduced.result.kind === "pairing") {
-      // Pairing v3: the invite is consumed; its token must stop resolving.
+      // Pairing v3: the invite is consumed; its lookup key must stop resolving
+      // but stays as a tombstone until it expires (no re-registration).
       const consumedInviteID = (JSON.parse(operation.body.toString("utf8")) as { acceptance: { inviteID: string } }).acceptance.inviteID;
-      await deleteInviteToken(client, ownerRow.ownerID, consumedInviteID);
+      await consumeInviteToken(client, ownerRow.ownerID, consumedInviteID, now);
     }
     if (reduced.result.kind === "verification") {
       // Patch in the committed revision the reducer could not know yet.
@@ -350,7 +352,7 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   if (!verifySignedOperationSignature(operation)) throw relayError("invalid_signature");
 
   const pool = getPool();
-  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, GLOBAL_RATE_LIMIT_MAX);
+  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, globalRateLimitMax());
   if (!allowed) throw relayError("rate_limited");
 
   let query;
@@ -471,38 +473,38 @@ export const LOOKUP_RATE_LIMIT_WINDOW_SECONDS = 60;
 const MAX_LOOKUP_BODY_BYTES = 1_024;
 
 /**
- * Pairing v3: `POST /v1/invite/lookup {"token": "<22 base64url chars>"}`.
- * Unauthenticated (the friend has no identity yet) but rate limited per
- * client IP. Returns the owner-signed invitation while it is unexpired and
- * unused, and nothing else: an unknown token, an expired invite and a
- * consumed invite are one indistinguishable `not_found`.
- *
- * The token is never stored; the index is keyed by its domain-separated
- * SHA-256 hash (`inviteTokenHash`), and the hash found is compared again in
- * constant time against the hash signed inside the owner's invitation.
+ * Pairing v3: `POST /v1/invite/lookup {"lookupKey": "<43 base64url chars>"}`.
+ * The lookup key is `H("invite-lookup", token)`; the token itself never
+ * reaches the relay. Unauthenticated (the friend has no identity yet) but rate
+ * limited per client IP. Returns the owner-signed invitation while it is
+ * unexpired and unused, and nothing else: an unknown key, an expired invite
+ * and a consumed invite are one indistinguishable `not_found`. The key found
+ * is compared again in constant time against the one signed inside the
+ * owner's invitation.
  */
 export async function lookupInvite(rawBody: Buffer, now: number = nowSeconds(), clientIP: string | null = null): Promise<Invitation> {
   if (rawBody.length > MAX_LOOKUP_BODY_BYTES) throw relayError("malformed");
   const pool = getPool();
   // Charged before parsing so malformed/guessing traffic is bounded too. With
   // no resolvable client IP (not expected behind Vercel) all callers share one bucket.
-  const allowed = await chargeGlobalRateLimits(pool, [`lookup-ip:${clientIP ?? "unknown"}`], now, LOOKUP_RATE_LIMIT_WINDOW_SECONDS, LOOKUP_RATE_LIMIT_MAX);
+  const allowed = await chargeGlobalRateLimits(pool, [`lookup-ip:${clientIP ?? "unknown"}`], now, LOOKUP_RATE_LIMIT_WINDOW_SECONDS, rateLimitMax(LOOKUP_RATE_LIMIT_MAX, "RELAY_LOOKUP_RATE_LIMIT_MAX"));
   if (!allowed) throw relayError("rate_limited");
-  let token: unknown;
+  let encodedKey: unknown;
   try {
-    token = (safeJSONParse(rawBody) as { token?: unknown } | null)?.token;
+    encodedKey = (safeJSONParse(rawBody) as { lookupKey?: unknown } | null)?.lookupKey;
   } catch (error) {
     throw error instanceof RelayError ? error : relayError("malformed");
   }
-  if (!isWellFormedInviteToken(token)) throw relayError("malformed");
-  const tokenHash = inviteTokenHash(token);
-  const row = await findInviteToken(pool, tokenHash);
-  if (!row || row.expiresAt <= now || row.tokenHash.length !== tokenHash.length || !timingSafeEqual(row.tokenHash, tokenHash)) throw relayError("not_found");
+  if (!isWellFormedLookupKey(encodedKey)) throw relayError("malformed");
+  const lookupKey = fromBase64url(encodedKey);
+  if (lookupKey.length !== 32) throw relayError("malformed");
+  const row = await findInviteToken(pool, lookupKey);
+  if (!row || row.consumed || row.expiresAt <= now || row.lookupKey.length !== lookupKey.length || !timingSafeEqual(row.lookupKey, lookupKey)) throw relayError("not_found");
   const ownerRow = await readOwnerLedger(pool, row.ownerID);
   const record = ownerRow?.ledger.invitations[row.inviteID];
   if (!record || record.consumedAt !== null || now >= record.invitation.payload.expiresAt) throw relayError("not_found");
-  const signedHash = record.invitation.payload.tokenHash;
-  if (!Buffer.isBuffer(signedHash) || signedHash.length !== tokenHash.length || !timingSafeEqual(signedHash, tokenHash)) throw relayError("not_found");
+  const signedKey = record.invitation.payload.lookupKey;
+  if (!Buffer.isBuffer(signedKey) || signedKey.length !== lookupKey.length || !timingSafeEqual(signedKey, lookupKey)) throw relayError("not_found");
   return record.invitation;
 }
 

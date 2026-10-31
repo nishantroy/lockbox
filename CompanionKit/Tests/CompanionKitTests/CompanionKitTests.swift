@@ -106,15 +106,19 @@ final class CompanionKitTests: XCTestCase {
         let payload = issued.invitation.payload
         let renamed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                         expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
-                                        ownerDisplayName: "Mallory", grantedScopes: payload.grantedScopes)
+                                        lookupKey: payload.lookupKey, ownerDisplayName: "Mallory", grantedScopes: payload.grantedScopes)
         let narrowed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                          expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
-                                         ownerDisplayName: "Alex", grantedScopes: [.approveEarlyEnd])
+                                         lookupKey: payload.lookupKey, ownerDisplayName: "Alex", grantedScopes: [.approveEarlyEnd])
         let rehashed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                          expiresAt: payload.expiresAt, nonce: payload.nonce,
-                                         tokenHash: InviteToken.hash(InviteToken.generate()),
+                                         tokenHash: Data(repeating: 9, count: 32), lookupKey: payload.lookupKey,
                                          ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
-        for tampered in [renamed, narrowed, rehashed] {
+        let rekeyed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
+                                        expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
+                                        lookupKey: InviteToken.lookupKey(InviteToken.generate()),
+                                        ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
+        for tampered in [renamed, narrowed, rehashed, rekeyed] {
             let invitation = try Invitation(payload: tampered, signature: issued.invitation.signature)
             XCTAssertThrowsError(try invitation.validateSignature()) { XCTAssertEqual($0 as? CompanionError, .invalidSignature) }
         }
@@ -126,13 +130,20 @@ final class CompanionKitTests: XCTestCase {
         let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
         func payload(name: String?, scopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) throws -> InvitePayload {
             try InvitePayload(inviteID: "names", owner: signer.identity, issuedAt: t, expiresAt: t.addingTimeInterval(60),
-                              nonce: Data(repeating: 1, count: 24), tokenHash: InviteToken.hash(InviteToken.generate()),
-                              ownerDisplayName: name, grantedScopes: scopes)
+                              nonce: Data(repeating: 1, count: 24), tokenHash: Data(repeating: 1, count: 32),
+                              lookupKey: Data(repeating: 2, count: 32), ownerDisplayName: name, grantedScopes: scopes)
         }
         XCTAssertNoThrow(try payload(name: nil))
         XCTAssertNoThrow(try payload(name: String(repeating: "A", count: 40)))
         XCTAssertNoThrow(try payload(name: String(repeating: "\u{1F600}", count: 40)))
-        for bad in [String(repeating: "A", count: 41), String(repeating: "\u{1F600}", count: 41), "", "   ", "line\nbreak", "tab\there"] {
+        // ZWJ sequences, NFD and astral names are legal.
+        for good in ["Jose\u{301}", "\u{1D49C}lex", "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}", "A\u{200D}b"] {
+            XCTAssertNoThrow(try payload(name: good), "name \(good.debugDescription) must be accepted")
+        }
+        // Bidi controls, invisible marks, FEFF-only/blank and control characters are not.
+        let hostile = ["x\u{202E}y", "\u{2066}x", "\u{2069}", "\u{061C}x", "\u{200B}x", "\u{200E}x", "\u{200F}x",
+                       "\u{FEFF}", " \u{FEFF} ", "\u{0085}", "\u{007F}"]
+        for bad in hostile + [String(repeating: "A", count: 41), String(repeating: "\u{1F600}", count: 41), "", "   ", "line\nbreak", "tab\there"] {
             XCTAssertThrowsError(try payload(name: bad), "name \(bad.debugDescription) must be rejected")
         }
         for scopes in [[CompanionScope](), [.mutualPact], [.approveEarlyEnd, .approveEarlyEnd]] {
@@ -150,6 +161,31 @@ final class CompanionKitTests: XCTestCase {
         let request = try owner.requestUnlock(requestID: "clamped", pairing: pairing, session: session,
                                               target: approver.signer.identity.identityID, message: nil, validFor: 3_599 + 600)
         XCTAssertEqual(request.expiresAt, session.endsAt)
+    }
+
+    func testAcceptRetriedAfterALostResponseReturnsTheExistingPairing() throws {
+        let (relay, owner, approver, _, _) = try harness()
+        let issued = try owner.createInvite(inviteID: "retry-invite", validFor: 600, now: t, nonce: Data(repeating: 21, count: 24))
+        let invitation = try approver.lookupInvite(token: issued.token)
+        let first = try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "retry-1", now: t)
+        // The response was lost; the app retries with a fresh acceptance (new operation ID).
+        let again = try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "retry-2", now: t)
+        XCTAssertEqual(again, first)
+        // Another friend holding the link still cannot use it.
+        let other = CompanionClient(signer: try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore()),
+                                    transport: relay, now: { [t] in t })
+        XCTAssertThrowsError(try other.acceptInvite(invitation, token: issued.token, acceptanceID: "retry-3", now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .replay)
+        }
+    }
+
+    func testClockSkewIsToleratedAndNotReportedAsExpired() throws {
+        let (_, owner, approver, _, _) = try harness()
+        let issued = try owner.createInvite(inviteID: "skew-invite", validFor: 600, now: t, nonce: Data(repeating: 22, count: 24))
+        let invitation = try approver.lookupInvite(token: issued.token)
+        // A friend phone running three minutes behind the owner's can still accept.
+        XCTAssertNoThrow(try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "skew-1",
+                                                   now: t.addingTimeInterval(-180)))
     }
 
     func testSameFriendAcceptingASecondInviteGetsADistinctPairing() throws {
@@ -602,7 +638,7 @@ final class CompanionKitTests: XCTestCase {
         let payload = try InvitePayload(inviteID: "revision-invite", owner: signer.identity,
                                         issuedAt: t, expiresAt: t.addingTimeInterval(600),
                                         nonce: Data(repeating: 4, count: 24),
-                                        tokenHash: InviteToken.hash(InviteToken.generate()))
+                                        tokenHash: Data(repeating: 1, count: 32), lookupKey: Data(repeating: 2, count: 32))
         let inviteSignature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3",
                                               fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: inviteSignature)
@@ -1246,8 +1282,8 @@ private final class ApproverSwappingTransport: CompanionTransport, @unchecked Se
         try real.fetchInbox(operation)
     }
 
-    func lookupInvite(token: String) throws -> Invitation {
-        try real.lookupInvite(token: token)
+    func lookupInvite(lookupKey: String) throws -> Invitation {
+        try real.lookupInvite(lookupKey: lookupKey)
     }
 }
 
@@ -1270,8 +1306,8 @@ private final class OwnerSwappingTransport: CompanionTransport, @unchecked Senda
         try real.fetchInbox(operation)
     }
 
-    func lookupInvite(token: String) throws -> Invitation {
-        try real.lookupInvite(token: token)
+    func lookupInvite(lookupKey: String) throws -> Invitation {
+        try real.lookupInvite(lookupKey: lookupKey)
     }
 }
 

@@ -13,7 +13,6 @@
 
 import { relayError } from "./errors.js";
 import {
-  isWellFormedInviteToken,
   secondsToSwiftDate,
   swiftDateToSeconds,
   base64url,
@@ -271,20 +270,54 @@ export function consentAuthorizes(c: RelationshipConsent, scope: CompanionScope)
 /** Maximum length of an owner/approver display name, in Unicode scalar values. */
 export const MAX_DISPLAY_NAME_SCALARS = 40;
 
+/** Whitespace-like scalars (Unicode White_Space plus U+FEFF), spelled out so TS and Swift agree exactly. */
+function isBlankScalar(cp: number): boolean {
+  return (
+    (cp >= 0x09 && cp <= 0x0d) ||
+    cp === 0x20 ||
+    cp === 0x85 ||
+    cp === 0xa0 ||
+    cp === 0x1680 ||
+    (cp >= 0x2000 && cp <= 0x200a) ||
+    cp === 0x2028 ||
+    cp === 0x2029 ||
+    cp === 0x202f ||
+    cp === 0x205f ||
+    cp === 0x3000 ||
+    cp === 0xfeff
+  );
+}
+
+/** Scalars a display name may never contain: C0/C1 controls, bidi controls and invisible marks that enable spoofing. U+200D (ZWJ) stays legal for emoji sequences. */
+function isForbiddenNameScalar(cp: number): boolean {
+  return (
+    cp <= 0x1f ||
+    (cp >= 0x7f && cp <= 0x9f) ||
+    cp === 0x061c ||
+    cp === 0x200b ||
+    cp === 0x200e ||
+    cp === 0x200f ||
+    (cp >= 0x202a && cp <= 0x202e) ||
+    (cp >= 0x2066 && cp <= 0x2069)
+  );
+}
+
 /**
- * Pairing v3: a display name is optional, 1...40 Unicode scalars, no control
- * characters and not whitespace-only. `undefined` means "no name"; an empty
- * string is rejected so that "no name" has exactly one signed representation
- * (the empty string in the signing fields). Mirrors `validateDisplayName` in
- * CompanionKit.
+ * Pairing v3: a display name is optional, 1...40 Unicode scalars, well-formed
+ * Unicode (no lone UTF-16 surrogates: they would sign as replacement bytes and
+ * later fail to decode in Swift), no forbidden scalars and not blank. Rules
+ * are identical to `PairingFields.validateDisplayName` in CompanionKit.
+ * `undefined` means "no name"; an empty string is rejected so "no name" has one
+ * signed representation (the empty string in the signing fields).
  */
 export function decodeDisplayName(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") throw relayError("malformed");
-  const scalars = Array.from(value);
+  if (/\p{Surrogate}/u.test(value)) throw relayError("malformed");
+  const scalars = Array.from(value, (ch) => ch.codePointAt(0)!);
   if (scalars.length === 0 || scalars.length > MAX_DISPLAY_NAME_SCALARS) throw relayError("malformed");
-  if (/\p{Cc}/u.test(value)) throw relayError("malformed");
-  if (value.trim().length === 0) throw relayError("malformed");
+  if (scalars.some(isForbiddenNameScalar)) throw relayError("malformed");
+  if (scalars.every(isBlankScalar)) throw relayError("malformed");
   return value;
 }
 
@@ -305,8 +338,10 @@ export interface InvitePayload {
   issuedAt: number;
   expiresAt: number;
   nonce: Buffer;
-  /** Domain-separated SHA-256 of the 22-char bearer token (see `inviteTokenHash`). The token itself is never signed or stored by the relay. */
+  /** `inviteTokenHash(token, ownerPublicKey, inviteID)`: only a token holder can recompute it. The token itself never reaches the relay. */
   tokenHash: Buffer;
+  /** `inviteLookupKey(token)`: the relay's only handle on the invite. Signed so the relay cannot re-point a lookup. */
+  lookupKey: Buffer;
   ownerDisplayName?: string;
   grantedScopes: Array<(typeof R5_SCOPES)[number]>;
 }
@@ -320,6 +355,7 @@ export function invitePayloadSigningFields(p: InvitePayload): string[] {
     msString(p.expiresAt),
     base64url(p.nonce),
     base64url(p.tokenHash),
+    base64url(p.lookupKey),
     p.ownerDisplayName ?? "",
     [...p.grantedScopes].sort().join(",")
   ];
@@ -347,11 +383,13 @@ export function decodeInvitation(value: unknown): Invitation {
   // Pairing v3: a v2 invite has no tokenHash/grantedScopes and is rejected here.
   const tokenHash = decodeData(pv.tokenHash);
   if (tokenHash.length !== 32) throw relayError("malformed");
+  const lookupKey = decodeData(pv.lookupKey);
+  if (lookupKey.length !== 32) throw relayError("malformed");
   const ownerDisplayName = decodeDisplayName(pv.ownerDisplayName);
   const grantedScopes = decodeGrantedScopes(pv.grantedScopes);
   const signature = decodeData(v.signature);
   if (signature.length !== 64) throw relayError("malformed");
-  const payload: InvitePayload = { inviteID, owner, issuedAt, expiresAt, nonce, tokenHash, grantedScopes };
+  const payload: InvitePayload = { inviteID, owner, issuedAt, expiresAt, nonce, tokenHash, lookupKey, grantedScopes };
   if (ownerDisplayName !== undefined) payload.ownerDisplayName = ownerDisplayName;
   return { payload, signature };
 }
@@ -364,6 +402,7 @@ export function encodeInvitation(inv: Invitation): object {
     expiresAt: encodeDate(inv.payload.expiresAt),
     nonce: encodeData(inv.payload.nonce),
     tokenHash: encodeData(inv.payload.tokenHash),
+    lookupKey: encodeData(inv.payload.lookupKey),
     grantedScopes: inv.payload.grantedScopes
   };
   if (inv.payload.ownerDisplayName !== undefined) payload.ownerDisplayName = inv.payload.ownerDisplayName;
@@ -376,9 +415,10 @@ export function verifyInvitationSignature(inv: Invitation): boolean {
 }
 
 /**
- * Pairing v3 acceptance: friend-signed, carries the plaintext invite token
- * (proof of possession of the link), the friend's optional display name and
- * the scopes the friend consents to. It replaces the v2 acceptance +
+ * Pairing v3 acceptance: friend-signed, carries the invite's lookup key (what
+ * the relay gates on), a token-derived `tokenProof` only the link holder can
+ * compute (verified by the OWNER, never by the relay), the friend's optional
+ * display name and the scopes the friend consents to. It replaces the v2 acceptance +
  * confirmation + consent handshake: the relay turns a valid one into an
  * active pairing and active both-sided consent in one transaction.
  */
@@ -388,7 +428,8 @@ export interface PairingAcceptance {
   owner: DeviceIdentity;
   approver: DeviceIdentity;
   issuedAt: number;
-  token: string;
+  lookupKey: Buffer;
+  tokenProof: Buffer;
   approverDisplayName?: string;
   acceptedScopes: Array<(typeof R5_SCOPES)[number]>;
 }
@@ -402,7 +443,8 @@ export function pairingAcceptanceSigningFields(a: PairingAcceptance): string[] {
     base64url(a.owner.publicKey),
     base64url(a.approver.publicKey),
     msString(a.issuedAt),
-    a.token,
+    base64url(a.lookupKey),
+    base64url(a.tokenProof),
     a.approverDisplayName ?? "",
     [...a.acceptedScopes].sort().join(",")
   ];
@@ -421,10 +463,12 @@ export function decodePairingAcceptance(v: Record<string, unknown>): PairingAcce
   const approver = decodeDeviceIdentity(v.approver);
   if (owner.role !== "owner" || approver.role !== "trustedApprover") throw relayError("malformed");
   const issuedAt = requireTimestampSeconds(v.issuedAt);
-  if (!isWellFormedInviteToken(v.token)) throw relayError("malformed");
+  const lookupKey = decodeData(v.lookupKey);
+  const tokenProof = decodeData(v.tokenProof);
+  if (lookupKey.length !== 32 || tokenProof.length !== 32) throw relayError("malformed");
   const approverDisplayName = decodeDisplayName(v.approverDisplayName);
   const acceptedScopes = decodeGrantedScopes(v.acceptedScopes);
-  const acceptance: PairingAcceptance = { acceptanceID, inviteID, owner, approver, issuedAt, token: v.token, acceptedScopes };
+  const acceptance: PairingAcceptance = { acceptanceID, inviteID, owner, approver, issuedAt, lookupKey, tokenProof, acceptedScopes };
   if (approverDisplayName !== undefined) acceptance.approverDisplayName = approverDisplayName;
   return acceptance;
 }
@@ -451,7 +495,8 @@ export function encodePairingAcceptance(a: PairingAcceptance): object {
     owner: encodeDeviceIdentity(a.owner),
     approver: encodeDeviceIdentity(a.approver),
     issuedAt: encodeDate(a.issuedAt),
-    token: a.token,
+    lookupKey: encodeData(a.lookupKey),
+    tokenProof: encodeData(a.tokenProof),
     acceptedScopes: a.acceptedScopes
   };
   if (a.approverDisplayName !== undefined) out.approverDisplayName = a.approverDisplayName;

@@ -108,7 +108,8 @@ private func makeInvite(ownerName: String? = nil) throws -> (DeviceSigner, Invit
 private func signedInvite(ownerSigner: DeviceSigner, inviteID: String, nonceByte: UInt8, ownerName: String? = nil) throws -> Invitation {
     let payload = try InvitePayload(inviteID: inviteID, owner: ownerSigner.identity, issuedAt: fixedTime,
                                     expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: nonceByte, count: 24),
-                                    tokenHash: InviteToken.hash(testInviteToken), ownerDisplayName: ownerName)
+                                    tokenHash: InviteToken.inviteHash(token: testInviteToken, ownerPublicKey: ownerSigner.identity.publicKey, inviteID: inviteID),
+                                    lookupKey: InviteToken.lookupKey(testInviteToken), ownerDisplayName: ownerName)
     let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
     return try Invitation(payload: payload, signature: signature)
 }
@@ -455,7 +456,9 @@ final class HTTPTransportTests: XCTestCase {
             XCTAssertEqual(request.url?.path, "/v1/invite/lookup")
             XCTAssertEqual(request.httpMethod, "POST")
             let body = try! JSONSerialization.jsonObject(with: bodyData(from: request)) as! [String: String]
-            XCTAssertEqual(body, ["token": testInviteToken])
+            // Only the lookup key is sent; the token itself never leaves the device.
+            XCTAssertEqual(body, ["lookupKey": InviteToken.lookupKeyString(testInviteToken)])
+            XCTAssertFalse(String(decoding: bodyData(from: request), as: UTF8.self).contains(testInviteToken))
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             struct Wrapper: Encodable { let invitation: Invitation }
             return .init(status: 200, body: try! encoder.encode(Wrapper(invitation: invitation)))
@@ -476,6 +479,43 @@ final class HTTPTransportTests: XCTestCase {
         } catch CompanionError.malformed {
             // expected
         }
+    }
+
+    func testRelayCannotSwapInInvitationItSignedItself() async throws {
+        // An active relay knows the lookup key. It answers with an invitation signed by its OWN key
+        // that reuses that lookup key; without the token it cannot compute the owner-bound token hash.
+        let relayOwner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let forgedPayload = try InvitePayload(inviteID: "relay-made", owner: relayOwner.identity, issuedAt: fixedTime,
+                                              expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 4, count: 24),
+                                              tokenHash: Data(repeating: 7, count: 32),
+                                              lookupKey: InviteToken.lookupKey(testInviteToken), ownerDisplayName: "Your friend")
+        let forged = try Invitation(payload: forgedPayload, signature: try relayOwner.sign(
+            domain: "\(CompanionCanonical.version).invite.v3", fields: forgedPayload.signingFields()))
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { _ in
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            struct Wrapper: Encodable { let invitation: Invitation }
+            return .init(status: 200, body: try! encoder.encode(Wrapper(invitation: forged)))
+        }
+        do {
+            _ = try await client.lookupInvite(token: testInviteToken)
+            XCTFail("a relay-signed invitation must be rejected")
+        } catch CompanionError.malformed {
+            // expected
+        }
+    }
+
+    func testBareNotFoundIsUnavailableButTheRelaysJSONErrorIsNotFound() async throws {
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { _ in .init(status: 404, body: Data("<html>Not Found</html>".utf8)) }
+        do {
+            _ = try await client.lookupInvite(token: testInviteToken)
+            XCTFail("expected unavailable")
+        } catch let error as CompanionTransportError { XCTAssertEqual(error, .unavailable) }
     }
 
     func testLookupInviteMapsNotFoundAndRateLimited() async throws {

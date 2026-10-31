@@ -20,7 +20,7 @@ import { submitOperation, fetchInboxOperation, lookupInvite, LOOKUP_RATE_LIMIT_M
 import { handleInviteLookup, handleOperations } from "../src/handlers.js";
 import { purgeExpiredRecords } from "../src/retention.js";
 import { decodeInvitation, verifyInvitationSignature, verifySignedAcceptanceSignature } from "../src/protocol.js";
-import { inviteTokenHash, generateInviteToken, isWellFormedInviteToken, COMPANION_VERSION, base64url } from "../src/canonical.js";
+import { inviteTokenHash, inviteLookupKey, acceptanceProof, generateInviteToken, isWellFormedInviteToken, COMPANION_VERSION, base64url } from "../src/canonical.js";
 import { deserializeLedger, serializeLedger } from "../src/ledger.js";
 import { computeStateRoot } from "../src/service.js";
 
@@ -39,8 +39,17 @@ async function expectRejected(op: object, code: string, now = NOW) {
   await expect(submitOperation(toBuffer(op), now)).rejects.toMatchObject({ code });
 }
 
+/** The only thing a friend sends the relay: the lookup key, never the token. */
+function lk(token: string): string {
+  return base64url(inviteLookupKey(token));
+}
+
 function lookup(token: string, now = NOW, ip: string | null = "198.51.100.1") {
-  return lookupInvite(Buffer.from(JSON.stringify({ token }), "utf8"), now, ip);
+  return lookupInvite(Buffer.from(JSON.stringify({ lookupKey: lk(token) }), "utf8"), now, ip);
+}
+
+function lookupRaw(body: unknown, now = NOW, ip: string | null = "198.51.100.2") {
+  return lookupInvite(Buffer.from(typeof body === "string" ? body : JSON.stringify(body), "utf8"), now, ip);
 }
 
 function inbox(identity: TestIdentity, now = NOW) {
@@ -79,30 +88,33 @@ describe("pairing v3: invite token and lookup", () => {
     expect(isWellFormedInviteToken("a".repeat(21) + "+")).toBe(false);
   });
 
-  it("lookup returns the owner-signed invitation for a live token, and the signature, token hash, name and scopes verify", async () => {
+  it("lookup returns the owner-signed invitation for a live key, and the signature, token hash, lookup key, name and scopes verify", async () => {
     const owner = makeIdentity("owner");
     const invite = await createInvite(owner, { ownerDisplayName: "Alex" });
     const found = await lookup(invite.token);
     expect(found.payload.inviteID).toBe(invite.inviteID);
     expect(found.payload.ownerDisplayName).toBe("Alex");
     expect(found.payload.grantedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
-    expect(found.payload.tokenHash.equals(inviteTokenHash(invite.token))).toBe(true);
+    expect(found.payload.tokenHash.equals(inviteTokenHash(invite.token, owner.identity.publicKey, invite.inviteID))).toBe(true);
+    expect(found.payload.lookupKey.equals(inviteLookupKey(invite.token))).toBe(true);
     expect(verifyInvitationSignature(found)).toBe(true);
-    // The relay never stores the plaintext token anywhere in the ledger row or the token index.
+    // The relay never receives the token: it appears nowhere in the ledger row, and the index holds only the lookup key.
     const row = await testPool().query<{ state: string }>(`SELECT state FROM companion_owner WHERE owner_id = $1`, [owner.identity.identityID]);
     expect(row.rows[0]!.state).not.toContain(invite.token);
-    const tokens = await testPool().query<{ token_hash: Buffer }>(`SELECT token_hash FROM companion_invite_token`);
+    const tokens = await testPool().query<{ lookup_key: Buffer }>(`SELECT lookup_key FROM companion_invite_token`);
     expect(tokens.rows).toHaveLength(1);
-    expect(tokens.rows[0]!.token_hash.equals(inviteTokenHash(invite.token))).toBe(true);
+    expect(tokens.rows[0]!.lookup_key.equals(inviteLookupKey(invite.token))).toBe(true);
+    // The old plaintext-token request shape is refused outright.
+    await expect(lookupRaw({ token: invite.token })).rejects.toMatchObject({ code: "malformed" });
   });
 
-  it("an unknown token and a malformed token are distinguished only by form: wrong token is not_found, bad shape is malformed", async () => {
+  it("an unknown key is not_found and a badly shaped request is malformed", async () => {
     const owner = makeIdentity("owner");
     await createInvite(owner);
     await expect(lookup(generateInviteToken())).rejects.toMatchObject({ code: "not_found" });
-    await expect(lookup("short")).rejects.toMatchObject({ code: "malformed" });
-    await expect(lookupInvite(Buffer.from("not json"), NOW, "198.51.100.2")).rejects.toMatchObject({ code: "malformed" });
-    await expect(lookupInvite(Buffer.from(JSON.stringify({ token: 42 })), NOW, "198.51.100.2")).rejects.toMatchObject({ code: "malformed" });
+    await expect(lookupRaw({ lookupKey: "short" })).rejects.toMatchObject({ code: "malformed" });
+    await expect(lookupRaw("not json")).rejects.toMatchObject({ code: "malformed" });
+    await expect(lookupRaw({ lookupKey: 42 })).rejects.toMatchObject({ code: "malformed" });
   });
 
   it("an expired invite is not_found (and indistinguishable from an unknown token)", async () => {
@@ -130,19 +142,19 @@ describe("pairing v3: invite token and lookup", () => {
     await handleOperations(new Request("http://x/v1/operations", { method: "POST", body: JSON.stringify(buildOperation({ kind: "invite", payload: invite.invitation, signer: owner, expectedRevision: 0 })) }));
     const post = (body: unknown, ip = "192.0.2.1") =>
       handleInviteLookup(new Request("http://x/v1/invite/lookup", { method: "POST", body: JSON.stringify(body), headers: { "x-forwarded-for": ip } }));
-    const ok = await post({ token: invite.token });
+    const ok = await post({ lookupKey: lk(invite.token) });
     expect(ok.status).toBe(200);
     const body = await ok.json();
     const decoded = decodeInvitation(body.invitation);
     expect(decoded.payload.inviteID).toBe(invite.inviteID);
     expect(verifyInvitationSignature(decoded)).toBe(true);
-    const missing = await post({ token: generateInviteToken() });
+    const missing = await post({ lookupKey: lk(generateInviteToken()) });
     expect(missing.status).toBe(404);
     expect(await missing.json()).toEqual({ error: "not_found" });
-    expect((await post({ token: "x" })).status).toBe(400);
+    expect((await post({ lookupKey: "x" })).status).toBe(400);
     expect((await handleInviteLookup(new Request("http://x/v1/invite/lookup", { method: "GET" }))).status).toBe(405);
     let last = 200;
-    for (let i = 0; i < LOOKUP_RATE_LIMIT_MAX + 1; i++) last = (await post({ token: generateInviteToken() }, "192.0.2.77")).status;
+    for (let i = 0; i < LOOKUP_RATE_LIMIT_MAX + 1; i++) last = (await post({ lookupKey: lk(generateInviteToken()) }, "192.0.2.77")).status;
     expect(last).toBe(429);
   });
 });
@@ -193,7 +205,9 @@ describe("pairing v3: accept creates pairing and consent atomically", () => {
     expect(verifySignedAcceptanceSignature(signed)).toBe(true);
     expect(signed.acceptance.inviteID).toBe(invite.inviteID);
     expect(signed.acceptance.approver.identityID).toBe(approver.identity.identityID);
-    expect(inviteTokenHash(signed.acceptance.token).equals(inviteTokenHash(invite.token))).toBe(true);
+    expect(signed.acceptance.lookupKey.equals(inviteLookupKey(invite.token))).toBe(true);
+    // The owner (who holds the token) can verify the proof; the relay never could.
+    expect(signed.acceptance.tokenProof.equals(acceptanceProof(invite.token, approver.identity.publicKey, signed.acceptance.acceptanceID))).toBe(true);
     expect((await inbox(approver)).acceptances).toBeUndefined();
   });
 
@@ -228,9 +242,11 @@ describe("pairing v3: accept creates pairing and consent atomically", () => {
     const invite = await createInvite(owner);
     await send(acceptOp(owner, a, invite));
     await expectRejected(acceptOp(owner, b, invite, {}, null, NOW + 2), "replay");
-    await expectRejected(acceptOp(owner, a, invite, { acceptanceID: uniqueID("again") }, null, NOW + 2), "replay");
+    // The same friend retrying with a new operation ID gets their existing pairing back (lost-response recovery), not a second one.
+    await expect(send(acceptOp(owner, a, invite, { acceptanceID: uniqueID("again") }, null, NOW + 2))).resolves.toMatchObject({ result: { kind: "pairing" } });
     await expect(lookup(invite.token)).rejects.toMatchObject({ code: "not_found" });
-    expect(await tokenRowCount()).toBe(0);
+    // The consumed row stays as a tombstone until it expires.
+    expect(await tokenRowCount()).toBe(1);
     expect((await inbox(owner)).pairings).toHaveLength(1);
   });
 
@@ -383,7 +399,8 @@ describe("pairing v3: signature coverage", () => {
       (p: any) => (p.ownerDisplayName = "Mallory"),
       (p: any) => delete p.ownerDisplayName,
       (p: any) => (p.grantedScopes = ["approveEarlyEnd"]),
-      (p: any) => (p.tokenHash = inviteTokenHash(generateInviteToken()).toString("base64"))
+      (p: any) => (p.tokenHash = inviteTokenHash(generateInviteToken(), owner.identity.publicKey, p.inviteID).toString("base64")),
+      (p: any) => (p.lookupKey = inviteLookupKey(generateInviteToken()).toString("base64"))
     ]) {
       const invite = tamperedInvite(owner, mutate);
       await expectRejected(buildOperation({ kind: "invite", payload: invite.invitation, signer: owner, expectedRevision: null }), "invalid_signature");
@@ -406,10 +423,15 @@ describe("pairing v3: signature coverage", () => {
       mutate(copy);
       await expectRejected(buildOperation({ kind: "accept", payload: copy, signer: approver, expectedRevision: null }), "unauthorized");
     }
-    // Replacing the token with a different (wrong) one fails on the token itself.
-    const wrongToken = JSON.parse(JSON.stringify(base));
-    wrongToken.acceptance.token = generateInviteToken();
-    await expectRejected(buildOperation({ kind: "accept", payload: wrongToken, signer: approver, expectedRevision: null }), "unauthorized");
+    // A different lookup key or token proof breaks the signature (and the key would not match the invite).
+    for (const field of ["lookupKey", "tokenProof"]) {
+      const forged = JSON.parse(JSON.stringify(base));
+      forged.acceptance[field] = inviteLookupKey(generateInviteToken()).toString("base64");
+      await expectRejected(buildOperation({ kind: "accept", payload: forged, signer: approver, expectedRevision: null }), "unauthorized");
+    }
+    // Signed correctly but for a key that is not this invite's: indistinguishable from an unknown invite.
+    const wrongKey = buildAcceptance({ owner, approver, inviteID: invite.inviteID, token: generateInviteToken(), now: NOW + 1 });
+    await expectRejected(buildOperation({ kind: "accept", payload: wrongKey, signer: approver, expectedRevision: null }), "unauthorized");
     // Nothing above consumed the invite.
     await expect(send(buildOperation({ kind: "accept", payload: base, signer: approver, expectedRevision: null }))).resolves.toMatchObject({ result: { kind: "pairing" } });
   });
@@ -427,7 +449,7 @@ describe("pairing v3: signature coverage", () => {
     const owner = makeIdentity("owner");
     const invite = buildInvite(owner, NOW);
     const p = invite.invitation.payload as any;
-    const fields = [p.inviteID, owner.identity.identityID, base64url(owner.identity.publicKey), String(NOW * 1000), String((NOW + TTL) * 1000), base64url(Buffer.from(p.nonce, "base64")), base64url(Buffer.from(p.tokenHash, "base64")), "", p.grantedScopes.join(",")];
+    const fields = [p.inviteID, owner.identity.identityID, base64url(owner.identity.publicKey), String(NOW * 1000), String((NOW + TTL) * 1000), base64url(Buffer.from(p.nonce, "base64")), base64url(Buffer.from(p.tokenHash, "base64")), base64url(Buffer.from(p.lookupKey, "base64")), "", p.grantedScopes.join(",")];
     const wrongDomain = signPayloadFields(owner, `${COMPANION_VERSION}.invite`, fields).toString("base64");
     await expectRejected(buildOperation({ kind: "invite", payload: { payload: p, signature: wrongDomain }, signer: owner, expectedRevision: null }), "invalid_signature");
   });
@@ -440,6 +462,7 @@ describe("pairing v3: compatibility and validation", () => {
     const v3 = buildInvite(owner, NOW);
     const v2Invite = JSON.parse(JSON.stringify(v3.invitation));
     delete v2Invite.payload.tokenHash;
+    delete v2Invite.payload.lookupKey;
     delete v2Invite.payload.grantedScopes;
     await expectRejected(buildOperation({ kind: "invite", payload: v2Invite, signer: owner, expectedRevision: null }), "malformed");
 
@@ -502,6 +525,78 @@ describe("pairing v3: compatibility and validation", () => {
   });
 });
 
+describe("pairing v3 review fixes", () => {
+  it("display names reject lone surrogates, bidi controls, invisible marks and FEFF-only names; ZWJ sequences, NFD and astral names pass", async () => {
+    const owner = makeIdentity("owner");
+    const bad = ["\ud800", "ab\udc00", "x\u202ey", "\u2066x", "\u2069", "\u061cx", "\u200bx", "\u200ex", "\u200fx", "\ufeff", " \ufeff ", "\u0085", "\u007f"];
+    for (const name of bad) {
+      const invite = buildInvite(owner, NOW);
+      (invite.invitation.payload as any).ownerDisplayName = name;
+      await expectRejected(buildOperation({ kind: "invite", payload: invite.invitation, signer: owner, expectedRevision: null }), "malformed");
+    }
+    const good = ["Jose\u0301", "\u{1D49C}lex", "\u{1F469}\u200d\u{1F469}\u200d\u{1F467}", "A\u200db"];
+    let revision = 0;
+    for (const name of good) {
+      await createInvite(owner, { ownerDisplayName: name }, revision++);
+    }
+    // A bad approver name is refused the same way, and never reaches the ledger or inbox.
+    const approver = makeIdentity("trustedApprover");
+    const invite = await createInvite(owner, {}, revision++);
+    await expectRejected(acceptOp(owner, approver, invite, { approverDisplayName: "x\ud800" }), "malformed");
+    // The owner's inbox still decodes after all of the above.
+    await expect(inbox(owner)).resolves.toBeDefined();
+  });
+
+  it("an accept retried under a new operation ID after a lost response returns the existing pairing; a different friend still gets replay", async () => {
+    const owner = makeIdentity("owner");
+    const approver = makeIdentity("trustedApprover");
+    const other = makeIdentity("trustedApprover");
+    const invite = await createInvite(owner);
+    const first = await send(acceptOp(owner, approver, invite));
+    const retry = await send(acceptOp(owner, approver, invite, { acceptanceID: uniqueID("retry") }, null, NOW + 3), NOW + 3);
+    expect((retry.result as any).value.pairingID).toBe((first.result as any).value.pairingID);
+    expect((await inbox(owner, NOW + 3)).pairings).toHaveLength(1);
+    await expectRejected(acceptOp(owner, other, invite, {}, null, NOW + 3), "replay", NOW + 3);
+  });
+
+  it("a consumed lookup key stays registered as a tombstone: another owner cannot re-register it", async () => {
+    const ownerA = makeIdentity("owner");
+    const ownerB = makeIdentity("owner");
+    const approver = makeIdentity("trustedApprover");
+    const invite = await createInvite(ownerA);
+    await send(acceptOp(ownerA, approver, invite));
+    const clone = buildInvite(ownerB, NOW, { token: invite.token });
+    await expectRejected(buildOperation({ kind: "invite", payload: clone.invitation, signer: ownerB, expectedRevision: 0 }), "replay");
+  });
+
+  it("clock skew is tolerated: an acceptance stamped before the invite or a few minutes ahead of the relay is fine; far ahead is malformed, not expired", async () => {
+    const owner = makeIdentity("owner");
+    const approver = makeIdentity("trustedApprover");
+    const early = await createInvite(owner);
+    await expect(send(acceptOp(owner, approver, early, {}, null, NOW - 600))).resolves.toMatchObject({ result: { kind: "pairing" } });
+    const approver2 = makeIdentity("trustedApprover");
+    const second = await createInvite(owner, {}, 2);
+    await expect(send(acceptOp(owner, approver2, second, {}, null, NOW + 200))).resolves.toMatchObject({ result: { kind: "pairing" } });
+    const approver3 = makeIdentity("trustedApprover");
+    const third = await createInvite(owner, {}, 4);
+    await expectRejected(acceptOp(owner, approver3, third, {}, null, NOW + 3000), "malformed");
+  });
+
+  it("a relay that knows only the lookup key cannot make the owner trust a fabricated acceptance: the relay accepts it, but the token proof it cannot compute is wrong", async () => {
+    const owner = makeIdentity("owner");
+    const relayKey = makeIdentity("trustedApprover");
+    const invite = await createInvite(owner);
+    // The relay holds lookupKey (it stores it) but not the token.
+    const forged = buildAcceptance({ owner, approver: relayKey, inviteID: invite.inviteID, token: generateInviteToken(), now: NOW + 1, lookupKey: inviteLookupKey(invite.token) });
+    const response = await send(buildOperation({ kind: "accept", payload: forged, signer: relayKey, expectedRevision: null }));
+    expect(response.result.kind).toBe("pairing");
+    const view = await inbox(owner);
+    const signed = view.acceptances![0]!;
+    // What the owner computes from the token it holds does not match the relay's guess.
+    expect(signed.acceptance.tokenProof.equals(acceptanceProof(invite.token, relayKey.identity.publicKey, signed.acceptance.acceptanceID))).toBe(false);
+  });
+});
+
 describe("pairing v3: retention", () => {
   it("expired token rows are swept immediately at expiry and their consumed or expired ledger invites are purged on the 30-day window", async () => {
     const owner = makeIdentity("owner");
@@ -509,17 +604,17 @@ describe("pairing v3: retention", () => {
     const live = await createInvite(owner);
     const used = await createInvite(owner, {}, 1);
     await send(acceptOp(owner, approver, used, {}, null, NOW + 1));
-    expect(await tokenRowCount()).toBe(1); // the consumed invite's row went with the accept
+    expect(await tokenRowCount()).toBe(2); // the consumed invite's row stays as a tombstone until expiry
     expect((await lookup(live.token)).payload.inviteID).toBe(live.inviteID);
 
     // Before expiry nothing is swept.
     let summary = await purgeExpiredRecords(testPool(), 30, NOW + TTL - 10);
     expect(summary.purgedInviteTokens).toBe(0);
-    expect(await tokenRowCount()).toBe(1);
+    expect(await tokenRowCount()).toBe(2);
 
     // At expiry the token row is swept even though the ledger invite is retained for 30 days.
     summary = await purgeExpiredRecords(testPool(), 30, NOW + TTL + 5);
-    expect(summary.purgedInviteTokens).toBe(1);
+    expect(summary.purgedInviteTokens).toBe(2);
     expect(await tokenRowCount()).toBe(0);
     await expect(lookup(live.token, NOW + TTL + 5)).rejects.toMatchObject({ code: "not_found" });
 

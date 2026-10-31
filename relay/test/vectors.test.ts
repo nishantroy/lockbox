@@ -16,6 +16,8 @@ import {
   canonicalBytes,
   deviceIdentityID,
   inviteTokenHash,
+  inviteLookupKey,
+  acceptanceProof,
   isWellFormedInviteToken,
   secondsToSwiftDate
 } from "../src/canonical.js";
@@ -26,6 +28,7 @@ import {
   encodeRelayResult,
   encodeInboxResponse,
   decodeInvitation,
+  encodeInvitation,
   verifyInvitationSignature,
   decodeApproval,
   verifyApprovalSignature,
@@ -82,13 +85,26 @@ describe("identity ID derivation", () => {
   });
 });
 
-describe("invite token hash derivation (pairing v3)", () => {
-  it("matches InviteToken.hash(_:)", () => {
+describe("invite token derivations (pairing v3)", () => {
+  it("lookup key, invite token hash and acceptance proof match InviteToken in Swift", () => {
     const v = vectors.inviteToken;
     expect(isWellFormedInviteToken(v.token)).toBe(true);
     expect(v.token).toHaveLength(22);
-    expect(inviteTokenHash(v.token).toString("base64")).toBe(v.expectedHashBase64);
+    expect(inviteLookupKey(v.token).toString("base64")).toBe(v.lookupKeyBase64);
+    expect(inviteTokenHash(v.token, Buffer.from(v.ownerPublicKeyBase64, "base64"), v.inviteID).toString("base64")).toBe(v.tokenHashBase64);
+    expect(acceptanceProof(v.token, Buffer.from(v.approverPublicKeyBase64, "base64"), v.acceptanceID).toString("base64")).toBe(v.proofBase64);
   });
+});
+
+describe("display names: Swift-signed invites with tricky names verify and round-trip in TS", () => {
+  for (const entry of vectors.displayNameInvites as Array<{ label: string; name: string; invitationJSON: string }>) {
+    it(entry.label, () => {
+      const invitation = decodeInvitation(JSON.parse(entry.invitationJSON));
+      expect(invitation.payload.ownerDisplayName).toBe(entry.name);
+      expect(verifyInvitationSignature(invitation)).toBe(true);
+      expect(encodeInvitation(invitation)).toEqual(JSON.parse(entry.invitationJSON));
+    });
+  }
 });
 
 describe("signature checks (generic crypto/domain-separation vectors)", () => {
@@ -111,8 +127,9 @@ const payloadDecoders: Record<string, (payload: unknown) => void> = {
   invite: (payload) => {
     const invitation = decodeInvitation(payload);
     expect(verifyInvitationSignature(invitation)).toBe(true);
-    // The Swift-signed v3 invite covers the token hash, owner name and granted scopes.
-    expect(invitation.payload.tokenHash.toString("base64")).toBe(inviteTokenHash(vectors.inviteToken.token).toString("base64"));
+    // The Swift-signed v3 invite covers the token hash, lookup key, owner name and granted scopes.
+    expect(invitation.payload.tokenHash.toString("base64")).toBe(vectors.inviteToken.tokenHashBase64);
+    expect(invitation.payload.lookupKey.toString("base64")).toBe(vectors.inviteToken.lookupKeyBase64);
     expect(invitation.payload.ownerDisplayName).toBe("Alex");
     expect(invitation.payload.grantedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
   },
@@ -121,7 +138,8 @@ const payloadDecoders: Record<string, (payload: unknown) => void> = {
     expect(signed.acceptance.acceptanceID.length).toBeGreaterThan(0);
     // The Swift-signed v3 acceptance verifies in TS and carries the token, name and scopes.
     expect(verifySignedAcceptanceSignature(signed)).toBe(true);
-    expect(signed.acceptance.token).toBe(vectors.inviteToken.token);
+    expect(signed.acceptance.lookupKey.toString("base64")).toBe(vectors.inviteToken.lookupKeyBase64);
+    expect(signed.acceptance.tokenProof.toString("base64")).toBe(vectors.inviteToken.proofBase64);
     expect(signed.acceptance.approverDisplayName).toBe("Sam");
     expect(signed.acceptance.acceptedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
   },

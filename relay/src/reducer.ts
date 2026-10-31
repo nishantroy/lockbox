@@ -31,7 +31,7 @@ import {
   isValidIdentifier
 } from "./protocol.js";
 import type { SignedOperation, Pairing } from "./protocol.js";
-import { canonicalBytes, digest, base64url, COMPANION_VERSION, inviteTokenHash } from "./canonical.js";
+import { canonicalBytes, digest, base64url, COMPANION_VERSION } from "./canonical.js";
 import { timingSafeEqual } from "node:crypto";
 import type { Ledger } from "./ledger.js";
 import { relayError, type RelayErrorCode } from "./errors.js";
@@ -178,7 +178,7 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       const invitation = decodeInvitation(JSON.parse(payload.toString("utf8")));
       if (!identitiesEqual(signer, owner) || !identitiesEqual(invitation.payload.owner, owner)) fail("unauthorized");
       if (now >= invitation.payload.expiresAt) fail("expired");
-      if (now < invitation.payload.issuedAt - 60) fail("malformed");
+      if (now < invitation.payload.issuedAt - 300) fail("malformed");
       if (!verifyInvitationSignature(invitation)) fail("invalid_signature");
       if (ledger.invitations[invitation.payload.inviteID]) fail("replay");
       ledger.invitations[invitation.payload.inviteID] = { invitation, consumedAt: null };
@@ -196,24 +196,33 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       if (!identitiesEqual(acceptance.owner, owner)) fail("unauthorized");
       const inviteRecord = ledger.invitations[acceptance.inviteID];
       const invitePayload = inviteRecord?.invitation.payload;
-      // Unknown invite, foreign invite, a pre-v3 invite without a token hash
-      // and a wrong token are one indistinguishable failure: the token is the
-      // bearer secret, so nothing may be revealed to someone who does not hold it.
+      // Unknown invite, foreign invite, a pre-v3 invite without a lookup key
+      // and a wrong lookup key are one indistinguishable failure. The relay
+      // never sees the token and cannot verify `tokenProof`; the OWNER device
+      // does (JoinedAcceptanceCheck), so a relay that fabricates an acceptance
+      // using the lookup key it stores cannot make the owner trust it.
       if (
         !inviteRecord ||
         !invitePayload ||
         !identitiesEqual(invitePayload.owner, owner) ||
-        !Buffer.isBuffer(invitePayload.tokenHash) ||
-        !tokenMatches(invitePayload.tokenHash, acceptance.token) ||
+        !Buffer.isBuffer(invitePayload.lookupKey) ||
+        !bufferEquals(invitePayload.lookupKey, acceptance.lookupKey) ||
         !verifySignedAcceptanceSignature(signed)
       ) {
         fail("unauthorized");
       }
-      // The caller proved possession of the token; from here distinct,
-      // actionable errors are fine.
-      if (inviteRecord.consumedAt !== null) fail("replay");
+      if (acceptance.issuedAt > now + ACCEPT_FUTURE_SKEW_SECONDS) fail("malformed");
+      if (inviteRecord.consumedAt !== null) {
+        // A retry of a lost response under a new operation ID: if this same
+        // approver already holds the active pairing this invite created,
+        // return it rather than reporting a replay.
+        const existing = ledger.pairings[derivedPairingID(acceptance.inviteID, acceptance.approver.identityID)];
+        if (existing && existing.pairing.state === "active" && identitiesEqual(existing.pairing.approver, acceptance.approver)) {
+          return { kind: "pairing", value: existing.pairing };
+        }
+        fail("replay");
+      }
       if (now >= invitePayload.expiresAt) fail("expired");
-      if (acceptance.issuedAt > now + 60 || acceptance.issuedAt < invitePayload.issuedAt - 60 || acceptance.issuedAt >= invitePayload.expiresAt) fail("expired");
       // The friend must accept exactly the scopes the owner granted.
       if (acceptance.acceptedScopes.join(",") !== [...invitePayload.grantedScopes].sort().join(",")) fail("consent_required");
       const pairingID = derivedPairingID(acceptance.inviteID, acceptance.approver.identityID);
@@ -603,11 +612,13 @@ function revokeConsent(ledger: Ledger, pairingID: string, now: number): void {
   consent.updatedAt = now;
 }
 
-/** Constant-time comparison of the presented token's hash against the owner-signed hash. */
-function tokenMatches(signedHash: Buffer, token: string): boolean {
-  const presented = inviteTokenHash(token);
-  return signedHash.length === presented.length && timingSafeEqual(signedHash, presented);
+/** Constant-time buffer comparison. */
+function bufferEquals(a: Buffer, b: Buffer): boolean {
+  return a.length === b.length && timingSafeEqual(a, b);
 }
+
+/** How far ahead of the relay's clock a friend's acceptance may be stamped (device clock skew), in seconds. */
+const ACCEPT_FUTURE_SKEW_SECONDS = 300;
 
 function derivedPairingID(inviteID: string, approverIdentityID: string): string {
   // Port of the `confirm` case's pairing ID derivation:

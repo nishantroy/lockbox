@@ -188,11 +188,39 @@ out["framing"] = [
 let fixedInviteToken = b64url(Data((1...16).map { UInt8($0) }))
 assert(InviteToken.isWellFormed(fixedInviteToken))
 
+let fixedInviteID = "fixture-invite-01"
+let fixedAcceptanceID = "fixture-acceptance-01"
+
 out["inviteToken"] = [
-    "domain": "\(version).invite-token",
     "token": fixedInviteToken,
-    "expectedHashBase64": InviteToken.hash(fixedInviteToken).base64EncodedString()
+    "inviteID": fixedInviteID,
+    "acceptanceID": fixedAcceptanceID,
+    "ownerPublicKeyBase64": ownerSigner.identity.publicKey.base64EncodedString(),
+    "approverPublicKeyBase64": approverSigner.identity.publicKey.base64EncodedString(),
+    "lookupKeyBase64": InviteToken.lookupKey(fixedInviteToken).base64EncodedString(),
+    "tokenHashBase64": InviteToken.inviteHash(token: fixedInviteToken, ownerPublicKey: ownerSigner.identity.publicKey,
+                                              inviteID: fixedInviteID).base64EncodedString(),
+    "proofBase64": InviteToken.acceptanceProof(token: fixedInviteToken, approverPublicKey: approverSigner.identity.publicKey,
+                                               acceptanceID: fixedAcceptanceID).base64EncodedString()
 ]
+
+// Display names that exercise Unicode handling: the exact UTF-8 bytes are signed, so Swift and
+// TS must agree on NFD (decomposed), astral and ZWJ-sequence names.
+var displayNameInvites: [[String: Any]] = []
+for (label, name) in [("nfd-decomposed", "Jose\u{301}"), ("astral", "\u{1D49C}lex"),
+                      ("emoji-zwj-family", "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+                      ("max-40-scalars", String(repeating: "\u{1F600}", count: 40))] {
+    let namedPayload = try InvitePayload(
+        inviteID: "fixture-name-\(label)", owner: ownerSigner.identity, issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt,
+        nonce: fixedNonce,
+        tokenHash: InviteToken.inviteHash(token: fixedInviteToken, ownerPublicKey: ownerSigner.identity.publicKey, inviteID: "fixture-name-\(label)"),
+        lookupKey: InviteToken.lookupKey(fixedInviteToken), ownerDisplayName: name)
+    let namedSignature = try ownerSigner.sign(domain: "\(version).invite.v3", fields: namedPayload.signingFields())
+    let namedInvitation = try Invitation(payload: namedPayload, signature: namedSignature)
+    displayNameInvites.append(["label": label, "name": name,
+                               "invitationJSON": String(decoding: try encodeSorted(namedInvitation), as: UTF8.self)])
+}
+out["displayNameInvites"] = displayNameInvites
 
 // MARK: - Signature checks (generic crypto/domain-separation vectors)
 
@@ -216,9 +244,11 @@ func addSignatureCheck(label: String, domain: String, fields: [String], signer: 
 }
 
 // Invitation payload signature: valid, wrong-key, cross-domain, tampered-bytes.
-let invitePayload = try InvitePayload(inviteID: "fixture-invite-01", owner: ownerSigner.identity,
+let invitePayload = try InvitePayload(inviteID: fixedInviteID, owner: ownerSigner.identity,
                                       issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt, nonce: fixedNonce,
-                                      tokenHash: InviteToken.hash(fixedInviteToken), ownerDisplayName: "Alex",
+                                      tokenHash: InviteToken.inviteHash(token: fixedInviteToken, ownerPublicKey: ownerSigner.identity.publicKey,
+                                                                        inviteID: fixedInviteID),
+                                      lookupKey: InviteToken.lookupKey(fixedInviteToken), ownerDisplayName: "Alex",
                                       grantedScopes: [.approveEarlyEnd, .receiveRequests])
 let inviteDomain = "\(version).invite.v3"
 let inviteFields = invitePayload.signingFields()
@@ -260,7 +290,7 @@ do {
 }
 
 // Acceptance payload signature: valid, wrong-key.
-let acceptance = try PairingAcceptance(acceptanceID: "fixture-acceptance-01", invite: invitePayload,
+let acceptance = try PairingAcceptance(acceptanceID: fixedAcceptanceID, invite: invitePayload,
                                        token: fixedInviteToken, approver: approverSigner.identity,
                                        approverDisplayName: "Sam", issuedAt: acceptanceIssuedAt)
 let acceptanceDomain = "\(version).acceptance.v3"

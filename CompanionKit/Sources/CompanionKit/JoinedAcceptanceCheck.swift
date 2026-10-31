@@ -6,38 +6,37 @@ import Foundation
 ///
 /// v3 removed the owner's confirm step, so the owner no longer creates the
 /// pairing record itself; the relay reports it in the inbox. A relay must not
-/// be able to invent a trusted person, so each reported pairing comes with
-/// the friend-signed acceptance that created it
-/// (`InboxResponse.acceptances`), and this check proves, against state the
-/// owner device already holds, that:
+/// be able to invent a trusted person, so each reported pairing comes with the
+/// friend-signed acceptance that created it (`InboxResponse.acceptances`), and
+/// this check proves, against state the owner device already holds, that:
 ///
 /// - the acceptance is signed by the approver key named in the pairing,
-/// - it answers an invite **this device created** (`invite` is passed in from
-///   the device's own store, never from the relay),
-/// - it carries that invite's token (so the signer held the link), and accepts
-///   exactly the scopes the owner granted,
-/// - it was issued inside the invite's validity window,
+/// - it answers an invite **this device created** (`issued` comes from the
+///   device's own store, never from the relay),
+/// - its `tokenProof` equals `H("accept-proof", token, approverPublicKey,
+///   acceptanceID)` for the token this device generated. Only a holder of the
+///   link can compute that: the relay never sees the token and knows only the
+///   lookup key, so it cannot fabricate an acceptance the owner will trust,
+/// - it carries the invite's lookup key and accepts exactly the scopes the owner granted,
 /// - the pairing's ID, owner, approver and names are exactly what that
 ///   acceptance and invite imply.
 ///
 /// What it cannot prove: that the key belongs to the person the owner
 /// intended. Whoever holds an unexpired, unused link can join (the accepted
-/// risk in `docs/companion-security.md`); a relay that sees the token in
-/// transit could race the friend. Both are bounded by the owner seeing every
-/// person and being able to remove them.
+/// risk in `docs/companion-security.md`). That risk is "link holders", not the
+/// relay. It is bounded by the owner seeing every person and being able to
+/// remove them.
 public enum JoinedAcceptanceCheck {
-    /// Allowed clock skew between the acceptance's `issuedAt` and the invite's window.
-    private static let skew: TimeInterval = 60
-
     /// - Parameters:
     ///   - signedAcceptance: One entry from `InboxResponse.acceptances`.
     ///   - pairing: The `InboxResponse.pairings` entry it is claimed to have created.
-    ///   - invite: This device's own stored `Invitation` with `payload.inviteID == acceptance.inviteID`.
+    ///   - issued: This device's own stored invite for `acceptance.inviteID`, including its token.
     ///   - ownerIdentity: This device's owner identity.
     /// - Throws: `CompanionError` describing the first failed check.
-    public static func verify(signedAcceptance: SignedAcceptance, pairing: Pairing, invite: Invitation,
+    public static func verify(signedAcceptance: SignedAcceptance, pairing: Pairing, issued: IssuedInvite,
                               ownerIdentity: DeviceIdentity) throws {
         let acceptance = signedAcceptance.acceptance
+        let invite = issued.invitation
         try signedAcceptance.validateSignature()
         try invite.validateSignature()
         guard ownerIdentity.role == .owner,
@@ -46,15 +45,17 @@ public enum JoinedAcceptanceCheck {
               acceptance.inviteID == invite.payload.inviteID else {
             throw CompanionError.unauthorized
         }
-        guard InviteToken.matches(acceptance.token, hash: invite.payload.tokenHash) else {
+        // The stored token must be the one this invite was issued for, and the acceptance must prove it.
+        guard InviteToken.matches(issued.token, payload: invite.payload),
+              InviteToken.constantTimeEqual(acceptance.lookupKey, invite.payload.lookupKey),
+              InviteToken.constantTimeEqual(
+                acceptance.tokenProof,
+                InviteToken.acceptanceProof(token: issued.token, approverPublicKey: acceptance.approver.publicKey,
+                                            acceptanceID: acceptance.acceptanceID)) else {
             throw CompanionError.unauthorized
         }
         guard acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invite.payload.grantedScopes else {
             throw CompanionError.consentRequired
-        }
-        guard acceptance.issuedAt >= invite.payload.issuedAt.addingTimeInterval(-skew),
-              acceptance.issuedAt < invite.payload.expiresAt else {
-            throw CompanionError.expired
         }
         try pairing.validate()
         guard pairing.owner == ownerIdentity,
@@ -66,19 +67,39 @@ public enum JoinedAcceptanceCheck {
         }
     }
 
-    /// Convenience over a whole inbox: returns the pairings (keyed by pairing
-    /// ID) whose acceptance verifies against one of `invites` (this device's
-    /// own invites, keyed by invite ID). Anything that fails is silently
-    /// excluded, so a relay-supplied pairing that cannot be proven never
-    /// reaches the UI as a person who "joined".
-    public static func verifiedPairings(in inbox: InboxResponse, invites: [String: Invitation],
-                                        ownerIdentity: DeviceIdentity) -> [Pairing] {
+    /// The outcome of checking a whole inbox.
+    public struct Result: Sendable, Equatable {
+        /// Active pairings proven to answer an invite this device created.
+        public let verified: [Pairing]
+        /// Integrity problems the UI should surface (for example a relay reporting two
+        /// acceptances for one single-use invite). Pairings for such invites are excluded.
+        public let integrityWarnings: [String]
+    }
+
+    /// Filters an inbox to the pairings this device can prove. Anything that fails
+    /// is excluded, so a relay-supplied pairing that cannot be proven never
+    /// reaches the UI as a person who "joined". Revoked pairings are not "joined".
+    /// An invite is single use, so more than one acceptance for the same invite ID
+    /// means a misbehaving relay (or a bug): every pairing for it is rejected and a
+    /// warning is returned.
+    ///
+    /// Pairings created before v3 or by `replace_pairing` carry no acceptance and
+    /// are never returned here; the caller needs another trust source for them.
+    public static func verifiedPairings(in inbox: InboxResponse, invites: [String: IssuedInvite],
+                                        ownerIdentity: DeviceIdentity) -> Result {
         let acceptances = inbox.acceptances ?? []
-        return (inbox.pairings ?? []).filter { pairing in
-            acceptances.contains { signed in
-                guard let invite = invites[signed.acceptance.inviteID] else { return false }
-                return (try? verify(signedAcceptance: signed, pairing: pairing, invite: invite, ownerIdentity: ownerIdentity)) != nil
+        var countsByInvite: [String: Int] = [:]
+        for signed in acceptances { countsByInvite[signed.acceptance.inviteID, default: 0] += 1 }
+        let duplicated = Set(countsByInvite.filter { $0.value > 1 }.keys)
+        let warnings = duplicated.sorted().map { "relay reported more than one acceptance for single-use invite \($0)" }
+        let verified = (inbox.pairings ?? []).filter { pairing in
+            guard pairing.state == .active else { return false }
+            return acceptances.contains { signed in
+                guard !duplicated.contains(signed.acceptance.inviteID),
+                      let issued = invites[signed.acceptance.inviteID] else { return false }
+                return (try? verify(signedAcceptance: signed, pairing: pairing, issued: issued, ownerIdentity: ownerIdentity)) != nil
             }
         }
+        return Result(verified: verified, integrityWarnings: warnings)
     }
 }

@@ -25,11 +25,11 @@ public protocol AsyncCompanionTransport: Sendable {
     /// intentionally outside this package and never authorizes an action.
     func fetchInbox(_ operation: SignedOperation) async throws -> InboxResponse
 
-    /// Pairing v3: `POST /v1/invite/lookup`. Unauthenticated (the friend has
-    /// no identity yet); resolves a link token to the owner-signed invitation
-    /// while it is unexpired and unused. The caller must verify the result
+    /// Pairing v3: `POST /v1/invite/lookup {"lookupKey"}`. Unauthenticated (the
+    /// friend has no identity yet); resolves an invite lookup key (never the
+    /// token) to the owner-signed invitation while it is unexpired and unused. The caller must verify the result
     /// (`Invitation.validate(at:matchingToken:)`), never trust the relay.
-    func lookupInvite(token: String) async throws -> Invitation
+    func lookupInvite(lookupKey: String) async throws -> Invitation
 }
 
 public extension AsyncCompanionTransport {
@@ -37,7 +37,7 @@ public extension AsyncCompanionTransport {
         throw CompanionError.notFound
     }
 
-    func lookupInvite(token: String) async throws -> Invitation {
+    func lookupInvite(lookupKey: String) async throws -> Invitation {
         throw CompanionError.notFound
     }
 }
@@ -331,10 +331,10 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         return response
     }
 
-    public func lookupInvite(token: String) async throws -> Invitation {
-        struct LookupBody: Encodable { let token: String }
+    public func lookupInvite(lookupKey: String) async throws -> Invitation {
+        struct LookupBody: Encodable { let lookupKey: String }
         struct LookupResponse: Decodable { let invitation: Invitation }
-        let response: LookupResponse = try await post(path: "v1/invite/lookup", body: LookupBody(token: token))
+        let response: LookupResponse = try await post(path: "v1/invite/lookup", body: LookupBody(lookupKey: lookupKey))
         return response.invitation
     }
 
@@ -434,7 +434,12 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         struct ErrorBody: Decodable { let error: String }
         let decodedCode = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
         switch status {
-        case 400, 401, 403, 404, 409, 413, 429:
+        case 404:
+            // Only the relay's own JSON error ({"error":"not_found"}) is a not-found answer;
+            // a bare 404 (wrong path, a proxy or CDN page) is "relay unavailable".
+            guard let decodedCode else { return .unavailable }
+            return .server(.fromTransportCode(decodedCode))
+        case 400, 401, 403, 409, 413, 429:
             return .server(.fromTransportCode(decodedCode ?? Self.defaultCode(for: status)))
         case 500...599:
             return .unavailable
@@ -498,7 +503,8 @@ public struct AsyncCompanionClient: Sendable {
         guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
         let payload = try InvitePayload(inviteID: inviteID, owner: signer.identity, issuedAt: now,
                                         expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? randomNonce(),
-                                        tokenHash: InviteToken.hash(token), ownerDisplayName: ownerDisplayName,
+                                        tokenHash: InviteToken.inviteHash(token: token, ownerPublicKey: signer.identity.publicKey, inviteID: inviteID),
+                                        lookupKey: InviteToken.lookupKey(token), ownerDisplayName: ownerDisplayName,
                                         grantedScopes: grantedScopes)
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: signature)
@@ -510,7 +516,7 @@ public struct AsyncCompanionClient: Sendable {
     /// (owner signature, still live, hash binds this exact token).
     public func lookupInvite(token: String) async throws -> Invitation {
         guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
-        let invitation = try await transport.lookupInvite(token: token)
+        let invitation = try await transport.lookupInvite(lookupKey: InviteToken.lookupKeyString(token))
         try invitation.validate(at: now(), matchingToken: token)
         return invitation
     }

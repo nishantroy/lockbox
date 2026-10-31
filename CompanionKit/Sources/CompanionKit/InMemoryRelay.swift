@@ -203,7 +203,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard acceptance.owner == snapshot.owner,
                   snapshot.usedInviteIDs.contains(acceptance.inviteID),
                   let invitation = invitations[acceptance.inviteID], invitation.payload.owner == snapshot.owner,
-                  InviteToken.matches(acceptance.token, hash: invitation.payload.tokenHash),
+                  InviteToken.constantTimeEqual(acceptance.lookupKey, invitation.payload.lookupKey),
                   acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invitation.payload.grantedScopes,
                   let pairing = pairings[pairingID], pairing.approver == acceptance.approver,
                   joinedPairingIDs.insert(pairingID).inserted else {
@@ -405,10 +405,12 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     /// invitation while it is unexpired and unused; unknown, expired and used
     /// are one indistinguishable `notFound`. (Rate limiting is the HTTP relay's
     /// job; this process-local reference relay has no clients to throttle.)
-    public func lookupInvite(token: String) throws -> Invitation {
+    public func lookupInvite(lookupKey: String) throws -> Invitation {
         lock.lock(); defer { lock.unlock() }
-        guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
-        guard let invitation = invitations.values.first(where: { InviteToken.matches(token, hash: $0.payload.tokenHash) }),
+        guard let key = dataFromBase64URL(lookupKey), key.count == 32, base64URL(key) == lookupKey else {
+            throw CompanionError.malformed("invalid invite lookup key")
+        }
+        guard let invitation = invitations.values.first(where: { InviteToken.constantTimeEqual($0.payload.lookupKey, key) }),
               !usedInviteIDs.contains(invitation.payload.inviteID),
               currentTime < invitation.payload.expiresAt else { throw CompanionError.notFound }
         return invitation
@@ -491,8 +493,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard operation.signer == owner, invitation.payload.owner == owner else { throw CompanionError.unauthorized }
             try invitation.validate(at: currentTime)
             guard invitations[invitation.payload.inviteID] == nil, !usedInviteIDs.contains(invitation.payload.inviteID) else { throw CompanionError.replay }
-            // A token hash identifies exactly one invite (the lookup key).
-            guard !invitations.values.contains(where: { $0.payload.tokenHash == invitation.payload.tokenHash }) else { throw CompanionError.replay }
+            // A lookup key identifies exactly one invite.
+            guard !invitations.values.contains(where: { $0.payload.lookupKey == invitation.payload.lookupKey }) else { throw CompanionError.replay }
             invitations[invitation.payload.inviteID] = invitation
             return .invitation(invitation)
 
@@ -504,18 +506,27 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard operation.signer == acceptance.approver else { throw CompanionError.unauthorized }
             try acceptance.validate()
             guard acceptance.owner == owner else { throw CompanionError.unauthorized }
-            // Unknown invite, wrong token and a bad signature are one indistinguishable failure.
+            // Unknown invite, wrong lookup key and a bad signature are one indistinguishable
+            // failure. The relay never sees the token and cannot check `tokenProof`; the
+            // owner does (JoinedAcceptanceCheck).
             guard let invitation = invitations[acceptance.inviteID], invitation.payload.owner == owner,
-                  InviteToken.matches(acceptance.token, hash: invitation.payload.tokenHash),
+                  InviteToken.constantTimeEqual(acceptance.lookupKey, invitation.payload.lookupKey),
                   verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance.v3",
                          fields: acceptance.signingFields(), key: acceptance.approver.publicKey) else {
                 throw CompanionError.unauthorized
             }
-            guard !usedInviteIDs.contains(acceptance.inviteID) else { throw CompanionError.replay }
-            guard currentTime < invitation.payload.expiresAt,
-                  acceptance.issuedAt <= currentTime.addingTimeInterval(60),
-                  acceptance.issuedAt >= invitation.payload.issuedAt.addingTimeInterval(-60),
-                  acceptance.issuedAt < invitation.payload.expiresAt else { throw CompanionError.expired }
+            guard acceptance.issuedAt <= currentTime.addingTimeInterval(CompanionLimits.pairingClockSkew) else {
+                throw CompanionError.malformed("acceptance is from the future")
+            }
+            let existingPairingID = Pairing.derivedID(inviteID: acceptance.inviteID, approverIdentityID: acceptance.approver.identityID)
+            if usedInviteIDs.contains(acceptance.inviteID) {
+                // A retry of a lost response under a new operation ID returns this same approver's pairing.
+                if let existing = pairings[existingPairingID], existing.state == .active, existing.approver == acceptance.approver {
+                    return .pairing(existing)
+                }
+                throw CompanionError.replay
+            }
+            guard currentTime < invitation.payload.expiresAt else { throw CompanionError.expired }
             guard acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invitation.payload.grantedScopes else {
                 throw CompanionError.consentRequired
             }

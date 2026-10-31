@@ -211,10 +211,10 @@ await expectRejection("the invite is single use: the link no longer resolves") {
 // MARK: - 3. Owner's inbox shows who joined, with a verifiable friend-signed acceptance
 
 await step("owner's inbox shows the joined pairing and JoinedAcceptanceCheck proves it") {
-    guard let invitation, let pairing else { throw SmokeError.unexpected("missing invitation or pairing") }
+    guard let issuedInvite, let pairing else { throw SmokeError.unexpected("missing invite or pairing") }
     let response = try await ownerClient.fetchInboxResponse()
     let verified = JoinedAcceptanceCheck.verifiedPairings(
-        in: response, invites: [invitation.payload.inviteID: invitation], ownerIdentity: ownerSigner.identity)
+        in: response, invites: [issuedInvite.invitation.payload.inviteID: issuedInvite], ownerIdentity: ownerSigner.identity).verified
     guard verified.contains(where: { $0.pairingID == pairing.pairingID }) else {
         throw SmokeError.unexpected("owner inbox did not deliver a verifiable joined pairing")
     }

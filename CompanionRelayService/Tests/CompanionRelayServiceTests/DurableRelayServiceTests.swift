@@ -36,7 +36,9 @@ final class DurableRelayServiceTests: XCTestCase {
         let token = InviteToken.generate()
         let payload = try InvitePayload(inviteID: "durable-invite", owner: ownerSigner.identity, issuedAt: now,
                                         expiresAt: now.addingTimeInterval(600), nonce: Data(repeating: 3, count: 24),
-                                        tokenHash: InviteToken.hash(token), ownerDisplayName: "Alex")
+                                        tokenHash: InviteToken.inviteHash(token: token, ownerPublicKey: ownerSigner.identity.publicKey,
+                                                                          inviteID: "durable-invite"),
+                                        lookupKey: InviteToken.lookupKey(token), ownerDisplayName: "Alex")
         let invitation = try Invitation(payload: payload, signature: try ownerSigner.sign(
             domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields()))
         _ = try service.submit(try DurableOperationFactory.make(kind: "invite", operationID: "inv", expectedRevision: 0,
