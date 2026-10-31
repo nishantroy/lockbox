@@ -23,9 +23,14 @@ struct PeopleView: View {
     static let waitingScrollID = "people.waitingForYou"
 
 #if canImport(CompanionKit)
+    /// A link is loading or ready to accept. A failed link doesn't count: the
+    /// owner name field and the paste card come back, so Create is never
+    /// left disabled without its name field (UX re-check P2-A).
     private var incomingLinkIsOpen: Bool {
-        if case .none = companion.incomingInvite { return false }
-        return true
+        switch companion.incomingInvite {
+        case .loading, .ready: return true
+        case .none, .failed: return false
+        }
     }
 
     private var incomingInviteKey: String {

@@ -459,3 +459,15 @@ Builder: Claude Sonnet (`claude-sonnet-5-5`). Fixes after the Opus review of 3de
 - **Final, 1bfd9dc.** Unit suite: **138 tests, 0 failures, 1 skipped**. The UI suite result above stands, since the later change touched only unit tests.
 - **Merged** into `r5-relay` as 8ccaf7a. The merged tree is identical to the tested `p3d-ux` tree.
 - **Code review:** Opus review of 3dea6ff and 20397f9. 20397f9 approved. P3d changes requested (P1-1 Waiting history, P2-1 to P2-4), all fixed in af4748a.
+
+### P3d UX re-check (Claude Opus, independent; 2026-10-31)
+
+All original P1–P3 items are fixed (P2-5 and P3-2 deferred by the owner). The re-check found one new problem:
+- **P2-A (fixed by the parent):** after a failed link, Create was disabled with its name field hidden. `incomingLinkIsOpen` now covers only `.loading`/`.ready`.
+
+Final suites after the fix: unit **138 tests, 0 failures, 1 skipped**; UI **4/4 passed**.
+
+Deferred polish for the next slice:
+- **P3-A:** Waiting row copy. Title "Dana asks to end a lock early", detail "Asked at 11:55 AM", no badge in the Waiting card.
+- **P3-B:** the inline and Settings name fields use a pure-black `.roundedBorder`; match the card field style.
+- **P3-C:** a helper-only device still sees the full first-run invite pitch.
