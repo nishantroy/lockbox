@@ -46,7 +46,7 @@ Review new/untracked sources as well as `git diff`. Most app implementation rema
 
 ## Companion pairing UI test (`PhoneLockboxUITests`)
 
-`PhoneLockboxUITests` (XCUITest) drives the owner side of companion pairing in the simulator against a **local** relay, with a scripted in-process "friend" (a fresh, in-memory `CompanionKit` identity — see `tools/relay-smoke` for the pattern it mirrors). It needs a running local relay, so it is listed in the `PhoneLockbox` scheme's test action but marked `skipped = YES` there (review P2-4): a bare `xcodebuild test -scheme PhoneLockbox` (or Xcode's own Product > Test) runs only `PhoneLockboxTests` and never needs the relay. Run the UI tests deliberately with `-only-testing:PhoneLockboxUITests`, which overrides the scheme's skip:
+`PhoneLockboxUITests` (XCUITest) drives the owner side of companion pairing in the simulator against a **local** relay, with a scripted in-process "friend" (a fresh, in-memory `CompanionKit` identity — see `tools/relay-smoke` for the pattern it mirrors). It needs a running local relay, so it is **not** a test target of the `PhoneLockbox` scheme (review P2-4; `-only-testing` cannot override a skipped testable in this Xcode). `xcodebuild test -scheme PhoneLockbox` (or Xcode's Product > Test) runs only `PhoneLockboxTests` and never needs the relay. Run the UI tests deliberately with their own scheme, `-scheme PhoneLockboxUITests`:
 
 ```bash
 lsof -nP -iTCP:8002 -sTCP:LISTEN          # confirm the port is free first
@@ -54,17 +54,16 @@ cd relay
 npm install                               # first run only
 cp .env.example .env                      # first run only
 npm run db:migrate                        # Postgres on 56330; `npm run db:start` first if it isn't running
-npm run dev                                # leave running in this shell/process
+npm run dev:test                           # leave running (high local rate limit) in this shell/process
 ```
 
 Then, from the repo root, with a booted simulator (discover its ID with `xcrun simctl list devices available`; do not reuse a guessed ID):
 
 ```bash
 xcodegen generate
-xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox \
+xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockboxUITests \
   -destination 'platform=iOS Simulator,id=<simulator-id>' \
   -configuration Debug -derivedDataPath DerivedData \
-  -only-testing:PhoneLockboxUITests \
   -resultBundlePath <path>.xcresult \
   test
 ```
