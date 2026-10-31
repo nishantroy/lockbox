@@ -64,6 +64,7 @@
 		BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */; };
 		C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		CC7FACFAFEEBA8A8C4901727 /* GalleryTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84197D5D974050762C5DC97 /* GalleryTheme.swift */; };
+		CE64409932253EE99055B4B3 /* CompanionLocalRelayFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */; };
 		CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */; };
 		DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4937C609973AA395FE5785C2 /* LockboxPolicy.swift */; };
 		E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */; };
@@ -166,6 +167,7 @@
 		4FC89584D6D8DB677376C818 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionPendingStore.swift; sourceTree = "<group>"; };
 		55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistantView.swift; sourceTree = "<group>"; };
+		5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionLocalRelayFlowTests.swift; sourceTree = "<group>"; };
 		58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldActionExtension.swift; sourceTree = "<group>"; };
 		5A49845AEC0FC73B3304327A /* GalleryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryViews.swift; sourceTree = "<group>"; };
 		63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeLifecycle.swift; sourceTree = "<group>"; };
@@ -349,6 +351,7 @@
 		5A805F511DE7EFE8BF45461A /* PhoneLockboxTests */ = {
 			isa = PBXGroup;
 			children = (
+				5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */,
 				366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */,
 				4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */,
 				EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */,
@@ -759,6 +762,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CE64409932253EE99055B4B3 /* CompanionLocalRelayFlowTests.swift in Sources */,
 				093C5AC93F07AA91632E9494 /* CompanionPairingV2Tests.swift in Sources */,
 				EE9DA6E228EF2D19028C2BDB /* FriendReleaseWiringTests.swift in Sources */,
 				E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */,
