@@ -302,3 +302,12 @@ Changes (wire format unchanged, no migration):
 4. Stale "confirm" comments fixed in `db.ts`. The `protocol.ts` and `retention.ts` mentions of "confirm" describe the removed step accurately and were left. `ledger.ts` untouched. `companion-security.md` does not list the scalars, so unchanged.
 
 Ran: `npm ci` in `relay/` (node_modules was missing); scratch database `p3c_proto` on 127.0.0.1:56330 (dropped afterwards); `DATABASE_URL=... npm test` gave 190/190 passed (11 files); `npm run typecheck` exit 0; `swift test --package-path CompanionKit` 164 tests, 0 failures; root `swift test` 177 tests, 0 failures. Not run: simulators, `xcodebuild`.
+
+### P3c-protocol review (Claude Opus, independent; 2026-10-31)
+
+**Approve**, no P0/P1. Exhaustive U+0000–10FFFF check: the Swift and TS blank sets are identical. Retention counting is correct with no double counting. `vectors.json` changed only signatures and derived IDs plus the 2 new entries. No wire or migration change. Reviewer ran CompanionKit 164/164, relay 190/190 (scratch DB), `tsc` clean.
+- P2-a (fixed by the parent in the merge follow-up): the retention comment now says the global sweep also deletes rows of owners the time-boxed run didn't reach.
+- P2-b (deferred, optional): acceptance vectors cover only 2 of the 7 new ranges. The logic is one shared predicate, and the exhaustive check covers it.
+- P2-c (accepted risk): a stored name made *only* of the new invisible scalars would be rejected if a pairing op re-sent it. Such names are invisible by design, not legitimate.
+
+Merged into `r5-relay` as `47bac5c` (compile-only: no app code changed). The production relay needs a forward-only redeploy, with no migration.

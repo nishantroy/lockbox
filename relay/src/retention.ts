@@ -270,7 +270,8 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
       changed = true;
       // Pairing v3: the token index row goes with its invite. It is a tombstone
       // (live, expired or consumed) until this point, purged at
-      // max(consumedAt, expiresAt) + 30d; the global sweep below only catches orphans.
+      // max(consumedAt, expiresAt) + 30d. The global sweep below also deletes rows of
+      // owners this time-boxed run did not reach, and orphans (counted there).
       summary.purgedInviteTokens += await deleteInviteToken(client, ownerID, inviteID);
     }
   }
