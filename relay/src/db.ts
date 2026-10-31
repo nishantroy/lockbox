@@ -263,7 +263,7 @@ export class PairingRoutingConflictError extends Error {
 }
 
 /**
- * Records a newly created pairing (from "confirm" or "replace_pairing") so
+ * Records a newly created pairing (from an accepted invite or "replace_pairing") so
  * it can be found by approver identity across owners. `pairing_id` is the
  * sole routing key a bare `Approval` (or an approver's inbox fetch) can use
  * to find its owner, so it must stay globally unique. A caller-chosen
@@ -275,7 +275,7 @@ export class PairingRoutingConflictError extends Error {
  * leave the index pointing at whichever owner claimed it first, silently
  * misrouting the other owner's approvals/inbox), a same-owner re-insert is
  * a harmless no-op (e.g. a partially-applied prior attempt) but a
- * different-owner conflict fails the whole transaction, so the "confirm"/
+ * different-owner conflict fails the whole transaction, so the accept/
  * "replace_pairing" operation that tried to claim it is rejected outright
  * and nothing commits.
  */
@@ -448,8 +448,9 @@ export async function consumeInviteToken(client: pg.Pool | pg.PoolClient, ownerI
 }
 
 /** Hard-deletes an invite's token row (only when the ledger invite itself is purged). Scoped by owner. */
-export async function deleteInviteToken(client: pg.Pool | pg.PoolClient, ownerID: string, inviteID: string): Promise<void> {
-  await client.query(`DELETE FROM companion_invite_token WHERE owner_id = $1 AND invite_id = $2`, [ownerID, inviteID]);
+export async function deleteInviteToken(client: pg.Pool | pg.PoolClient, ownerID: string, inviteID: string): Promise<number> {
+  const result = await client.query(`DELETE FROM companion_invite_token WHERE owner_id = $1 AND invite_id = $2`, [ownerID, inviteID]);
+  return result.rowCount ?? 0;
 }
 
 export interface InviteTokenRow {

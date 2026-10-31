@@ -292,3 +292,13 @@ Owns `relay/**`, `CompanionKit/Sources/CompanionKit/ProtocolModels.swift` (name 
 4. Fix the stale "confirm" comments in `relay/src/db.ts` and `protocol.ts`. Leave `ledger.ts` `pendingAcceptances?` alone: it reads old ledgers.
 
 Gates: an Opus code review of each, then the pre-push app suites, then the UX review on their screenshots.
+
+### P3c-protocol build results (Claude Sonnet, `claude-sonnet-5-5`, branch `p3c-protocol` from `4da3126`)
+
+Changes (wire format unchanged, no migration):
+1. `retention.ts`: stale comment at the per-owner `deleteInviteToken` call rewritten (token rows are tombstones until the ledger purge at `max(consumedAt, expiresAt) + 30d`; the global sweep only catches orphans).
+2. `deleteInviteToken` now returns the deleted row count and the per-owner purge adds it to `summary.purgedInviteTokens`. The existing retention tests assert `purgedInviteTokens` of 2 and 1 after the ledger purge.
+3. Blank scalars added to both `relay/src/protocol.ts` `isBlankScalar` and `PairingFields.isBlankScalar` (identical sets): U+E0100-E01EF, U+180B-180D, U+180F, U+17B4-17B5, U+206A-206F, U+1BCA0-1BCA3, U+FFF9-FFFB. Rejection tests on both sides. Swift-signed vectors `ideographic-vs` (U+8FBB U+E0100) and `mongolian-fvs` (U+1820 U+180B U+1821) prove these stay legal beside visible scalars; `vectors.json` regenerated (other entries' bytes also changed on regeneration; the TS suite verifies them).
+4. Stale "confirm" comments fixed in `db.ts`. The `protocol.ts` and `retention.ts` mentions of "confirm" describe the removed step accurately and were left. `ledger.ts` untouched. `companion-security.md` does not list the scalars, so unchanged.
+
+Ran: `npm ci` in `relay/` (node_modules was missing); scratch database `p3c_proto` on 127.0.0.1:56330 (dropped afterwards); `DATABASE_URL=... npm test` gave 190/190 passed (11 files); `npm run typecheck` exit 0; `swift test --package-path CompanionKit` 164 tests, 0 failures; root `swift test` 177 tests, 0 failures. Not run: simulators, `xcodebuild`.

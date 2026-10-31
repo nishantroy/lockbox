@@ -621,7 +621,8 @@ describe("pairing v3 review fixes", () => {
   it("names made only of invisible fillers are rejected", async () => {
     const owner = makeIdentity("owner");
     for (const name of ["\u3164", "\u2800", "\u115f\u1160", "\u2060", "\u00ad", "\u{e0041}", "\u200d", " \u3164\u200d ",
-      "\uffa0", "\u200c", "\u034f", "\u180e", "\u2061\u2062\u2063\u2064", "\ufe00", "\ufe0f", "\u{1d173}\u{1d17a}", " \uffa0\u200c\u034f\u180e\ufe0f "]) {
+      "\uffa0", "\u200c", "\u034f", "\u180e", "\u2061\u2062\u2063\u2064", "\ufe00", "\ufe0f", "\u{1d173}\u{1d17a}",
+      "\u{e0100}\u{e01ef}", "\u180b\u180c\u180d\u180f", "\u17b4\u17b5", "\u206a\u206f", "\u{1bca0}\u{1bca3}", "\ufff9\ufffa\ufffb", " \uffa0\u200c\u034f\u180e\ufe0f "]) {
       const invite = buildInvite(owner, NOW);
       (invite.invitation.payload as any).ownerDisplayName = name;
       await expectRejected(buildOperation({ kind: "invite", payload: invite.invitation, signer: owner, expectedRevision: null }), "malformed");
@@ -656,6 +657,7 @@ describe("pairing v3: retention", () => {
     // 31 days later the rows go with the (expired and consumed) ledger invites.
     summary = await purgeExpiredRecords(testPool(), 30, NOW + 31 * 86_400);
     expect(summary.purgedInvitations).toBe(2);
+    expect(summary.purgedInviteTokens).toBe(2); // the per-owner delete is counted, not just the global sweep
     expect(await tokenRowCount()).toBe(0);
     const row = await testPool().query<{ state: string }>(`SELECT state FROM companion_owner WHERE owner_id = $1`, [owner.identity.identityID]);
     expect(Object.keys(deserializeLedger(row.rows[0]!.state).invitations)).toHaveLength(0);
@@ -673,6 +675,7 @@ describe("pairing v3: retention", () => {
     // After expiresAt + 30d both go.
     summary = await purgeExpiredRecords(testPool(), 30, NOW + TTL + 30 * 86_400 + 60);
     expect(summary.purgedInvitations).toBe(1);
+    expect(summary.purgedInviteTokens).toBe(1);
     expect(await tokenRowCount()).toBe(0);
   });
 
