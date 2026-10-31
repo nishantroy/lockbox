@@ -9,6 +9,7 @@ import UIKit
 struct PeopleView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         LockboxScrollView {
@@ -17,17 +18,13 @@ struct PeopleView: View {
 
 #if canImport(CompanionKit)
             if companion.isAvailable {
-                // R5 pairing v2 UX fix item 7, and the owner-review
-                // follow-up: both placed first, directly under the
-                // Prototype label, so each is visible without scrolling —
-                // the incoming-invite prompt the moment a friend opens a
-                // link, and a pending acceptance the moment the owner
-                // learns someone accepted theirs.
-                if let invitation = companion.incomingInvite {
-                    IncomingInviteCard(companion: companion, invitation: invitation)
+                // Friend side: the opened invite link, in front of the user.
+                if case .none = companion.incomingInvite {} else {
+                    IncomingInviteCard(companion: companion)
                 }
-                ForEach(companion.pendingOwnerAcceptances) { item in
-                    PendingAcceptanceCard(companion: companion, item: item)
+                // Owner side: one-time, dismissable, non-blocking.
+                ForEach(companion.joinedNotices) { notice in
+                    JoinedNoticeCard(notice: notice) { companion.dismissJoinedNotice(id: notice.id) }
                 }
                 IntroCard()
                 InviteSomeoneCard(companion: companion)
@@ -35,8 +32,18 @@ struct PeopleView: View {
                 if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
                     AskToEndEarlyCard(coordinator: coordinator, companion: companion)
                 }
-                if !companion.people.isEmpty {
+                if !companion.trustedPeople.isEmpty || !companion.helpingPeople.isEmpty {
                     PeopleListCard(companion: companion)
+                }
+                if companion.hasUnverifiedOwnerPeople {
+                    LockboxCard {
+                        Label("Some people were added with an earlier version and can't be checked. Send them a new invite to add them again.",
+                              systemImage: "arrow.triangle.2.circlepath")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("people.reinviteHint")
+                    }
                 }
                 InboxCard(coordinator: coordinator, companion: companion)
                 if let notice = companion.inboxDataNotice {
@@ -45,6 +52,15 @@ struct PeopleView: View {
                             .font(.footnote)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityElement(children: .combine)
+                    }
+                }
+                if let notice = companion.integrityNotice {
+                    LockboxCard {
+                        Label(notice, systemImage: "info.circle")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("people.integrityNotice")
                     }
                 }
             }
@@ -64,10 +80,8 @@ struct PeopleView: View {
                 }
             }
             if companion.isAvailable {
-                // R5 pairing v2 UX fix item 7 ("Layout"): a bottom spacer so
-                // the last card's actionable content (Confirm/Not them,
-                // Accept/Decline, End lock now, …) is never left sitting
-                // directly under the translucent tab bar.
+                // A bottom spacer so the last card's actionable content is
+                // never left sitting directly under the translucent tab bar.
                 Color.clear.frame(height: 24).accessibilityHidden(true)
             }
 #else
@@ -80,9 +94,13 @@ struct PeopleView: View {
         .lockboxScreen()
 #if canImport(CompanionKit)
         .scrollDismissesKeyboard(.interactively)
-        .task {
-            await companion.refreshInbox()
-            await companion.replayPendingFriendRelease(coordinator: coordinator)
+        // Refreshes now and then every ~5 s (invite outstanding or request
+        // pending) or ~30 s, only while People is on screen and the app is
+        // active: the task is cancelled when the view disappears or the
+        // scene leaves `.active`, and restarts with an immediate refresh.
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await companion.runAutoRefreshLoop(coordinator: coordinator)
         }
         .refreshable {
             await companion.refreshInbox()
@@ -113,9 +131,9 @@ private struct PrototypeLabelCard: View {
 #if canImport(CompanionKit)
 
 #if os(iOS)
-/// Backs the "Copy link"/"Copy" buttons next to the invite and acceptance
-/// `ShareLink`s (item d): a visible, explicit alternative to the share
-/// sheet for a link that didn't open when tapped in Messages.
+/// Backs the "Copy link" button next to the invite `ShareLink`: a visible,
+/// explicit alternative to the share sheet for a link that didn't open when
+/// tapped in Messages.
 private func copyCompanionTextToPasteboard(_ text: String) {
     UIPasteboard.general.string = text
 }
@@ -130,7 +148,7 @@ private struct IntroCard: View {
                     Text("Set up a trusted person")
                         .font(.title3.weight(.semibold))
                 }
-                Text("Pairing uses device-held identities — no account or email is required. When someone accepts your invite, confirm them here with one tap; there's no code to read aloud or type. This does not use Screen Time, and app selections and usage are never shared.")
+                Text("Send a link. When they tap Accept, they can approve ending one of your locks early, only when you ask. No account, email or code is needed. This does not use Screen Time, and app selections and usage are never shared.")
                     .font(.subheadline)
                     .foregroundStyle(LockboxTheme.secondary)
             }
@@ -138,110 +156,192 @@ private struct IntroCard: View {
     }
 }
 
-/// R5 pairing v2 UX fix item 7 ("Incoming invite"): shown as soon as this
-/// device opens a decodable, not-yet-expired invite link
-/// (`CompanionCoordinator.incomingInvite`), directly under the page header
-/// so it's in front of the friend without scrolling. Accepting still
-/// requires this explicit tap — opening the link never accepts by itself.
+/// Owner side: "‹Name› joined", shown once and dismissable.
+private struct JoinedNoticeCard: View {
+    let notice: JoinedNotice
+    let onDismiss: () -> Void
+
+    var body: some View {
+        LockboxCard {
+            HStack(alignment: .top, spacing: 12) {
+                LockboxIconBadge(systemImage: "person.fill.checkmark", color: LockboxTheme.focus)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(notice.name) joined")
+                        .font(.subheadline.weight(.semibold))
+                        .accessibilityIdentifier("joinedNotice.text")
+                    Text("They can now approve ending a lock early when you ask.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                }
+                Spacer(minLength: 0)
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(LockboxTheme.secondary)
+                .accessibilityLabel("Dismiss")
+                .accessibilityIdentifier("joinedNotice.dismissButton")
+            }
+        }
+    }
+}
+
+/// Friend side: shown as soon as this device opens an invite link. Looks
+/// the invite up, then asks "‹Owner› invited you to be a trusted person"
+/// with Accept / Not now. Opening the link never accepts by itself.
 private struct IncomingInviteCard: View {
     @ObservedObject var companion: CompanionCoordinator
-    let invitation: Invitation
+    @State private var name = ""
     @State private var isAccepting = false
 
     var body: some View {
         LockboxCard {
-            VStack(alignment: .leading, spacing: 13) {
-                HStack(spacing: 12) {
-                    LockboxIconBadge(systemImage: "person.badge.shield.checkmark.fill", color: LockboxTheme.focus)
-                    Text("You've been invited to be a trusted person")
-                        .font(.title3.weight(.semibold))
-                }
-                Text("Accepting lets you approve ending one of their locks early, only when they ask.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
+            switch companion.incomingInvite {
+            case .none:
+                EmptyView()
+            case .loading:
                 HStack(spacing: 10) {
-                    Button(isAccepting ? "Accepting…" : "Accept") {
-                        isAccepting = true
-                        Task {
-                            await companion.acceptInvite(invitation)
-                            isAccepting = false
-                            // P2-4 (owner review): only dismiss the prompt
-                            // on success. On failure, `companion.lastError`
-                            // is already set by `acceptInvite` and shown by
-                            // the error card below — keep the invite itself
-                            // on screen so the owner can simply retry rather
-                            // than having to reopen the link.
-                            if companion.lastError == nil {
-                                companion.incomingInvite = nil
+                    ProgressView()
+                    Text("Opening invite…").font(.subheadline)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("incomingInvite.loading")
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 13) {
+                    Label(message, systemImage: "link.badge.plus")
+                        .font(.subheadline)
+                        .accessibilityIdentifier("incomingInvite.message")
+                    Button("OK") { companion.dismissIncomingInvite() }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                        .accessibilityIdentifier("incomingInvite.dismissButton")
+                }
+            case .ready(let incoming):
+                VStack(alignment: .leading, spacing: 13) {
+                    HStack(spacing: 12) {
+                        LockboxIconBadge(systemImage: "person.badge.shield.checkmark.fill", color: LockboxTheme.focus)
+                        Text("\(incoming.ownerName) invited you to be a trusted person")
+                            .font(.title3.weight(.semibold))
+                            .accessibilityIdentifier("incomingInvite.title")
+                    }
+                    Text("Accepting lets you approve ending one of their locks early, only when they ask. You can stop at any time.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    TextField("Your name", text: $name)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("incomingInvite.nameField")
+                    Text("\(incoming.ownerName) will see this name.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    HStack(spacing: 10) {
+                        Button(isAccepting ? "Accepting…" : "Accept") {
+                            isAccepting = true
+                            Task {
+                                await companion.acceptIncomingInvite(incoming, name: name)
+                                isAccepting = false
                             }
                         }
-                    }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                    .disabled(isAccepting)
-                    .accessibilityIdentifier("incomingInvite.acceptButton")
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                        .disabled(isAccepting || CompanionCoordinator.validatedDisplayName(name) == nil)
+                        .accessibilityIdentifier("incomingInvite.acceptButton")
 
-                    Button("Not now") {
-                        companion.incomingInvite = nil
+                        Button("Not now") { companion.dismissIncomingInvite() }
+                            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                            .disabled(isAccepting)
+                            .accessibilityIdentifier("incomingInvite.notNowButton")
                     }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                    .disabled(isAccepting)
-                    .accessibilityIdentifier("incomingInvite.notNowButton")
                 }
+                .onAppear { if name.isEmpty { name = companion.approverDisplayName } }
             }
         }
-        // Deliberately no identifier on the card itself: SwiftUI's
-        // accessibility identifier can otherwise propagate down and
-        // override each child's own identifier (observed empirically — the
-        // buttons' own `incomingInvite.acceptButton`/`notNowButton`
-        // identifiers were overwritten by a card-level one here until this
-        // was removed). The two buttons above carry the identifiers tests
-        // actually need.
+        // Deliberately no identifier on the card itself: it can propagate
+        // down and override each child's own identifier.
     }
 }
 
 private struct InviteSomeoneCard: View {
     @ObservedObject var companion: CompanionCoordinator
     @State private var isCreating = false
+    @State private var nameDraft = ""
+    @State private var isEditingName = false
+
+    private var needsName: Bool { companion.ownerDisplayName.isEmpty }
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
                 LockboxSectionLabel("Invite a trusted person", systemImage: "person.badge.plus")
-                Text("Create a link and share it however you'd normally reach them (Messages, AirDrop). Possession of the link never unlocks anything by itself.")
+                Text("Create a link and share it however you'd normally reach them (Messages, AirDrop). It works once, for one hour. Having the link never unlocks anything by itself.")
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
 
+                if needsName || isEditingName {
+                    TextField("Your name", text: $nameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("inviteSomeone.nameField")
+                    Text("They'll see this name on your invite.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    if isEditingName {
+                        HStack(spacing: 10) {
+                            Button("Save name") {
+                                if companion.setOwnerDisplayName(nameDraft) { isEditingName = false }
+                            }
+                            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                            .disabled(CompanionCoordinator.validatedDisplayName(nameDraft) == nil)
+                            .accessibilityIdentifier("inviteSomeone.saveNameButton")
+                            Button("Cancel") { isEditingName = false }
+                                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                        }
+                    }
+                } else {
+                    HStack {
+                        Text("Invites are sent as \(companion.ownerDisplayName)")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityIdentifier("inviteSomeone.nameLabel")
+                        Spacer()
+                        Button("Edit") {
+                            nameDraft = companion.ownerDisplayName
+                            isEditingName = true
+                        }
+                        .font(.footnote.weight(.semibold))
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("inviteSomeone.editNameButton")
+                        .accessibilityHint("Changes the name shown on new invites")
+                    }
+                }
+
                 Button {
+                    if needsName, !companion.setOwnerDisplayName(nameDraft) { return }
                     isCreating = true
                     Task { await companion.createInvite(); isCreating = false }
                 } label: {
                     Label(isCreating ? "Creating…" : "Create an invite to share", systemImage: "link.badge.plus")
                 }
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                .disabled(isCreating)
+                .disabled(isCreating || isEditingName || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
                 .accessibilityHint("Creates a one-use invitation link")
                 .accessibilityIdentifier("inviteSomeone.createInviteButton")
 
-                if let invitation = companion.pendingInvitation {
-                    // R5 pairing v2 UX fix item 7 ("Invite link display"):
-                    // the visible text is a short, truncated line, not the
-                    // raw base64 blob — but the full link stays reachable
-                    // under the same accessibility identifier, via the
-                    // accessibility *value* rather than the label, so the
-                    // UI test can still read it exactly.
+                if let issued = companion.pendingInvite {
+                    // The visible text is a short line; the full link stays
+                    // reachable under the same identifier via the
+                    // accessibility *value* so UI tests can read it exactly.
                     Text("Invite link ready")
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(LockboxTheme.secondary)
                         .accessibilityIdentifier("inviteSomeone.inviteLinkText")
                         .accessibilityLabel("Invite link ready")
-                        .accessibilityValue(invitation.shareLink)
-                    ShareLink(item: invitation.shareLink) {
+                        .accessibilityValue(issued.shareLink)
+                    ShareLink(item: issued.shareLink) {
                         Label("Share invite link", systemImage: "square.and.arrow.up")
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                     #if os(iOS)
                     Button {
-                        copyCompanionTextToPasteboard(invitation.shareLink)
+                        copyCompanionTextToPasteboard(issued.shareLink)
                     } label: {
                         Label("Copy link", systemImage: "doc.on.doc")
                     }
@@ -249,7 +349,7 @@ private struct InviteSomeoneCard: View {
                     .accessibilityHint("Copies the invite link to the clipboard")
                     .accessibilityIdentifier("inviteSomeone.copyLinkButton")
                     #endif
-                    Text("Once they accept, a card at the top of this page lets you confirm them — no code to type or read aloud.")
+                    Text("When they tap Accept, they appear under your trusted people. There's nothing for you to confirm.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
@@ -258,71 +358,7 @@ private struct InviteSomeoneCard: View {
     }
 }
 
-/// R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2b", item 2): one
-/// verified, relay-delivered acceptance of an invite this device created.
-/// Only ever instantiated for an entry in `companion.pendingOwnerAcceptances`
-/// — a `VerifiedPendingAcceptance` already checked with `OwnerAcceptanceCheck`
-/// against this device's own stored invite.
-private struct PendingAcceptanceCard: View {
-    @ObservedObject var companion: CompanionCoordinator
-    let item: VerifiedPendingAcceptance
-    @State private var nickname = ""
-    /// Owner-review follow-up (2026-10-02): on by default. If still on when
-    /// Confirm is tapped, `confirmPendingAcceptance` grants this device's
-    /// own `approveEarlyEnd`/`receiveRequests` scopes immediately after the
-    /// pairing confirms — the same grant the person row's own toggles
-    /// perform, just without an extra trip back to this screen. The friend
-    /// still has to accept those scopes themselves (consent stays
-    /// bilateral); this never grants anything on their behalf. This
-    /// default-on pattern is specific to these two R5 scopes and must not
-    /// be reused as-is for a future R6 capability such as status sharing,
-    /// which the pairing v2 plan requires an explicit, informed
-    /// confirmation for (see `docs/r5-pairing-v2-plan.md`).
-    @State private var grantEarlyEndTrust = true
-    @State private var isBusy = false
-
-    var body: some View {
-        LockboxCard {
-            VStack(alignment: .leading, spacing: 13) {
-                LockboxSectionLabel("Someone accepted your invite", systemImage: "person.fill.checkmark")
-                Text("Sent \(item.acceptance.issuedAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-                TextField("Name for this person", text: $nickname)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("pendingAcceptance.nameField")
-                Toggle("Let them get and approve my early-end requests", isOn: $grantEarlyEndTrust)
-                    .tint(LockboxTheme.accent)
-                    .accessibilityIdentifier("pendingAcceptance.grantEarlyEndToggle")
-                    .accessibilityHint("Grants both receiving your early-end requests and approving them")
-                HStack(spacing: 10) {
-                    Button(isBusy ? "Confirming…" : "Confirm") {
-                        isBusy = true
-                        Task {
-                            await companion.confirmPendingAcceptance(item, nickname: nickname, grantEarlyEndTrust: grantEarlyEndTrust)
-                            isBusy = false
-                        }
-                    }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                    .disabled(isBusy)
-                    .accessibilityHint("Confirms this person as a trusted approver")
-                    .accessibilityIdentifier("pendingAcceptance.confirmButton")
-
-                    Button("Not them", role: .destructive) {
-                        companion.dismissPendingAcceptance(item)
-                    }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-                    .disabled(isBusy)
-                    .accessibilityIdentifier("pendingAcceptance.notThemButton")
-                }
-            }
-        }
-        // Deliberately no identifier on the card itself — see the matching
-        // comment on `IncomingInviteCard`: it overwrote this card's own
-        // buttons'/field's identifiers when present.
-    }
-}
-
+/// Manual fallback for a link that didn't open the app when tapped.
 private struct AcceptInviteCard: View {
     @ObservedObject var companion: CompanionCoordinator
     @State private var pastedInvite = ""
@@ -330,8 +366,8 @@ private struct AcceptInviteCard: View {
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
-                LockboxSectionLabel("Help someone else", systemImage: "hand.raised")
-                Text("Paste an invite link someone shared with you to become their trusted approver.")
+                LockboxSectionLabel("Got an invite link?", systemImage: "hand.raised")
+                Text("Tapping the link opens it here. If that didn't work, paste it below.")
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
                 TextField("Paste invite link", text: $pastedInvite, axis: .vertical)
@@ -341,46 +377,13 @@ private struct AcceptInviteCard: View {
                     .textInputAutocapitalization(.never)
                     #endif
                     .accessibilityIdentifier("acceptInvite.pastedInviteField")
-                Button("Accept invite") {
-                    guard let invitation = companion.decodeInvitation(from: pastedInvite) else {
-                        return
-                    }
-                    Task {
-                        await companion.acceptInvite(invitation)
-                        pastedInvite = ""
-                    }
+                Button("Open invite") {
+                    companion.openInviteLink(pastedInvite)
+                    pastedInvite = ""
                 }
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                .disabled(companion.decodeInvitation(from: pastedInvite) == nil)
-
-                if companion.hasPendingApproverAcceptance {
-                    // R5 pairing v2 (Slice P2b, item 5): the friend never
-                    // types or shares anything back — the owner's device
-                    // confirms from the relay-delivered acceptance alone.
-                    // The owner's name isn't known to this device, hence
-                    // "the person who invited you" rather than a name.
-                    //
-                    // P2-5 (owner review): backed by the persisted
-                    // `pendingAcceptances` list via
-                    // `hasPendingApproverAcceptance`, not the transient,
-                    // relaunch-resetting `pendingAcceptance` this replaced —
-                    // so this label survives a relaunch and clears itself
-                    // exactly when the pairing is actually learned.
-                    //
-                    // Deliberately a plain `Text`, not a `Label` — a plain
-                    // `Text` registers as a `staticText` accessibility
-                    // element with no further composition, which is what
-                    // `PhoneLockboxUITests` queries by this identifier.
-                    HStack(spacing: 8) {
-                        Image(systemName: "hourglass")
-                            .foregroundStyle(LockboxTheme.secondary)
-                            .accessibilityHidden(true)
-                        Text("Waiting for the person who invited you to confirm")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(LockboxTheme.secondary)
-                            .accessibilityIdentifier("acceptInvite.waitingLabel")
-                    }
-                }
+                .disabled(InviteToken.token(fromShareLink: pastedInvite) == nil)
+                .accessibilityIdentifier("acceptInvite.openButton")
             }
         }
     }
@@ -389,12 +392,9 @@ private struct AcceptInviteCard: View {
 private struct PeopleListCard: View {
     @ObservedObject var companion: CompanionCoordinator
 
-    // Revoked pairings are kept in storage (so a relay that keeps reporting
-    // them can never resurrect a fresh-looking entry) but never shown here.
-    private var owners: [CompanionPerson] { companion.people.filter { $0.localRole == .iAmOwner && $0.pairing.state == .active } }
-    private var approving: [CompanionPerson] { companion.people.filter { $0.localRole == .iAmApprover && $0.pairing.state == .active } }
-
     var body: some View {
+        let owners = companion.trustedPeople
+        let helping = companion.helpingPeople
         if !owners.isEmpty {
             LockboxCard {
                 VStack(alignment: .leading, spacing: 14) {
@@ -406,13 +406,13 @@ private struct PeopleListCard: View {
                 }
             }
         }
-        if !approving.isEmpty {
+        if !helping.isEmpty {
             LockboxCard {
                 VStack(alignment: .leading, spacing: 14) {
                     LockboxSectionLabel("People you're helping", systemImage: "hands.sparkles")
-                    ForEach(approving) { person in
+                    ForEach(helping) { person in
                         ApproverPersonRow(companion: companion, person: person)
-                        if person.id != approving.last?.id { Divider().overlay(LockboxTheme.border) }
+                        if person.id != helping.last?.id { Divider().overlay(LockboxTheme.border) }
                     }
                 }
             }
@@ -431,26 +431,15 @@ private struct OwnerPersonRow: View {
             HStack {
                 Text(person.nickname).font(.subheadline.weight(.semibold))
                 Spacer()
-                LockboxStatusBadge(title: statusTitle, color: statusColor)
+                LockboxStatusBadge(title: statusTitle, color: person.isFullyTrustedForEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary)
             }
-            Toggle("Can approve early end", isOn: Binding(
-                get: { person.hasGrantedApproveEarlyEnd },
-                set: { enabled in run { await companion.setOwnerGrant(.approveEarlyEnd, enabled: enabled, for: person) } }
-            ))
-            .tint(LockboxTheme.accent)
-            .disabled(isBusy)
-            Toggle("Receives my requests", isOn: Binding(
-                get: { person.hasGrantedReceiveRequests },
-                set: { enabled in run { await companion.setOwnerGrant(.receiveRequests, enabled: enabled, for: person) } }
-            ))
-            .tint(LockboxTheme.accent)
-            .disabled(isBusy)
             Text(statusDetail)
                 .font(.footnote)
                 .foregroundStyle(LockboxTheme.secondary)
-            Button("Remove", role: .destructive) { showingRemoveConfirmation = true }
+            Button("Remove \(person.nickname)", role: .destructive) { showingRemoveConfirmation = true }
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
                 .disabled(isBusy)
+                .accessibilityIdentifier("person.removeButton")
         }
         .accessibilityElement(children: .contain)
         .confirmationDialog(
@@ -458,44 +447,29 @@ private struct OwnerPersonRow: View {
             isPresented: $showingRemoveConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) { run { await companion.revokePairing(person) } }
+            Button("Remove", role: .destructive) {
+                isBusy = true
+                Task { await companion.revokePairing(person); isBusy = false }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This revokes their pairing. They will no longer be able to approve early-end requests for you.")
+            Text("\(person.nickname) will no longer be able to approve early-end requests for you.")
         }
-    }
-
-    private func run(_ action: @escaping () async -> Void) {
-        isBusy = true
-        Task { await action(); isBusy = false }
     }
 
     private var statusTitle: String {
         if person.isFullyTrustedForEarlyEnd { return "Trusted" }
-        if person.hasGrantedApproveEarlyEnd { return "Waiting on them" }
-        return "Not enabled"
+        return person.consent == nil ? "Joined" : "Not active"
     }
 
-    private var statusColor: Color {
-        person.isFullyTrustedForEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary
-    }
-
-    /// Owner-review follow-up (2026-10-02): names the person once this
-    /// device has granted its own side (whether from the person row's own
-    /// toggles, or from the pending-acceptance card's "Let them approve
-    /// ending my locks early" toggle at confirm time) — reusing the same
-    /// `hasGrantedApproveEarlyEnd`/`isFullyTrustedForEarlyEnd` state either
-    /// path already produces, not a new tracking mechanism. Still names
-    /// only the *owner's own* grant; the friend's acceptance remains a
-    /// separate, bilateral step this device cannot see or perform for them.
     private var statusDetail: String {
         if person.isFullyTrustedForEarlyEnd {
-            return "They can approve one exact session's early end when you ask."
+            return "\(person.nickname) can approve ending one exact lock early when you ask."
         }
-        if person.hasGrantedApproveEarlyEnd {
-            return "Waiting for \(person.nickname) to agree before they can approve early ends."
+        if person.consent == nil {
+            return "\(person.nickname) just joined. Finishing setup."
         }
-        return "Not asked to help with early-end requests yet."
+        return "\(person.nickname) has stopped being a trusted person. You can remove them or send a new invite."
     }
 }
 
@@ -503,39 +477,38 @@ private struct ApproverPersonRow: View {
     @ObservedObject var companion: CompanionCoordinator
     let person: CompanionPerson
     @State private var isBusy = false
+    @State private var showingStopConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(person.nickname).font(.subheadline.weight(.semibold))
-                Spacer()
-                LockboxStatusBadge(title: person.isFullyTrustedForEarlyEnd ? "Accepted" : "Pending",
-                                   color: person.isFullyTrustedForEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary)
+            if person.approverStoppedHelping {
+                Text("You stopped being a trusted person for \(person.nickname)")
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("helping.statusText")
+            } else {
+                Text("You're a trusted person for \(person.nickname)")
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("helping.statusText")
+                Text("You can approve ending one exact lock early, only when \(person.nickname) asks. It never starts, extends or controls their lock.")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+                Button("Stop being a trusted person", role: .destructive) { showingStopConfirmation = true }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                    .disabled(isBusy)
+                    .accessibilityIdentifier("helping.stopButton")
             }
-            Toggle("Can approve early end", isOn: Binding(
-                get: { person.hasAcceptedApproveEarlyEnd },
-                set: { enabled in run { await companion.setApproverAccept(.approveEarlyEnd, enabled: enabled, for: person) } }
-            ))
-            .tint(LockboxTheme.accent)
-            .disabled(isBusy || !person.hasGrantedApproveEarlyEnd)
-            Toggle("Receives their requests", isOn: Binding(
-                get: { person.hasAcceptedReceiveRequests },
-                set: { enabled in run { await companion.setApproverAccept(.receiveRequests, enabled: enabled, for: person) } }
-            ))
-            .tint(LockboxTheme.accent)
-            .disabled(isBusy || !person.hasGrantedReceiveRequests)
-            Text(person.isFullyTrustedForEarlyEnd
-                 ? "You can approve their exact-session early-end requests."
-                 : "They've asked you to help. Accept only if you understand this only approves ending one exact current session — it never starts, extends, or controls their lock.")
-                .font(.footnote)
-                .foregroundStyle(LockboxTheme.secondary)
         }
         .accessibilityElement(children: .contain)
-    }
-
-    private func run(_ action: @escaping () async -> Void) {
-        isBusy = true
-        Task { await action(); isBusy = false }
+        .confirmationDialog("Stop being a trusted person for \(person.nickname)?",
+                            isPresented: $showingStopConfirmation, titleVisibility: .visible) {
+            Button("Stop", role: .destructive) {
+                isBusy = true
+                Task { await companion.stopBeingTrustedPerson(for: person); isBusy = false }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(person.nickname) will no longer be able to ask you to approve ending a lock.")
+        }
     }
 }
 
@@ -546,46 +519,82 @@ private struct AskToEndEarlyCard: View {
     @State private var isSending = false
 
     var body: some View {
+        let trusted = companion.trustedApprovers
+        // Exactly one trusted person is always the selection.
+        let chosen = trusted.count == 1 ? trusted : trusted.filter { selected.contains($0.id) }
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
                 LockboxSectionLabel("Ask to end early", systemImage: "arrow.uturn.backward.circle")
                 if let session = coordinator.companionActiveSessionIdentity {
-                    Text("Ask a trusted person to approve ending your current lock early. This only asks about the session that's active right now.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
-                    ForEach(companion.trustedApprovers) { person in
-                        Toggle(person.nickname, isOn: Binding(
-                            get: { selected.contains(person.id) },
-                            set: { isOn in if isOn { selected.insert(person.id) } else { selected.remove(person.id) } }
-                        ))
-                        .tint(LockboxTheme.accent)
-                    }
-                    Button(isSending ? "Sending…" : "Ask now") {
-                        let targets = companion.trustedApprovers.filter { selected.contains($0.id) }
-                        isSending = true
-                        Task {
-                            await companion.requestEarlyEnd(sessionID: session.sessionID, activeSetID: session.activeSetID,
-                                                            start: session.start, end: session.end, to: targets)
-                            isSending = false
+                    if trusted.isEmpty {
+                        Text("No one is a trusted person yet. Invite someone above; once they tap Accept, you can ask them to end this lock early.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                            .accessibilityIdentifier("askToEnd.noTrustedHint")
+                    } else {
+                        Text("Ask a trusted person to approve ending your current lock early. This only asks about the session that's active right now.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
+                        ForEach(trusted) { person in
+                            personRow(person, isSelected: chosen.contains { $0.id == person.id }, interactive: trusted.count > 1)
                         }
+                        Button(isSending ? "Sending…" : askTitle(chosen)) {
+                            isSending = true
+                            Task {
+                                await companion.requestEarlyEnd(sessionID: session.sessionID, activeSetID: session.activeSetID,
+                                                                start: session.start, end: session.end, to: chosen)
+                                isSending = false
+                            }
+                        }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                        .disabled(chosen.isEmpty || isSending)
+                        .accessibilityIdentifier("askToEnd.askButton")
+                        Text(companion.friendApprovalCanEndLocksEnabled
+                             ? "Once someone approves, you can end your lock from this screen with a confirmation. It never ends automatically."
+                             : "This shows an approval once someone accepts. It never ends your lock by itself in this build.")
+                            .font(.footnote)
+                            .foregroundStyle(LockboxTheme.secondary)
                     }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                    .disabled(selected.isEmpty || isSending)
-                    Text(companion.friendApprovalCanEndLocksEnabled
-                         ? "Once someone approves, you can end your lock from this screen with a confirmation. It never ends automatically."
-                         : "This shows an approval once someone accepts. It never ends your lock by itself in this build.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
-                } else if companion.trustedApprovers.isEmpty {
-                    Text("Set up at least one fully trusted person above to enable this.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
                 } else {
                     Text("There's no single active lock right now, so there's nothing exact to ask about.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
             }
+        }
+    }
+
+    private func askTitle(_ chosen: [CompanionPerson]) -> String {
+        switch chosen.count {
+        case 0: return "Choose who to ask"
+        case 1: return "Ask \(chosen[0].nickname)"
+        default: return "Ask \(chosen.count) people"
+        }
+    }
+
+    @ViewBuilder
+    private func personRow(_ person: CompanionPerson, isSelected: Bool, interactive: Bool) -> some View {
+        let row = HStack(spacing: 12) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isSelected ? LockboxTheme.accent : LockboxTheme.secondary)
+                .accessibilityHidden(true)
+            Text(person.nickname).font(.subheadline)
+            Spacer()
+        }
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+        if interactive {
+            Button {
+                if isSelected { selected.remove(person.id) } else { selected.insert(person.id) }
+            } label: { row }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .accessibilityIdentifier("askToEnd.person.\(person.nickname)")
+        } else {
+            row
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isSelected)
+                .accessibilityIdentifier("askToEnd.person.\(person.nickname)")
         }
     }
 }
@@ -670,7 +679,7 @@ private struct InboxRow: View {
     /// nickname when this device has paired with them, otherwise a neutral
     /// fallback rather than a raw identifier.
     private var title: String {
-        let name = companion.personName(forIdentityID: item.request.owner.identityID) ?? "Someone you're paired with"
+        let name = companion.personName(forIdentityID: item.request.owner.identityID) ?? "Someone"
         return "\(name) is asking for help"
     }
 
