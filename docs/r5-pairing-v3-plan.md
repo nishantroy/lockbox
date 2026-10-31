@@ -69,3 +69,49 @@ Owns `PhoneLockbox/Companion/**`, `PhoneLockbox/Views/PeopleView.swift`, `PhoneL
 ## Docs
 
 Update `docs/companion-security.md` (accepted risk, token model), the R5 relay contract table, the roadmap and `docs/development.md` (build 22).
+
+## P3-0 build results
+
+Builder: Claude Sonnet (isolated worktree, branch `p3-0-fix` from `7669928`). Not yet independently reviewed.
+
+### Root cause 4 — "Ask now never reached the friend" (proven)
+
+`CompanionCoordinator.requestEarlyEnd` computed `validFor = min(max(60, end - Date()), 24h)` from one `Date()` and then called `AsyncCompanionClient.requestUnlock`, which stamps `createdAt = now()` from a **later** `Date()`. `TrustedRequest.init` (`CompanionKit/.../ProtocolModels.swift`, `expiresAt <= session.endsAt`) therefore threw `CompanionError.malformed("invalid trusted request")` **locally, before any network call**, for every lock with under 24 h left (always). `publishSession` had already succeeded (hence revision 13, `currentSessionID` set, empty `requests`); retries replayed the identical, deterministic-ID session operation (200, no new row). Banner shown: **"The relay rejected that action (malformed)."** (misleading: nothing was rejected by the relay). Fix: derive the lifetime and the client clock from one captured instant (`requestTime`), no 60 s floor (a floor can never be valid past the session end), and a calm message if the lock already ended.
+
+### Root cause 3 — pull-to-refresh error (mechanism proven; on-device trigger inferred)
+
+I could **not** reproduce a refresh error by any server-state or anchor path: against the real local relay, owner refresh was clean after pairing, after consents, after a session publish with no request, after an idempotent session replay, and after a request (all in `CompanionLocalRelayFlowTests`). What does exactly match "HTTP 200 on every `/v1/inbox`, yet an error banner" is **task cancellation**: `refreshInbox` ran its `URLSession` calls inside the `.refreshable`/`.task` structured task; when SwiftUI cancels that task, `session.data(for:)` throws `URLError.cancelled`, `HTTPCompanionTransport.performRequest` maps *every* `URLError` except `.timedOut` to `.unavailable`, and `describe` shows **"Couldn't reach the relay. Check your connection and try again."** The relay has already answered 200. Test `testCancelledRefreshDoesNotRaiseRelayErrorAndStillLoadsInbox` fails before the fix with exactly that banner. Caveat: I did not observe SwiftUI cancelling the task on the physical phone; if the owner still sees a banner on build 22, the new DEBUG `fail:` log line names the real underlying error. Fix: refresh now runs in one unstructured single-flight task (a cancelled or overlapping caller neither aborts the fetch nor raises a banner), and `fail` ignores cancellation.
+
+### Found in files I do not own (suggested for P3a)
+
+`CompanionKit/Sources/CompanionKit/HTTPTransport.swift` `performRequest`: `URLError.cancelled` should rethrow as `CancellationError` (or a distinct case) instead of `.unavailable`; `.unavailable` also hides DNS/TLS/ATS causes, so a `.notConnectedToInternet`/`.cannotConnectToHost` split would help. `TrustedRequest.init` / `AsyncCompanionClient.requestUnlock` could take an explicit `createdAt`/clamp `expiresAt` to `session.endsAt` so callers cannot hit the trap.
+
+### Files changed
+
+`PhoneLockbox/Companion/CompanionCoordinator.swift` (request lifetime fix, single-flight uncancellable refresh, cancellation-aware `fail`, DEBUG `fail:` diagnostic naming the underlying error, `makeClient(now:)`), `PhoneLockboxTests/CompanionLocalRelayFlowTests.swift` (new; needs a local relay on 127.0.0.1:8002, otherwise `XCTSkip`), regenerated `PhoneLockbox.xcodeproj/project.pbxproj`.
+
+### Validation
+
+Local relay: `cd relay && npm ci && npm run db:migrate && npm run dev` (port 8002, Postgres 56330). Simulator iPhone Air `83C2D731-9185-4288-A535-E3D51197FA4B`, `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'platform=iOS Simulator,id=83C2D731-9185-4288-A535-E3D51197FA4B' -derivedDataPath DerivedData-p30 CODE_SIGNING_ALLOWED=NO test -only-testing:PhoneLockboxTests[/...]`.
+
+- Before Ask fix: `testAskNowReachesFriendAndOwnerRefreshStaysClean` and `testSecondAskForSameSessionStillCreatesRequest` failed (6 assertion failures, `fail: malformed("invalid trusted request")`).
+- After Ask fix: `CompanionLocalRelayFlowTests` 3 tests, 0 failures.
+- Before refresh fix (Ask fix kept): `testCancelledRefreshDoesNotRaiseRelayErrorAndStillLoadsInbox` failed (2 failures, "Couldn't reach the relay…", inbox empty).
+- Final: `-only-testing:PhoneLockboxTests` on the iPhone Air simulator, local relay running: **101 tests, 1 skipped (pre-existing), 0 failures**, `** TEST SUCCEEDED **`; `CompanionLocalRelayFlowTests` 4 tests, 0 failures. UI tests not run (no UI/view code touched).
+
+### P3-0 follow-up (Opus review of d71876d)
+
+- P1-a: `refreshInbox` is now a looping single flight. A call arriving mid-flight sets `refreshNeedsAnotherPass`; the flight runs another pass before completing and callers await the final pass. The flight clears `refreshFlight` itself with no suspension after the loop check, so nobody joins a finished flight. Test `testRefreshAfterMutationIsNotSatisfiedByStaleInFlightFetch`.
+- P1-b: regenerated `project.pbxproj` committed.
+- P1-c: **deferred** coordinator-level Ask test without a relay. `makeSession` only allows a `URLProtocol` stub, which would need a hand-written relay; the relay-backed tests skip (not fail) without port 8002. P3a's always-running CompanionKit clamp test covers the logic.
+- P2-a: `fail()` ignores only `CancellationError` (relies on P3a rethrowing `URLError.cancelled` as `CancellationError`; until that merges, the unstructured refresh task already prevents the cancel from reaching URLSession). `replayPendingFriendRelease` moved out of the `.refreshable` closure into its own `Task`.
+- P2-b/c: lead time checked before publishing; fewer than 30 s left shows "This lock is about to end.", already ended shows the earlier message.
+- P2-d: `refreshFlight` moved beside the other state properties.
+- Build output moved to `/Users/nishantroy/code/.build-cache/phone-lockbox/agent-a4b3153e8b357a36c/`.
+- Follow-up validation: full `-only-testing:PhoneLockboxTests` on iPhone Air with local relay: **102 tests, 1 skipped, 0 failures, TEST SUCCEEDED** (`CompanionLocalRelayFlowTests` 5 tests; each spaces 22 s because the local relay allows 60 requests/minute per IP; one earlier run tripped `rate_limited` without that spacing). I did not separately prove the stale-fetch test fails against the pre-follow-up coordinator.
+
+### P3-0 follow-up 2 (stale-fetch test made deterministic)
+
+DEBUG-only hooks on `CompanionCoordinator`: `inboxFetchGateForTesting` (awaited inside every refresh pass after the relay responses arrive and before they are applied) and `refreshCallCountForTesting`. `testRefreshAfterMutationIsNotSatisfiedByStaleInFlightFetch` starts a refresh, and its gate holds pass 1 (response already fetched, so it predates the request) until a second `refreshInbox()` call has arrived; the only such call is the one `requestEarlyEnd` makes after `requestUnlock` returns. Why it fails on the d71876d logic: there the second caller merely `await`s the flight and returns, and the flight applies the held pass-1 response (zero requests) with no further pass, so `owner.inboxItems.count == 0`, not 1. With the looping flight, the joiner sets `refreshNeedsAnotherPass`, a second pass fetches after the request exists, and the count is 1. Residual non-determinism: pass 1's fetch is assumed to reach the relay before `requestEarlyEnd`'s two round trips finish (it is issued first; the gate cannot enforce that). The test still needs the relay (skips without it); the 22 s sleep in `requireRelay` is a **stopgap** until the relay slice adds a dev-only rate-limit override.
+
+**Not run (owner rule change: no simulator test runs):** the fail-before/pass-after execution and the full `PhoneLockboxTests` suite. Only `xcodebuild build-for-testing -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator'` was run: TEST BUILD SUCCEEDED. The parent runs the suites before merge.

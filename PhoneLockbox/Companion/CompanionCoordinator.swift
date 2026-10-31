@@ -205,6 +205,9 @@ final class CompanionCoordinator: ObservableObject {
     /// R5 Slice B2c review, P1-1: the single in-flight friend-release
     /// `Task`, shared by `endLockNow` and `replayPendingFriendRelease`.
     private var friendReleaseFlight: Task<Void, Never>?
+    /// Single-flight inbox refresh (see `refreshInbox`).
+    private var refreshFlight: Task<Void, Never>?
+    private var refreshNeedsAnotherPass = false
     /// R5 Slice B2c review, R2-3: the `requestID` the current
     /// `friendReleaseFlight` is actually working on, set only by the call
     /// that *starts* the flight (never by one that joins it).
@@ -451,11 +454,11 @@ final class CompanionCoordinator: ObservableObject {
 
     // MARK: - Transport
 
-    private func makeClient(signer: DeviceSigner) -> AsyncCompanionClient {
+    private func makeClient(signer: DeviceSigner, now: @escaping @Sendable () -> Date = Date.init) -> AsyncCompanionClient {
         let baseURL = URL(string: relayBaseURLString) ?? URL(string: Self.defaultRelayBaseURLString)!
         let transport = HTTPCompanionTransport(baseURL: baseURL, session: makeSession(), anchorStore: anchorStore,
                                                enforceStateRoot: true)
-        return AsyncCompanionClient(signer: signer, transport: transport)
+        return AsyncCompanionClient(signer: signer, transport: transport, now: now)
     }
 
     private func signer(for identity: DeviceIdentity) throws -> DeviceSigner {
@@ -463,9 +466,23 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     private func fail(_ error: Error) {
+        // A cancelled caller is not a relay failure and must never raise a
+        // banner (see `refreshInbox`).
+        if error is CancellationError {
+            #if DEBUG
+            print("[CompanionCoordinator] fail ignored (cancelled): \(String(reflecting: error))")
+            #endif
+            return
+        }
         needsRepair = Self.isKeyUnavailable(error)
         lastError = Self.describe(error)
         #if DEBUG
+        // P3-0: the user-facing banner collapses many distinct failures
+        // (local validation, anchor/integrity checks, relay rejections) into
+        // a few strings. This names the exact underlying error. Error cases
+        // carry only codes/short detail strings -- never keys, signatures or
+        // nonces.
+        print("[CompanionCoordinator] fail: \(String(reflecting: error)) -> \"\(lastError ?? "")\"")
         // Opus review of 70c7d27 (docs follow-up): `.unavailable` and
         // `.timedOut` share one user-facing banner ("Couldn't reach the
         // relay…"), so a transient flake's exact transport-level cause is
@@ -1005,6 +1022,8 @@ final class CompanionCoordinator: ObservableObject {
         people.filter { $0.localRole == .iAmOwner && $0.pairing.state == .active && $0.isFullyTrustedForEarlyEnd }
     }
 
+    static let minimumAskLeadTime: TimeInterval = 30
+
     func requestEarlyEnd(sessionID: String, activeSetID: String, start: Date, end: Date,
                         to targets: [CompanionPerson]) async {
         guard isAvailable else { return }
@@ -1014,15 +1033,39 @@ final class CompanionCoordinator: ObservableObject {
         }
         do {
             let identity = try ensureIdentity(role: .owner)
+            // Checked before publishing anything: a lock that is over (or
+            // about to be) has no request worth sending, and a request must
+            // outlive the round trip to be answerable.
+            guard end.timeIntervalSinceNow >= Self.minimumAskLeadTime else {
+                lastError = end.timeIntervalSinceNow > 0 ? "This lock is about to end." : "That lock has already ended, so there's nothing left to ask about."
+                return
+            }
             let client = makeClient(signer: try signer(for: identity))
             let session = try ActiveSession(owner: identity, sessionID: sessionID, activeSetID: activeSetID,
                                             startsAt: start, endsAt: end)
             _ = try await client.publishSession(session)
-            let validFor = min(max(60, end.timeIntervalSince(Date())), CompanionLimits.maxRequestLifetime)
-            _ = try await client.requestUnlock(requestID: UUID().uuidString, pairings: targets.map(\.pairing),
-                                               consents: targets.compactMap(\.consent), session: session,
-                                               targets: targets.map { $0.pairing.approver.identityID },
-                                               validFor: validFor)
+            // P3-0 root cause (build-21 "Ask now never reached the friend"):
+            // `TrustedRequest` requires `expiresAt <= session.endsAt`, but
+            // the lifetime used to be computed from one `Date()` here while
+            // `requestUnlock` stamped `createdAt` from a *later* `Date()`
+            // inside the client -- so `createdAt + validFor` overshot the
+            // session end by the elapsed microseconds and the request was
+            // rejected locally ("invalid trusted request") whenever the lock
+            // had under 24h left (i.e. always). Pin the client clock to the
+            // single instant the lifetime is derived from, so the request
+            // expires exactly when the session ends (or in 24h, if sooner).
+            let requestTime = Date()
+            let remaining = end.timeIntervalSince(requestTime)
+            guard remaining > 0 else {
+                lastError = "That lock has already ended, so there's nothing left to ask about."
+                return
+            }
+            let validFor = min(remaining, CompanionLimits.maxRequestLifetime)
+            let requestClient = makeClient(signer: try signer(for: identity), now: { requestTime })
+            _ = try await requestClient.requestUnlock(requestID: UUID().uuidString, pairings: targets.map(\.pairing),
+                                                      consents: targets.compactMap(\.consent), session: session,
+                                                      targets: targets.map { $0.pairing.approver.identityID },
+                                                      validFor: validFor)
             lastError = nil; needsRepair = false
             await refreshInbox()
         } catch { fail(error) }
@@ -1485,8 +1528,55 @@ final class CompanionCoordinator: ObservableObject {
     /// into the local person registry through `CompanionTrustMerge`'s
     /// field-locked, untrusted-by-default rules. When the App Group is
     /// unavailable this is a no-op that leaves `lastError` exactly as it is.
+    /// P3-0 (build-21 "pull-to-refresh always shows a relay error"): SwiftUI
+    /// cancels the `.refreshable`/`.task` closure's task whenever it decides
+    /// the hosting view was replaced or the gesture ended early. Because
+    /// `refreshInbox` used to run its `URLSession` calls *inside* that
+    /// structured task, a cancel made `session.data(for:)` throw
+    /// `URLError.cancelled`, which `HTTPCompanionTransport` maps to
+    /// `.unavailable` -- the "Couldn't reach the relay" banner -- even though
+    /// the relay had already answered HTTP 200 (exactly the Vercel evidence).
+    /// The refresh now runs in one unstructured, single-flight task: caller
+    /// cancellation neither aborts the request nor raises a banner, and a
+    /// `.task` + pull-to-refresh overlap joins the in-flight fetch instead of
+    /// racing it.
+    #if DEBUG
+    /// Test-only (same style as `useApprovalOverride`): awaited inside every
+    /// refresh pass after the relay responses arrive and before they are
+    /// applied.
+    var inboxFetchGateForTesting: (@MainActor () async -> Void)?
+    /// Test-only: number of `refreshInbox()` calls so far.
+    private(set) var refreshCallCountForTesting = 0
+    #endif
+
     func refreshInbox() async {
         guard isAvailable else { return }
+        #if DEBUG
+        refreshCallCountForTesting += 1
+        #endif
+        if let flight = refreshFlight {
+            // Arriving mid-flight: the in-flight fetch may predate whatever
+            // the caller just changed, so demand one more pass and wait for
+            // the final one.
+            refreshNeedsAnotherPass = true
+            await flight.value
+            return
+        }
+        let flight = Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                self.refreshNeedsAnotherPass = false
+                await self.performInboxRefresh()
+            } while self.refreshNeedsAnotherPass
+            // Cleared here, with no suspension since the loop check, so a
+            // later caller can never join a finished flight.
+            self.refreshFlight = nil
+        }
+        refreshFlight = flight
+        await flight.value
+    }
+
+    private func performInboxRefresh() async {
         isRefreshing = true
         defer { isRefreshing = false }
         let prunedCount = pendingAcceptances.count
@@ -1557,6 +1647,11 @@ final class CompanionCoordinator: ObservableObject {
                 newPendingOwnerAcceptances, ownerIdentity: capturedOwnerIdentity, now: Date()
             )
         }
+        #if DEBUG
+        // Responses are in hand but not yet applied: lets a test hold a
+        // fetch whose data is about to go stale.
+        if let inboxFetchGateForTesting { await inboxFetchGateForTesting() }
+        #endif
         inboxItems = items.sorted { $0.request.createdAt > $1.request.createdAt }
         inboxDataNotice = rejectionCount > 0
             ? "The relay returned unexpected pairing or consent data; \(rejectionCount) item(s) were ignored."
