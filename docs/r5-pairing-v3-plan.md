@@ -367,3 +367,7 @@ First run of the P3b/P3c app tests: unit 130 tests (1 failure), UI 4 tests (1 fa
 4. **App bug (UX).** "‹Name› joined" appeared off-screen at the top while the owner was scrolled down at the invite card. People now scrolls to a newly added joined notice.
 
 **Final results after the fixes:** `xcodebuild test -scheme PhoneLockbox` gave 130 tests, 0 failures, 1 skipped. `-scheme PhoneLockboxUITests` gave 4 tests, 0 failures.
+
+## Slice P3d: UX review fixes (plan, 2026-10-31)
+
+Input: [UX review 2026-10-31](reviews/2026-10-31-ux-pairing-v3.md). The owner approved fixing everything except P2-5 (the app-wide navigation band, its own slice later) and P3-2 (the Prototype card). One Sonnet builder. It owns `PhoneLockbox/**`, `PhoneLockboxTests/**` and `PhoneLockboxUITests/**`, and `project.yml` only if a new file needs it. No CompanionKit or relay change is expected; if one becomes necessary, the builder stops and reports instead. No simulator runs; the parent runs the suites before push. Gates: Opus code review, which also covers the parent's 20397f9 fixes; then the pre-push suites with new screenshots; then a UX re-check of those screenshots.
