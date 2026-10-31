@@ -24,12 +24,11 @@ public final class CompanionPrototypeModel: ObservableObject {
             let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { now })
             let approver = CompanionClient(signer: approverSigner, transport: relay, now: { now })
 
-            let invitation = try owner.createInvite(inviteID: "developer-invite", validFor: 3_600, now: now,
-                                                    nonce: Data(repeating: 4, count: 24))
-            let acceptance = try approver.accept(invitation, acceptanceID: "developer-acceptance", now: now)
-            let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: now)
-            _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-            _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+            let issued = try owner.createInvite(inviteID: "developer-invite", validFor: 3_600, now: now,
+                                                nonce: Data(repeating: 4, count: 24), ownerDisplayName: "Developer owner")
+            let invitation = try approver.lookupInvite(token: issued.token)
+            let pairing = try approver.acceptInvite(invitation, token: issued.token, approverDisplayName: "Developer friend",
+                                                    acceptanceID: "developer-acceptance", now: now)
             let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "developer-session",
                                             activeSetID: "developer-active-set", startsAt: now.addingTimeInterval(-1),
                                             endsAt: now.addingTimeInterval(3_600))
@@ -40,7 +39,7 @@ public final class CompanionPrototypeModel: ObservableObject {
             let approval = try approver.submitApproval(request: request, pairing: pairing, decision: .approved,
                                                        approvalID: "developer-approval")
             _ = try owner.useApproval(approval, request: request, useID: "developer-use")
-            transcript = "Pairing confirmed with verification code.\nRequest targeted one trusted identity.\nApproval verified once.\n\nSIMULATED RELAY ONLY — no remote unlock is connected."
+            transcript = "Invite looked up and accepted in one step (consent active on both sides).\nRequest targeted one trusted identity.\nApproval verified once.\n\nSIMULATED RELAY ONLY — no remote unlock is connected."
         } catch {
             transcript = "Simulation failed: \(error)"
         }

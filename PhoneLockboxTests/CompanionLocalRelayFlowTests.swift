@@ -15,20 +15,17 @@ import CompanionKit
 final class CompanionLocalRelayFlowTests: XCTestCase {
     private static let relayURL = "http://127.0.0.1:8002"
 
+    /// Start the relay with `cd relay && npm run dev:test` (port 8002, high
+    /// local rate limits). The production-style 60 requests/minute limiter
+    /// would trip these flows, which is why the old 22 s spacing is gone.
     private func requireRelay() async throws {
         var request = URLRequest(url: URL(string: "\(Self.relayURL)/v1/health")!)
         request.timeoutInterval = 2
         do {
             let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
-            if (response as? HTTPURLResponse)?.statusCode == 200 {
-                // The local relay rate-limits to 60 requests/minute per IP
-                // and each flow here spends ~20; spacing the tests keeps the
-                // suite from tripping `rate_limited`.
-                try await Task.sleep(nanoseconds: 22_000_000_000)
-                return
-            }
+            if (response as? HTTPURLResponse)?.statusCode == 200 { return }
         } catch {}
-        throw XCTSkip("no local relay on 127.0.0.1:8002")
+        throw XCTSkip("no local relay on 127.0.0.1:8002 (start it with `cd relay && npm run dev:test`)")
     }
 
     private var keyStores: [ObjectIdentifier: (InMemoryDeviceKeyStore, UserDefaults)] = [:]
@@ -42,30 +39,40 @@ final class CompanionLocalRelayFlowTests: XCTestCase {
         return coordinator
     }
 
-    /// Pair + owner grant (as `confirmPendingAcceptance(grantEarlyEndTrust: true)`
-    /// does) + approver accept, refreshing like the real app between steps.
+    /// Pairing v3: the owner creates a link, the friend opens it and taps
+    /// Accept. Nothing else: the owner just refreshes and the person is there,
+    /// already trusted for both scopes.
     private func pairFullyTrusted(owner: CompanionCoordinator, friend: CompanionCoordinator) async throws {
+        XCTAssertTrue(owner.setOwnerDisplayName("Owner"))
         await owner.createInvite()
         XCTAssertNil(owner.lastError)
-        let invitation = try XCTUnwrap(owner.pendingInvitation)
-        await friend.acceptInvite(invitation)
+        let issued = try XCTUnwrap(owner.pendingInvite)
+        let lookup = friend.openInviteLink(issued.shareLink)
+        await lookup?.value
+        guard case .ready(let incoming) = friend.incomingInvite else { return XCTFail("invite lookup did not succeed") }
+        XCTAssertEqual(incoming.ownerName, "Owner")
+        let accepted = await friend.acceptIncomingInvite(incoming, name: "Friend")
+        XCTAssertTrue(accepted)
         XCTAssertNil(friend.lastError)
+        XCTAssertEqual(friend.helpingPeople.map(\.nickname), ["Owner"])
         await owner.refreshInbox()
         XCTAssertNil(owner.lastError, "owner refresh after friend accepted")
-        let pending = try XCTUnwrap(owner.pendingOwnerAcceptances.first)
-        await owner.confirmPendingAcceptance(pending, nickname: "Friend", grantEarlyEndTrust: true)
-        XCTAssertNil(owner.lastError, "confirm + grant")
+        XCTAssertEqual(owner.trustedPeople.map(\.nickname), ["Friend"])
+        XCTAssertEqual(owner.joinedNotices.map(\.name), ["Friend"])
+        XCTAssertEqual(owner.trustedApprovers.count, 1, "both scopes are active from the single Accept")
         await friend.refreshInbox()
-        XCTAssertNil(friend.lastError, "friend refresh after confirm")
-        let friendPerson = try XCTUnwrap(friend.people.first)
-        await friend.setApproverAccept(.approveEarlyEnd, enabled: true, for: friendPerson)
-        XCTAssertNil(friend.lastError)
-        let friendPerson2 = try XCTUnwrap(friend.people.first)
-        await friend.setApproverAccept(.receiveRequests, enabled: true, for: friendPerson2)
-        XCTAssertNil(friend.lastError)
-        await owner.refreshInbox()
-        XCTAssertNil(owner.lastError, "owner refresh after friend consents")
-        XCTAssertEqual(owner.trustedApprovers.count, 1)
+        XCTAssertNil(friend.lastError, "friend refresh after accept")
+    }
+
+    func testRemovingAPersonRevokesAndDeletesTheirInvite() async throws {
+        try await requireRelay()
+        let owner = try makeDevice("owner"), friend = try makeDevice("friend")
+        try await pairFullyTrusted(owner: owner, friend: friend)
+        XCTAssertEqual(owner.issuedInvitesForTesting.count, 1)
+        await owner.revokePairing(try XCTUnwrap(owner.trustedPeople.first))
+        XCTAssertNil(owner.lastError)
+        XCTAssertTrue(owner.trustedPeople.isEmpty)
+        XCTAssertTrue(owner.issuedInvitesForTesting.isEmpty, "the token must not outlive the pairing")
     }
 
     func testAskNowReachesFriendAndOwnerRefreshStaysClean() async throws {
@@ -81,6 +88,7 @@ final class CompanionLocalRelayFlowTests: XCTestCase {
         await friend.refreshInbox()
         XCTAssertNil(friend.lastError, "friend refresh after request")
         XCTAssertEqual(friend.inboxItems.count, 1, "friend inbox must contain the request")
+        XCTAssertEqual(friend.personName(forIdentityID: try XCTUnwrap(friend.inboxItems.first).request.owner.identityID), "Owner")
 
         // Pull-to-refresh on the owner (twice: a fresh fetch, then a repeat).
         await owner.refreshInbox()
