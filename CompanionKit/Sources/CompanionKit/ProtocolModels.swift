@@ -144,7 +144,8 @@ public enum PairingFields {
         switch cp {
         case 0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF,
              // Invisible fillers that render as nothing: a name made only of these is blank.
-             0x00AD, 0x115F, 0x1160, 0x200D, 0x2060, 0x2800, 0x3164, 0xE0000...0xE007F: return true
+             0x00AD, 0x115F, 0x1160, 0x200D, 0x2060, 0x2800, 0x3164, 0xFFA0, 0x200C, 0x034F, 0x180E, 0x2061...0x2064, 0xFE00...0xFE0F,
+             0x1D173...0x1D17A, 0xE0000...0xE007F: return true
         default: return false
         }
     }
@@ -956,6 +957,17 @@ public struct IssuedInvite: Codable, Hashable, Sendable {
     public let token: String
     public var shareLink: String { InviteToken.shareLink(token: token) }
     public init(invitation: Invitation, token: String) { self.invitation = invitation; self.token = token }
+}
+
+/// Logging, `print`, `dump` and `Mirror` must never reveal the plaintext token (or the share link
+/// derived from it). `Codable` is deliberately kept so the app can persist the value; the persisted
+/// bytes contain the token, so they belong in the Keychain.
+extension IssuedInvite: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "IssuedInvite(inviteID: \(invitation.payload.inviteID), token: <redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["inviteID": invitation.payload.inviteID, "token": "<redacted>"], displayStyle: .struct)
+    }
 }
 
 public struct CompanionClient: Sendable {

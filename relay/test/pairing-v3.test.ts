@@ -620,7 +620,8 @@ describe("pairing v3 review fixes", () => {
 
   it("names made only of invisible fillers are rejected", async () => {
     const owner = makeIdentity("owner");
-    for (const name of ["\u3164", "\u2800", "\u115f\u1160", "\u2060", "\u00ad", "\u{e0041}", "\u200d", " \u3164\u200d "]) {
+    for (const name of ["\u3164", "\u2800", "\u115f\u1160", "\u2060", "\u00ad", "\u{e0041}", "\u200d", " \u3164\u200d ",
+      "\uffa0", "\u200c", "\u034f", "\u180e", "\u2061\u2062\u2063\u2064", "\ufe00", "\ufe0f", "\u{1d173}\u{1d17a}", " \uffa0\u200c\u034f\u180e\ufe0f "]) {
       const invite = buildInvite(owner, NOW);
       (invite.invitation.payload as any).ownerDisplayName = name;
       await expectRejected(buildOperation({ kind: "invite", payload: invite.invitation, signer: owner, expectedRevision: null }), "malformed");
@@ -658,6 +659,21 @@ describe("pairing v3: retention", () => {
     expect(await tokenRowCount()).toBe(0);
     const row = await testPool().query<{ state: string }>(`SELECT state FROM companion_owner WHERE owner_id = $1`, [owner.identity.identityID]);
     expect(Object.keys(deserializeLedger(row.rows[0]!.state).invitations)).toHaveLength(0);
+  });
+
+  it("a consumed invite's tombstone is kept until max(consumedAt, expiresAt) + 30 days, not consumedAt + 30 days", async () => {
+    const owner = makeIdentity("owner");
+    const approver = makeIdentity("trustedApprover");
+    const used = await createInvite(owner);
+    await send(acceptOp(owner, approver, used, {}, null, NOW + 1)); // consumed at NOW + 1, expires at NOW + TTL
+    // Past consumedAt + 30d but before expiresAt + 30d: invite and token row survive.
+    let summary = await purgeExpiredRecords(testPool(), 30, NOW + 1 + 30 * 86_400 + 60);
+    expect(summary.purgedInvitations).toBe(0);
+    expect(await tokenRowCount()).toBe(1);
+    // After expiresAt + 30d both go.
+    summary = await purgeExpiredRecords(testPool(), 30, NOW + TTL + 30 * 86_400 + 60);
+    expect(summary.purgedInvitations).toBe(1);
+    expect(await tokenRowCount()).toBe(0);
   });
 
   it("deleting an owner cascades to their token rows", async () => {

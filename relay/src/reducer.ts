@@ -199,8 +199,9 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       const invitePayload = inviteRecord?.invitation.payload;
       // Unknown invite, foreign invite, a pre-v3 invite without a lookup key
       // and a wrong lookup key are one indistinguishable failure. The relay
-      // never sees the token and cannot verify `tokenProof`; the OWNER device
-      // does (the possession signature below it CAN verify) (JoinedAcceptanceCheck), so a relay that fabricates an acceptance
+      // never sees the token, so it cannot verify `tokenProof` (it can verify
+      // the possession signature below). The OWNER device checks both
+      // (JoinedAcceptanceCheck), so a relay that fabricates an acceptance
       // using the lookup key it stores cannot make the owner trust it.
       if (
         !inviteRecord ||

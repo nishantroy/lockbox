@@ -141,13 +141,15 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertNoThrow(try payload(name: String(repeating: "A", count: 40)))
         XCTAssertNoThrow(try payload(name: String(repeating: "\u{1F600}", count: 40)))
         // ZWJ sequences, NFD and astral names are legal.
-        for good in ["Jose\u{301}", "\u{1D49C}lex", "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}", "A\u{200D}b"] {
+        for good in ["Jose\u{301}", "\u{1D49C}lex", "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}", "A\u{200D}b", "\u{2764}\u{FE0F}", "\u{645}\u{6CC}\u{200C}\u{62E}"] {
             XCTAssertNoThrow(try payload(name: good), "name \(good.debugDescription) must be accepted")
         }
         // Bidi controls, invisible marks, FEFF-only/blank and control characters are not.
         let hostile = ["x\u{202E}y", "\u{2066}x", "\u{2069}", "\u{061C}x", "\u{200B}x", "\u{200E}x", "\u{200F}x",
                        "\u{FEFF}", " \u{FEFF} ", "\u{0085}", "\u{007F}",
-                       "\u{3164}", "\u{2800}", "\u{115F}\u{1160}", "\u{2060}", "\u{00AD}", "\u{E0041}", "\u{200D}", " \u{3164}\u{200D} "]
+                       "\u{3164}", "\u{2800}", "\u{115F}\u{1160}", "\u{2060}", "\u{00AD}", "\u{E0041}", "\u{200D}", " \u{3164}\u{200D} ",
+                       "\u{FFA0}", "\u{200C}", "\u{034F}", "\u{180E}", "\u{2061}\u{2062}\u{2063}\u{2064}", "\u{FE00}", "\u{FE0F}",
+                       "\u{1D173}\u{1D17A}", " \u{FFA0}\u{200C}\u{034F}\u{180E}\u{FE0F} "]
         for bad in hostile + [String(repeating: "A", count: 41), String(repeating: "\u{1F600}", count: 41), "", "   ", "line\nbreak", "tab\there"] {
             XCTAssertThrowsError(try payload(name: bad), "name \(bad.debugDescription) must be rejected")
         }

@@ -59,14 +59,14 @@ checkpoint overload.
   returns the same friend's existing pairing instead of an error.
 - **Single use and tombstones.** The token row stays as a consumed tombstone until the invite expires so no other owner
   can re-register the lookup key. Token rows (live, expired or consumed) are deleted by the daily retention cron 30 days
-  after expiry, together with the ledger invite, so an expired lookup key cannot be re-registered; lookups reject
+  after `max(consumedAt, expiresAt)` (for a consumed invite that is its expiry, never earlier), together with the ledger invite, so an expired lookup key cannot be re-registered; lookups reject
   expired and consumed invites regardless.
 - **Where secret-derived material is stored.** Never the token. The relay stores the lookup key, token hash and proof
   (in the owner ledger, the token index and the operation log) for the 30-day retention window, plus the friend-signed
   acceptance with the pairing. None of these lets the relay forge an invite or an owner-trusted acceptance.
 - **Owner storage.** The owner must keep each `IssuedInvite` (invitation plus token, now `Codable`) for as long as the
   pairing it created exists and delete it when the owner removes that person: `JoinedAcceptanceCheck.verify` needs it on
-  every inbox fetch. The token is a secret; keep it in the Keychain or another protected store, not plain defaults.
+  every inbox fetch. The token is a secret; keep it in the Keychain or another protected store, not plain defaults. `IssuedInvite` redacts the token from `description`, `debugDescription` and `Mirror`/`dump`, but its `Codable` form contains it, so persisted bytes must go to the Keychain.
 - **Trust sources.** Pairings created before v3 or by `replace_pairing` carry no acceptance, so `verifiedPairings`
   never returns them; the app needs another trust source for those (prototype: re-pair).
 - **Accepted risk.** Anyone holding an unexpired, unused link becomes a trusted person without owner approval. That is
