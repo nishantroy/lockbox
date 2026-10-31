@@ -268,9 +268,10 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
       delete ledger.invitations[inviteID];
       summary.purgedInvitations += 1;
       changed = true;
-      // Pairing v3: the token index row goes with its invite (it is normally
-      // already gone -- deleted on accept, or swept at expiry below).
-      await deleteInviteToken(client, ownerID, inviteID);
+      // Pairing v3: the token index row goes with its invite. It is a tombstone
+      // (live, expired or consumed) until this point, purged at
+      // max(consumedAt, expiresAt) + 30d; the global sweep below only catches orphans.
+      summary.purgedInviteTokens += await deleteInviteToken(client, ownerID, inviteID);
     }
   }
   // Pairing v2 leftovers: an unconfirmed v2 acceptance can never be confirmed

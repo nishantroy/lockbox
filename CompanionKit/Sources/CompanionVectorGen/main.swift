@@ -213,6 +213,9 @@ for (label, name) in [("nfd-decomposed", "Jose\u{301}"), ("astral", "\u{1D49C}le
                       // ZWNJ (Persian) and VS16 (emoji presentation) stay legal inside names with visible scalars.
                       ("zwnj-persian", "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}"),
                       ("emoji-vs16", "\u{2764}\u{FE0F}"),
+                      // Newly blank scalars (variation selectors, Mongolian FVS) stay legal next to visible scalars.
+                      ("ideographic-vs", "\u{8FBB}\u{E0100}"),
+                      ("mongolian-fvs", "\u{1820}\u{180B}\u{1821}"),
                       ("max-40-scalars", String(repeating: "\u{1F600}", count: 40))] {
     let namedPayload = try InvitePayload(
         inviteID: "fixture-name-\(label)", owner: ownerSigner.identity, issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt,

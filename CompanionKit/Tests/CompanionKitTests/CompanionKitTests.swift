@@ -149,7 +149,8 @@ final class CompanionKitTests: XCTestCase {
                        "\u{FEFF}", " \u{FEFF} ", "\u{0085}", "\u{007F}",
                        "\u{3164}", "\u{2800}", "\u{115F}\u{1160}", "\u{2060}", "\u{00AD}", "\u{E0041}", "\u{200D}", " \u{3164}\u{200D} ",
                        "\u{FFA0}", "\u{200C}", "\u{034F}", "\u{180E}", "\u{2061}\u{2062}\u{2063}\u{2064}", "\u{FE00}", "\u{FE0F}",
-                       "\u{1D173}\u{1D17A}", " \u{FFA0}\u{200C}\u{034F}\u{180E}\u{FE0F} "]
+                       "\u{1D173}\u{1D17A}",
+                       "\u{E0100}\u{E01EF}", "\u{180B}\u{180C}\u{180D}\u{180F}", "\u{17B4}\u{17B5}", "\u{206A}\u{206F}", "\u{1BCA0}\u{1BCA3}", "\u{FFF9}\u{FFFA}\u{FFFB}", " \u{FFA0}\u{200C}\u{034F}\u{180E}\u{FE0F} "]
         for bad in hostile + [String(repeating: "A", count: 41), String(repeating: "\u{1F600}", count: 41), "", "   ", "line\nbreak", "tab\there"] {
             XCTAssertThrowsError(try payload(name: bad), "name \(bad.debugDescription) must be rejected")
         }
