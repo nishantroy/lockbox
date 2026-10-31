@@ -830,7 +830,7 @@ final class CompanionPairingV3Tests: XCTestCase {
         friend.incomingInvite = .ready(IncomingInvite(invitation: join.issued.invitation, token: join.issued.token))
         XCTAssertTrue(friend.showsAcceptInviteFirst, "a link was just opened")
         friend.dismissIncomingInvite()
-        XCTAssertFalse(friend.showsAcceptInviteFirst)
+        XCTAssertTrue(friend.showsAcceptInviteFirst, "dismissed with nobody paired: back to the first-run layout")
         // An owner with someone already joined keeps the owner layout.
         let (owner, _) = try makeTrustedOwner()
         XCTAssertFalse(owner.coordinator.showsAcceptInviteFirst)

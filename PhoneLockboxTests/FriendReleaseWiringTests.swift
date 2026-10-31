@@ -179,7 +179,8 @@ final class FriendReleaseWiringTests: XCTestCase {
 
         companion.friendApprovalCanEndLocksEnabled = true
         XCTAssertEqual(Set(companion.waitingItems(coordinator: fake).map(\.id)), Set([pendingForMe.id, ownApproved.id]))
-        XCTAssertFalse(companion.historyItems(coordinator: fake).contains { $0.id == ownApproved.id })
+        // The fixture's items share one request ID, so match by role and status, not by ID.
+        XCTAssertFalse(companion.historyItems(coordinator: fake).contains { $0.isMine && $0.status == .approved })
     }
 
     func testUsedAndAlreadyEndedApprovedRequestsGoToHistoryEvenWithTheGateOn() throws {
