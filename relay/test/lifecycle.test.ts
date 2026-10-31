@@ -7,9 +7,9 @@
 // the TS relay + real Postgres.
 
 import { describe, it, expect } from "vitest";
-import { makeIdentity, buildOperation, swiftDate, signPayloadFields, encodeDeviceIdentityWire, uniqueID, type TestIdentity } from "./setup.js";
+import { makeIdentity, buildOperation, pairV3, swiftDate, signPayloadFields, encodeDeviceIdentityWire, uniqueID, type TestIdentity } from "./setup.js";
 import { submitOperation, fetchInboxOperation } from "../src/service.js";
-import { pairingVerificationCode, base64url, COMPANION_VERSION } from "../src/canonical.js";
+import { base64url, COMPANION_VERSION } from "../src/canonical.js";
 
 function toRequest(op: object): Buffer {
   return Buffer.from(JSON.stringify(op), "utf8");
@@ -42,78 +42,7 @@ async function setupPairedSession(overrides: Partial<{ scopes: string[] }> = {})
   // arbitrary fixed date.
   const now = Math.floor(Date.now() / 1000);
 
-  const inviteID = uniqueID("invite");
-  const nonce = Buffer.alloc(24, 7);
-  const invitePayload = {
-    inviteID,
-    owner: encodeDeviceIdentityWire(owner.identity),
-    issuedAt: swiftDate(now),
-    expiresAt: swiftDate(now + 3600),
-    nonce: nonce.toString("base64")
-  };
-  const inviteFields = [inviteID, owner.identity.identityID, base64url(owner.identity.publicKey), String(now * 1000), String((now + 3600) * 1000), base64url(nonce)];
-  const inviteSignature = signPayloadFields(owner, `${COMPANION_VERSION}.invite`, inviteFields);
-  const invitation = { payload: invitePayload, signature: inviteSignature.toString("base64") };
-  await submit(buildOperation({ kind: "invite", payload: invitation, signer: owner, expectedRevision: 0 }));
-
-  const acceptanceID = uniqueID("acceptance");
-  const verificationCode = pairingVerificationCode({ inviteID, ownerIdentityID: owner.identity.identityID, approverIdentityID: approver.identity.identityID, nonce });
-  const acceptancePayload = {
-    acceptanceID,
-    inviteID,
-    owner: encodeDeviceIdentityWire(owner.identity),
-    approver: encodeDeviceIdentityWire(approver.identity),
-    issuedAt: swiftDate(now + 1),
-    verificationCode
-  };
-  const acceptanceFields = [acceptanceID, inviteID, owner.identity.identityID, approver.identity.identityID, base64url(owner.identity.publicKey), base64url(approver.identity.publicKey), String((now + 1) * 1000), verificationCode];
-  const acceptanceSignature = signPayloadFields(approver, `${COMPANION_VERSION}.acceptance`, acceptanceFields);
-  const signedAcceptance = { acceptance: acceptancePayload, signature: acceptanceSignature.toString("base64") };
-  await submit(buildOperation({ kind: "accept", payload: signedAcceptance, signer: approver, expectedRevision: 1 }));
-
-  const confirmationPayload = {
-    acceptanceID,
-    inviteID,
-    owner: encodeDeviceIdentityWire(owner.identity),
-    approverIdentityID: approver.identity.identityID,
-    verificationCode,
-    issuedAt: swiftDate(now + 2)
-  };
-  const confirmationFields = [acceptanceID, inviteID, owner.identity.identityID, approver.identity.identityID, verificationCode, String((now + 2) * 1000)];
-  const confirmationSignature = signPayloadFields(owner, `${COMPANION_VERSION}.confirmation`, confirmationFields);
-  const signedConfirmation = { confirmation: confirmationPayload, signature: confirmationSignature.toString("base64") };
-  const confirmResponse = await submit(buildOperation({ kind: "confirm", payload: signedConfirmation, signer: owner, expectedRevision: 2 }));
-  expect(confirmResponse.result.kind).toBe("pairing");
-  const pairingID = (confirmResponse.result as any).value.pairingID as string;
-
-  const scopes = overrides.scopes ?? ["approveEarlyEnd", "receiveRequests"];
-  const grantNonce = Buffer.alloc(20, 9);
-  const grantPayload = {
-    relationshipID: pairingID,
-    pairingID,
-    pairEpoch: 1,
-    owner: encodeDeviceIdentityWire(owner.identity),
-    approver: encodeDeviceIdentityWire(approver.identity),
-    action: "ownerGrant",
-    scopes: { scopes },
-    nonce: grantNonce.toString("base64"),
-    issuedAt: swiftDate(now + 3)
-  };
-  await submit(buildOperation({ kind: "consent", payload: grantPayload, signer: owner, expectedRevision: 3 }));
-
-  const acceptNonce = Buffer.alloc(20, 11);
-  const acceptPayload = {
-    relationshipID: pairingID,
-    pairingID,
-    pairEpoch: 1,
-    owner: encodeDeviceIdentityWire(owner.identity),
-    approver: encodeDeviceIdentityWire(approver.identity),
-    action: "approverAccept",
-    scopes: { scopes },
-    nonce: acceptNonce.toString("base64"),
-    issuedAt: swiftDate(now + 4)
-  };
-  await submit(buildOperation({ kind: "consent", payload: acceptPayload, signer: approver, expectedRevision: 4 }));
+  const { pairingID } = await pairV3({ owner, approver, now });
 
   const sessionID = uniqueID("session");
   const activeSetID = uniqueID("activeset");
@@ -187,7 +116,7 @@ function approvalPayload(s: Scenario, requestID: string, approvalID: string, dec
 }
 
 describe("R5 relay lifecycle", () => {
-  it("invite -> accept -> confirm -> consent -> session -> request -> approval -> use", async () => {
+  it("invite -> accept (v3: pairing + consent) -> session -> request -> approval -> use", async () => {
     const s = await setupPairedSession();
     const requestID = uniqueID("request");
     const requestOp = buildOperation({ kind: "request", payload: requestPayload(s, requestID, s.now + 40_000), signer: s.owner, expectedRevision: 6 });
@@ -259,84 +188,7 @@ describe("R5 relay lifecycle", () => {
     const s = await setupPairedSession();
     // Pair a second approver to the same owner so one request can target both.
     const approverB = makeIdentity("trustedApprover");
-    const inviteID = uniqueID("invite");
-    const nonce = Buffer.alloc(24, 21);
-    const invitePayload = {
-      inviteID,
-      owner: encodeDeviceIdentityWire(s.owner.identity),
-      issuedAt: swiftDate(s.now),
-      expiresAt: swiftDate(s.now + 3600),
-      nonce: nonce.toString("base64")
-    };
-    const inviteFields = [inviteID, s.owner.identity.identityID, base64url(s.owner.identity.publicKey), String(s.now * 1000), String((s.now + 3600) * 1000), base64url(nonce)];
-    const invitation = { payload: invitePayload, signature: signPayloadFields(s.owner, `${COMPANION_VERSION}.invite`, inviteFields).toString("base64") };
-    await submit(buildOperation({ kind: "invite", payload: invitation, signer: s.owner, expectedRevision: 6 }));
-
-    const acceptanceID = uniqueID("acceptance");
-    const verificationCode = pairingVerificationCode({ inviteID, ownerIdentityID: s.owner.identity.identityID, approverIdentityID: approverB.identity.identityID, nonce });
-    const acceptancePayload = {
-      acceptanceID,
-      inviteID,
-      owner: encodeDeviceIdentityWire(s.owner.identity),
-      approver: encodeDeviceIdentityWire(approverB.identity),
-      issuedAt: swiftDate(s.now + 1),
-      verificationCode
-    };
-    const acceptanceFields = [acceptanceID, inviteID, s.owner.identity.identityID, approverB.identity.identityID, base64url(s.owner.identity.publicKey), base64url(approverB.identity.publicKey), String((s.now + 1) * 1000), verificationCode];
-    const signedAcceptance = { acceptance: acceptancePayload, signature: signPayloadFields(approverB, `${COMPANION_VERSION}.acceptance`, acceptanceFields).toString("base64") };
-    await submit(buildOperation({ kind: "accept", payload: signedAcceptance, signer: approverB, expectedRevision: 7 }));
-
-    const confirmationPayload = {
-      acceptanceID,
-      inviteID,
-      owner: encodeDeviceIdentityWire(s.owner.identity),
-      approverIdentityID: approverB.identity.identityID,
-      verificationCode,
-      issuedAt: swiftDate(s.now + 2)
-    };
-    const confirmationFields = [acceptanceID, inviteID, s.owner.identity.identityID, approverB.identity.identityID, verificationCode, String((s.now + 2) * 1000)];
-    const signedConfirmation = { confirmation: confirmationPayload, signature: signPayloadFields(s.owner, `${COMPANION_VERSION}.confirmation`, confirmationFields).toString("base64") };
-    const confirmResponse = await submit(buildOperation({ kind: "confirm", payload: signedConfirmation, signer: s.owner, expectedRevision: 8 }));
-    const pairingBID = (confirmResponse.result as any).value.pairingID as string;
-
-    const grantNonce = Buffer.alloc(20, 22);
-    await submit(
-      buildOperation({
-        kind: "consent",
-        payload: {
-          relationshipID: pairingBID,
-          pairingID: pairingBID,
-          pairEpoch: 1,
-          owner: encodeDeviceIdentityWire(s.owner.identity),
-          approver: encodeDeviceIdentityWire(approverB.identity),
-          action: "ownerGrant",
-          scopes: { scopes: ["approveEarlyEnd", "receiveRequests"] },
-          nonce: grantNonce.toString("base64"),
-          issuedAt: swiftDate(s.now + 3)
-        },
-        signer: s.owner,
-        expectedRevision: 9
-      })
-    );
-    const acceptNonce = Buffer.alloc(20, 23);
-    await submit(
-      buildOperation({
-        kind: "consent",
-        payload: {
-          relationshipID: pairingBID,
-          pairingID: pairingBID,
-          pairEpoch: 1,
-          owner: encodeDeviceIdentityWire(s.owner.identity),
-          approver: encodeDeviceIdentityWire(approverB.identity),
-          action: "approverAccept",
-          scopes: { scopes: ["approveEarlyEnd", "receiveRequests"] },
-          nonce: acceptNonce.toString("base64"),
-          issuedAt: swiftDate(s.now + 4)
-        },
-        signer: approverB,
-        expectedRevision: 10
-      })
-    );
+    const { pairingID: pairingBID } = await pairV3({ owner: s.owner, approver: approverB, now: s.now, startRevision: 6, nonceByte: 21 });
 
     const requestID = uniqueID("request");
     const twoTargetRequest = {

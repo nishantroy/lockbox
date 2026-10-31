@@ -122,20 +122,19 @@ public struct InboxResponse: Codable, Hashable, Sendable {
     /// helper fetch or for a relay/test double that does not populate it.
     /// Decoding tolerates its absence (contract v1.2, additive).
     public let approvals: [Approval]?
-    /// R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2a", item 1):
-    /// every `ledger.pendingAcceptances` entry whose invite exists, is
-    /// unconsumed and has not expired, for an owner fetch of their own
-    /// ledger only — same presence rule as `approvals`/`ownerIdentityID`.
-    /// `nil` on a pure helper/approver fetch, or for a relay/test double
-    /// that does not populate it. Each entry carries the approver's own
-    /// signature (`SignedAcceptance`), so the owner device can verify it
-    /// locally (`OwnerAcceptanceCheck`) before calling `confirm` with no
-    /// typed code. Decoding tolerates its absence (additive).
-    public let pendingAcceptances: [SignedAcceptance]?
+    /// Pairing v3 (`docs/r5-pairing-v3-plan.md`, contract v1.4, additive): the
+    /// friend-signed acceptance that created each v3 pairing in `pairings`,
+    /// for an owner fetch of their own ledger only (same presence rule as
+    /// `approvals`/`ownerIdentityID`); `nil` on a helper fetch or a relay/test
+    /// double that does not populate it. With no owner confirm step, this is
+    /// what lets the owner device verify (`JoinedAcceptanceCheck`) that a
+    /// pairing really came from the holder of a token for an invite it
+    /// created, rather than trusting the relay's word for who joined.
+    public let acceptances: [SignedAcceptance]?
 
     public init(ownerIdentityID: String?, revision: UInt64, requests: [TrustedRequest], stateRoot: Data? = nil,
                 pairings: [Pairing]? = nil, consents: [RelationshipConsent]? = nil,
-                approvals: [Approval]? = nil, pendingAcceptances: [SignedAcceptance]? = nil) throws {
+                approvals: [Approval]? = nil, acceptances: [SignedAcceptance]? = nil) throws {
         if let ownerIdentityID { try requireIdentifier(ownerIdentityID, name: "identity ID") }
         if let stateRoot { guard stateRoot.count == 32 else { throw CompanionError.malformed("invalid response state root") } }
         self.ownerIdentityID = ownerIdentityID
@@ -145,7 +144,7 @@ public struct InboxResponse: Codable, Hashable, Sendable {
         self.pairings = pairings
         self.consents = consents
         self.approvals = approvals
-        self.pendingAcceptances = pendingAcceptances
+        self.acceptances = acceptances
     }
 }
 

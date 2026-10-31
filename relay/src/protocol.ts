@@ -267,16 +267,110 @@ export function consentAuthorizes(c: RelationshipConsent, scope: CompanionScope)
 // Invitation / pairing
 // ---------------------------------------------------------------------------
 
+/** Maximum length of an owner/approver display name, in Unicode scalar values. */
+export const MAX_DISPLAY_NAME_SCALARS = 40;
+
+/** Whitespace-like and invisible-filler scalars (a name made only of these is blank), spelled out so TS and Swift agree exactly. */
+function isBlankScalar(cp: number): boolean {
+  return (
+    (cp >= 0x09 && cp <= 0x0d) ||
+    cp === 0x20 ||
+    cp === 0x85 ||
+    cp === 0xa0 ||
+    cp === 0x1680 ||
+    (cp >= 0x2000 && cp <= 0x200a) ||
+    cp === 0x2028 ||
+    cp === 0x2029 ||
+    cp === 0x202f ||
+    cp === 0x205f ||
+    cp === 0x3000 ||
+    cp === 0xfeff ||
+    // Invisible fillers that render as nothing: a name made only of these is blank.
+    cp === 0x00ad ||
+    cp === 0x115f ||
+    cp === 0x1160 ||
+    cp === 0x200d ||
+    cp === 0x2060 ||
+    cp === 0x2800 ||
+    cp === 0x3164 ||
+    (cp >= 0xe0000 && cp <= 0xe007f)
+  );
+}
+
+/** Scalars a display name may never contain: C0/C1 controls, bidi controls and invisible marks that enable spoofing. U+200D (ZWJ) stays legal for emoji sequences. */
+function isForbiddenNameScalar(cp: number): boolean {
+  return (
+    cp <= 0x1f ||
+    (cp >= 0x7f && cp <= 0x9f) ||
+    cp === 0x061c ||
+    cp === 0x200b ||
+    cp === 0x200e ||
+    cp === 0x200f ||
+    (cp >= 0x202a && cp <= 0x202e) ||
+    (cp >= 0x2066 && cp <= 0x2069)
+  );
+}
+
+/**
+ * Pairing v3: a display name is optional, 1...40 Unicode scalars, well-formed
+ * Unicode (no lone UTF-16 surrogates: they would sign as replacement bytes and
+ * later fail to decode in Swift), no forbidden scalars and not blank. Rules
+ * are identical to `PairingFields.validateDisplayName` in CompanionKit.
+ * `undefined` means "no name"; an empty string is rejected so "no name" has one
+ * signed representation (the empty string in the signing fields).
+ */
+export function decodeDisplayName(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw relayError("malformed");
+  if (/\p{Surrogate}/u.test(value)) throw relayError("malformed");
+  const scalars = Array.from(value, (ch) => ch.codePointAt(0)!);
+  if (scalars.length === 0 || scalars.length > MAX_DISPLAY_NAME_SCALARS) throw relayError("malformed");
+  if (scalars.some(isForbiddenNameScalar)) throw relayError("malformed");
+  if (scalars.every(isBlankScalar)) throw relayError("malformed");
+  return value;
+}
+
+/** Pairing v3: the R5 scopes the owner grants / the friend accepts: non-empty, unique, R5-only, sorted. */
+export function decodeGrantedScopes(value: unknown): Array<(typeof R5_SCOPES)[number]> {
+  if (!Array.isArray(value) || value.length === 0) throw relayError("malformed");
+  const seen = new Set<string>();
+  for (const s of value) {
+    if (typeof s !== "string" || !isR5Scope(s) || seen.has(s)) throw relayError("malformed");
+    seen.add(s);
+  }
+  return ([...seen] as Array<(typeof R5_SCOPES)[number]>).sort();
+}
+
 export interface InvitePayload {
   inviteID: string;
   owner: DeviceIdentity;
   issuedAt: number;
   expiresAt: number;
   nonce: Buffer;
+  /** `inviteTokenHash(token, ownerPublicKey, inviteID)`: only a token holder can recompute it. The token itself never reaches the relay. */
+  tokenHash: Buffer;
+  /** `inviteLookupKey(token)`: the relay's only handle on the invite. Signed so the relay cannot re-point a lookup. */
+  lookupKey: Buffer;
+  /** Public key of the token-derived possession keypair; the relay verifies an acceptance's possession signature against it. */
+  possessionKey: Buffer;
+  ownerDisplayName?: string;
+  grantedScopes: Array<(typeof R5_SCOPES)[number]>;
 }
 
 export function invitePayloadSigningFields(p: InvitePayload): string[] {
-  return [p.inviteID, p.owner.identityID, base64url(p.owner.publicKey), msString(p.issuedAt), msString(p.expiresAt), base64url(p.nonce)];
+  return [
+    p.inviteID,
+    p.owner.identityID,
+    base64url(p.owner.publicKey),
+    msString(p.issuedAt),
+    msString(p.expiresAt),
+    base64url(p.nonce),
+    base64url(p.tokenHash),
+    base64url(p.lookupKey),
+    base64url(p.possessionKey),
+    p.ownerDisplayName ?? "",
+    [...p.grantedScopes].sort().join(",")
+  ];
 }
 
 export interface Invitation {
@@ -298,37 +392,63 @@ export function decodeInvitation(value: unknown): Invitation {
   const nonce = decodeData(pv.nonce);
   if (nonce.length < 16 || nonce.length > 64) throw relayError("malformed");
   if (expiresAt <= issuedAt || expiresAt - issuedAt > MAX_INVITE_LIFETIME_SECONDS) throw relayError("malformed");
+  // Pairing v3: a v2 invite has no tokenHash/grantedScopes and is rejected here.
+  const tokenHash = decodeData(pv.tokenHash);
+  if (tokenHash.length !== 32) throw relayError("malformed");
+  const lookupKey = decodeData(pv.lookupKey);
+  if (lookupKey.length !== 32) throw relayError("malformed");
+  const possessionKey = decodeData(pv.possessionKey);
+  if (possessionKey.length !== 32) throw relayError("malformed");
+  const ownerDisplayName = decodeDisplayName(pv.ownerDisplayName);
+  const grantedScopes = decodeGrantedScopes(pv.grantedScopes);
   const signature = decodeData(v.signature);
   if (signature.length !== 64) throw relayError("malformed");
-  const payload: InvitePayload = { inviteID, owner, issuedAt, expiresAt, nonce };
+  const payload: InvitePayload = { inviteID, owner, issuedAt, expiresAt, nonce, tokenHash, lookupKey, possessionKey, grantedScopes };
+  if (ownerDisplayName !== undefined) payload.ownerDisplayName = ownerDisplayName;
   return { payload, signature };
 }
 
 export function encodeInvitation(inv: Invitation): object {
-  return {
-    payload: {
-      inviteID: inv.payload.inviteID,
-      owner: encodeDeviceIdentity(inv.payload.owner),
-      issuedAt: encodeDate(inv.payload.issuedAt),
-      expiresAt: encodeDate(inv.payload.expiresAt),
-      nonce: encodeData(inv.payload.nonce)
-    },
-    signature: encodeData(inv.signature)
+  const payload: Record<string, unknown> = {
+    inviteID: inv.payload.inviteID,
+    owner: encodeDeviceIdentity(inv.payload.owner),
+    issuedAt: encodeDate(inv.payload.issuedAt),
+    expiresAt: encodeDate(inv.payload.expiresAt),
+    nonce: encodeData(inv.payload.nonce),
+    tokenHash: encodeData(inv.payload.tokenHash),
+    lookupKey: encodeData(inv.payload.lookupKey),
+    possessionKey: encodeData(inv.payload.possessionKey),
+    grantedScopes: inv.payload.grantedScopes
   };
+  if (inv.payload.ownerDisplayName !== undefined) payload.ownerDisplayName = inv.payload.ownerDisplayName;
+  return { payload, signature: encodeData(inv.signature) };
 }
 
 export function verifyInvitationSignature(inv: Invitation): boolean {
-  const bytes = canonicalBytes(`${COMPANION_VERSION}.invite`, invitePayloadSigningFields(inv.payload));
+  const bytes = canonicalBytes(`${COMPANION_VERSION}.invite.v3`, invitePayloadSigningFields(inv.payload));
   return ed25519Verify(bytes, inv.signature, inv.payload.owner.publicKey);
 }
 
+/**
+ * Pairing v3 acceptance: friend-signed, carries the invite's lookup key (what
+ * the relay gates on), a token-derived `tokenProof` only the link holder can
+ * compute (verified by the OWNER, never by the relay), the friend's optional
+ * display name and the scopes the friend consents to. It replaces the v2 acceptance +
+ * confirmation + consent handshake: the relay turns a valid one into an
+ * active pairing and active both-sided consent in one transaction.
+ */
 export interface PairingAcceptance {
   acceptanceID: string;
   inviteID: string;
   owner: DeviceIdentity;
   approver: DeviceIdentity;
   issuedAt: number;
-  verificationCode: string;
+  lookupKey: Buffer;
+  tokenProof: Buffer;
+  /** Signature by the token-derived possession key over `acceptancePossessionFields`; verified by the relay before the invite is consumed. */
+  possessionSignature: Buffer;
+  approverDisplayName?: string;
+  acceptedScopes: Array<(typeof R5_SCOPES)[number]>;
 }
 
 export function pairingAcceptanceSigningFields(a: PairingAcceptance): string[] {
@@ -340,8 +460,21 @@ export function pairingAcceptanceSigningFields(a: PairingAcceptance): string[] {
     base64url(a.owner.publicKey),
     base64url(a.approver.publicKey),
     msString(a.issuedAt),
-    a.verificationCode
+    base64url(a.lookupKey),
+    base64url(a.tokenProof),
+    base64url(a.possessionSignature),
+    a.approverDisplayName ?? "",
+    [...a.acceptedScopes].sort().join(",")
   ];
+}
+
+/** What the token-derived possession key signs: binds the approver key, acceptance ID, invite and lookup key. */
+export function acceptancePossessionFields(a: PairingAcceptance): string[] {
+  return [a.acceptanceID, a.inviteID, a.owner.identityID, base64url(a.approver.publicKey), base64url(a.lookupKey)];
+}
+
+export function verifyAcceptancePossession(a: PairingAcceptance, possessionKey: Buffer): boolean {
+  return ed25519Verify(canonicalBytes(`${COMPANION_VERSION}.accept-possession`, acceptancePossessionFields(a)), a.possessionSignature, possessionKey);
 }
 
 export interface SignedAcceptance {
@@ -350,19 +483,28 @@ export interface SignedAcceptance {
 }
 
 export function decodePairingAcceptance(v: Record<string, unknown>): PairingAcceptance {
+  if (typeof v !== "object" || v === null) throw relayError("malformed");
   const acceptanceID = requireIdentifier(v.acceptanceID, "acceptanceID");
   const inviteID = requireIdentifier(v.inviteID, "inviteID");
   const owner = decodeDeviceIdentity(v.owner);
   const approver = decodeDeviceIdentity(v.approver);
   if (owner.role !== "owner" || approver.role !== "trustedApprover") throw relayError("malformed");
   const issuedAt = requireTimestampSeconds(v.issuedAt);
-  if (typeof v.verificationCode !== "string" || !/^\d{6}$/.test(v.verificationCode)) throw relayError("malformed");
-  return { acceptanceID, inviteID, owner, approver, issuedAt, verificationCode: v.verificationCode };
+  const lookupKey = decodeData(v.lookupKey);
+  const tokenProof = decodeData(v.tokenProof);
+  const possessionSignature = decodeData(v.possessionSignature);
+  if (lookupKey.length !== 32 || tokenProof.length !== 32 || possessionSignature.length !== 64) throw relayError("malformed");
+  const approverDisplayName = decodeDisplayName(v.approverDisplayName);
+  const acceptedScopes = decodeGrantedScopes(v.acceptedScopes);
+  const acceptance: PairingAcceptance = { acceptanceID, inviteID, owner, approver, issuedAt, lookupKey, tokenProof, possessionSignature, acceptedScopes };
+  if (approverDisplayName !== undefined) acceptance.approverDisplayName = approverDisplayName;
+  return acceptance;
 }
 
 export function decodeSignedAcceptance(value: unknown): SignedAcceptance {
   if (typeof value !== "object" || value === null) throw relayError("malformed");
   const v = value as Record<string, unknown>;
+  if (typeof v.acceptance !== "object" || v.acceptance === null) throw relayError("malformed");
   const acceptance = decodePairingAcceptance(v.acceptance as Record<string, unknown>);
   const signature = decodeData(v.signature);
   if (signature.length !== 64) throw relayError("malformed");
@@ -370,73 +512,34 @@ export function decodeSignedAcceptance(value: unknown): SignedAcceptance {
 }
 
 export function verifySignedAcceptanceSignature(signed: SignedAcceptance): boolean {
-  const bytes = canonicalBytes(`${COMPANION_VERSION}.acceptance`, pairingAcceptanceSigningFields(signed.acceptance));
+  const bytes = canonicalBytes(`${COMPANION_VERSION}.acceptance.v3`, pairingAcceptanceSigningFields(signed.acceptance));
   return ed25519Verify(bytes, signed.signature, signed.acceptance.approver.publicKey);
 }
 
-/**
- * R5 pairing v2 (`docs/r5-pairing-v2-plan.md`'s "Slice P2a"): the wire shape
- * for one `InboxResponse.pendingAcceptances` entry, matching Swift's
- * `SignedAcceptance` (`{"acceptance": {...}, "signature": "<base64>"}`) so
- * the owner device can verify the approver's signature locally
- * (`OwnerAcceptanceCheck`) before calling `confirm` with no typed code.
- */
-export function encodeSignedAcceptance(s: SignedAcceptance): object {
-  return { acceptance: encodePairingAcceptance(s.acceptance), signature: encodeData(s.signature) };
-}
-
 export function encodePairingAcceptance(a: PairingAcceptance): object {
-  return {
+  const out: Record<string, unknown> = {
     acceptanceID: a.acceptanceID,
     inviteID: a.inviteID,
     owner: encodeDeviceIdentity(a.owner),
     approver: encodeDeviceIdentity(a.approver),
     issuedAt: encodeDate(a.issuedAt),
-    verificationCode: a.verificationCode
+    lookupKey: encodeData(a.lookupKey),
+    tokenProof: encodeData(a.tokenProof),
+    possessionSignature: encodeData(a.possessionSignature),
+    acceptedScopes: a.acceptedScopes
   };
+  if (a.approverDisplayName !== undefined) out.approverDisplayName = a.approverDisplayName;
+  return out;
 }
 
-export interface PairingConfirmation {
-  acceptanceID: string;
-  inviteID: string;
-  owner: DeviceIdentity;
-  approverIdentityID: string;
-  verificationCode: string;
-  issuedAt: number;
+/** Wire shape of one `InboxResponse.acceptances` entry: Swift's `SignedAcceptance` (`{"acceptance": {...}, "signature": "<base64>"}`). */
+export function encodeSignedAcceptance(s: SignedAcceptance): object {
+  return { acceptance: encodePairingAcceptance(s.acceptance), signature: encodeData(s.signature) };
 }
 
-export function pairingConfirmationSigningFields(c: PairingConfirmation): string[] {
-  return [c.acceptanceID, c.inviteID, c.owner.identityID, c.approverIdentityID, c.verificationCode, msString(c.issuedAt)];
-}
-
-export interface SignedConfirmation {
-  confirmation: PairingConfirmation;
-  signature: Buffer;
-}
-
-export function decodeSignedConfirmation(value: unknown): SignedConfirmation {
-  if (typeof value !== "object" || value === null) throw relayError("malformed");
-  const v = value as Record<string, unknown>;
-  const c = v.confirmation;
-  if (typeof c !== "object" || c === null) throw relayError("malformed");
-  const cv = c as Record<string, unknown>;
-  const confirmation: PairingConfirmation = {
-    acceptanceID: requireIdentifier(cv.acceptanceID, "acceptanceID"),
-    inviteID: requireIdentifier(cv.inviteID, "inviteID"),
-    owner: decodeDeviceIdentity(cv.owner),
-    approverIdentityID: requireIdentifier(cv.approverIdentityID, "approverIdentityID"),
-    verificationCode: typeof cv.verificationCode === "string" ? cv.verificationCode : "",
-    issuedAt: requireTimestampSeconds(cv.issuedAt)
-  };
-  if (!/^\d{6}$/.test(confirmation.verificationCode)) throw relayError("malformed");
-  const signature = decodeData(v.signature);
-  if (signature.length !== 64) throw relayError("malformed");
-  return { confirmation, signature };
-}
-
-export function verifySignedConfirmationSignature(signed: SignedConfirmation): boolean {
-  const bytes = canonicalBytes(`${COMPANION_VERSION}.confirmation`, pairingConfirmationSigningFields(signed.confirmation));
-  return ed25519Verify(bytes, signed.signature, signed.confirmation.owner.publicKey);
+/** Wire shape of `POST /v1/invite/lookup`'s 200 response: the owner-signed invitation. */
+export function encodeInviteLookupResponse(inv: Invitation): object {
+  return { invitation: encodeInvitation(inv) };
 }
 
 export type PairingState = "active" | "revoked";
@@ -446,8 +549,12 @@ export interface Pairing {
   owner: DeviceIdentity;
   approver: DeviceIdentity;
   epoch: number;
+  /** When the pairing became active: for a v3 pairing, the moment the friend accepted ("joined"). */
   createdAt: number;
   state: PairingState;
+  /** Pairing v3: names carried from the signed invite/acceptance so each side can show who the other is. */
+  ownerDisplayName?: string;
+  approverDisplayName?: string;
 }
 
 export function decodePairing(value: unknown): Pairing {
@@ -461,11 +568,16 @@ export function decodePairing(value: unknown): Pairing {
   const states: PairingState[] = ["active", "revoked"];
   if (typeof v.state !== "string" || !states.includes(v.state as PairingState)) throw relayError("malformed");
   if (owner.role !== "owner" || approver.role !== "trustedApprover" || epoch <= 0) throw relayError("malformed");
-  return { pairingID, owner, approver, epoch, createdAt, state: v.state as PairingState };
+  const pairing: Pairing = { pairingID, owner, approver, epoch, createdAt, state: v.state as PairingState };
+  const ownerDisplayName = decodeDisplayName(v.ownerDisplayName);
+  const approverDisplayName = decodeDisplayName(v.approverDisplayName);
+  if (ownerDisplayName !== undefined) pairing.ownerDisplayName = ownerDisplayName;
+  if (approverDisplayName !== undefined) pairing.approverDisplayName = approverDisplayName;
+  return pairing;
 }
 
 export function encodePairing(p: Pairing): object {
-  return {
+  const out: Record<string, unknown> = {
     pairingID: p.pairingID,
     owner: encodeDeviceIdentity(p.owner),
     approver: encodeDeviceIdentity(p.approver),
@@ -473,6 +585,9 @@ export function encodePairing(p: Pairing): object {
     createdAt: encodeDate(p.createdAt),
     state: p.state
   };
+  if (p.ownerDisplayName !== undefined) out.ownerDisplayName = p.ownerDisplayName;
+  if (p.approverDisplayName !== undefined) out.approverDisplayName = p.approverDisplayName;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,15 +1210,17 @@ export interface InboxResponse {
    */
   approvals?: Approval[];
   /**
-   * R5 pairing v2 (contract v1.3, additive): every `ledger.pendingAcceptances`
-   * entry whose invite exists, is unconsumed and has not expired. Same
-   * presence rule as `approvals`/`ownerIdentityID` -- populated only when the
-   * signer is fetching their own ledger as its owner, `undefined` (omitted
-   * from the wire body entirely, not `null`) on a helper/approver fetch.
-   * Swift's `InboxResponse.pendingAcceptances` is `[SignedAcceptance]?` and
-   * decodes its absence via `decodeIfPresent`.
+   * Pairing v3 (contract v1.4, additive): the friend-signed acceptance that
+   * created each pairing in `pairings`, for pairings created by a v3 accept
+   * that are still retained. Populated only on an owner fetch of their own
+   * ledger (same presence rule as `approvals`); omitted on a helper fetch.
+   * Because there is no owner "confirm" step any more, this is what lets the
+   * owner device verify -- against the invite it created -- that a pairing
+   * really came from the holder of its token, instead of trusting the relay's
+   * word for who "joined" (see `JoinedAcceptanceCheck` in CompanionKit).
+   * Swift's `InboxResponse.acceptances` is `[SignedAcceptance]?`.
    */
-  pendingAcceptances?: SignedAcceptance[];
+  acceptances?: SignedAcceptance[];
 }
 
 export function encodeInboxResponse(r: InboxResponse): object {
@@ -1120,8 +1237,8 @@ export function encodeInboxResponse(r: InboxResponse): object {
   if (r.approvals !== undefined) {
     base.approvals = r.approvals.map(encodeApproval);
   }
-  if (r.pendingAcceptances !== undefined) {
-    base.pendingAcceptances = r.pendingAcceptances.map(encodeSignedAcceptance);
+  if (r.acceptances !== undefined) {
+    base.acceptances = r.acceptances.map(encodeSignedAcceptance);
   }
   return base;
 }

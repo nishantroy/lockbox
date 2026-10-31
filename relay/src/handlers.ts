@@ -7,8 +7,8 @@
 // opaque request id (docs/r5-relay-plan.md). Error bodies are always
 // `{ "error": "<code>" }`; nothing else is ever echoed back.
 
-import { submitOperation, fetchInboxOperation } from "./service.js";
-import { encodeRelayResponse, encodeInboxResponse, MAX_RAW_BODY_BYTES } from "./protocol.js";
+import { submitOperation, fetchInboxOperation, lookupInvite } from "./service.js";
+import { encodeRelayResponse, encodeInboxResponse, encodeInviteLookupResponse, MAX_RAW_BODY_BYTES } from "./protocol.js";
 import { isRelayError } from "./errors.js";
 
 function json(status: number, body: unknown): Response {
@@ -70,6 +70,21 @@ export async function handleInbox(request: Request): Promise<Response> {
     const body = await readBody(request);
     const response = await fetchInboxOperation(body, undefined, clientIPFromRequest(request));
     return json(200, encodeInboxResponse(response));
+  } catch (error) {
+    if (error instanceof Error && (error as { __oversized?: boolean }).__oversized) {
+      return json(413, { error: "payload_too_large" });
+    }
+    return errorResponse(error);
+  }
+}
+
+/** Pairing v3: unauthenticated, rate-limited invite lookup by bearer token. */
+export async function handleInviteLookup(request: Request): Promise<Response> {
+  if (request.method !== "POST") return json(405, { error: "malformed" });
+  try {
+    const body = await readBody(request);
+    const invitation = await lookupInvite(body, undefined, clientIPFromRequest(request));
+    return json(200, encodeInviteLookupResponse(invitation));
   } catch (error) {
     if (error instanceof Error && (error as { __oversized?: boolean }).__oversized) {
       return json(413, { error: "payload_too_large" });

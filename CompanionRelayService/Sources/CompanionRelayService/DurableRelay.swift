@@ -20,7 +20,7 @@ public struct DurableAuthorizationPolicy: Sendable {
     /// Closed protocol boundary. `ack` is an owner-only, payload-free receipt
     /// reduced below; every stateful friend-permission operation is fixed there.
     fileprivate static let modeledKinds: Set<String> = [
-        "ack", "invite", "accept", "confirm", "consent", "session", "request",
+        "ack", "invite", "accept", "consent", "session", "request",
         "approval", "cancel", "use", "natural_end", "revoke", "replace_pairing"
     ]
 

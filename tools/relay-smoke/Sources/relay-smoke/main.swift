@@ -146,9 +146,9 @@ let helperClient = makeHelperClient()
 
 // MARK: - Flow state
 
+var issuedInvite: IssuedInvite?
 var invitation: Invitation?
-var pendingAcceptance: SignedAcceptance?
-var derivedVerificationCode: String?
+var joinAcceptance: SignedAcceptance?
 var pairing: Pairing?
 var ownerConsent: RelationshipConsent?
 var helperConsent: RelationshipConsent?
@@ -166,94 +166,79 @@ await step("GET /v1/health") {
     guard try await transport.health() else { throw SmokeError.unexpected("health check returned false") }
 }
 
-// MARK: - 2. Invite and accept
+// MARK: - 2. Pairing v3: owner invites, friend looks the token up and accepts, done
 
-await step("owner creates an invite") {
-    invitation = try await ownerClient.createInvite(inviteID: UUID().uuidString, validFor: 3_600, now: Date())
-}
-
-await step("helper accepts the invite") {
-    guard let invitation else { throw SmokeError.unexpected("no invitation to accept") }
-    // The returned acceptance is discarded here on purpose: the owner never
-    // sees it out of band. The owner only ever learns of it through its own
-    // inbox fetch below (R5 pairing v2, docs/r5-pairing-v2-plan.md's "Slice
-    // P2a"), exactly as the real app does.
-    _ = try await helperClient.accept(invitation, acceptanceID: UUID().uuidString, now: Date())
-}
-
-// MARK: - 3. Owner's inbox delivers the pending acceptance; OwnerAcceptanceCheck
-// verifies it and derives the code locally, with no out-of-band/typed code.
-
-await step("owner's inbox delivers the pending acceptance") {
-    guard let invitation else { throw SmokeError.unexpected("no invitation") }
-    let response = try await ownerClient.fetchInboxResponse()
-    guard let entry = response.pendingAcceptances?.first(where: { $0.acceptance.inviteID == invitation.payload.inviteID }) else {
-        throw SmokeError.unexpected("owner inbox did not deliver the pending acceptance")
-    }
-    pendingAcceptance = entry
-}
-
-await step("OwnerAcceptanceCheck verifies the inbox-delivered acceptance and derives the code") {
-    guard let invitation, let pendingAcceptance else { throw SmokeError.unexpected("missing invitation or pending acceptance") }
-    derivedVerificationCode = try OwnerAcceptanceCheck.verify(signedAcceptance: pendingAcceptance, invite: invitation,
-                                                              ownerIdentity: ownerSigner.identity, now: Date())
-}
-
-// MARK: - 4. Confirm: wrong code rejected, then the locally derived code
-
-await expectRejection("confirm rejects a wrong verification code") {
-    guard let pendingAcceptance, let derivedVerificationCode else { throw SmokeError.unexpected("no derived verification code") }
-    let wrongCode = derivedVerificationCode == "000000" ? "111111" : "000000"
-    _ = try await ownerClient.confirm(pendingAcceptance.acceptance, verificationCode: wrongCode, now: Date())
-}
-
-await step("confirm accepts the inbox-delivered acceptance using the locally derived code") {
-    guard let pendingAcceptance, let derivedVerificationCode else { throw SmokeError.unexpected("no derived verification code") }
-    pairing = try await ownerClient.confirm(pendingAcceptance.acceptance, verificationCode: derivedVerificationCode, now: Date())
-}
-
-await step("the confirmed pending acceptance no longer appears in the owner's inbox") {
-    guard let invitation else { throw SmokeError.unexpected("no invitation") }
-    let response = try await ownerClient.fetchInboxResponse()
-    guard (response.pendingAcceptances ?? []).contains(where: { $0.acceptance.inviteID == invitation.payload.inviteID }) == false else {
-        throw SmokeError.unexpected("owner inbox still delivered the confirmed acceptance")
+await step("owner creates an invite (token + display name + granted scopes)") {
+    let issued = try await ownerClient.createInvite(inviteID: UUID().uuidString, validFor: 3_600, now: Date(),
+                                                    ownerDisplayName: "Smoke Owner")
+    issuedInvite = issued
+    invitation = issued.invitation
+    guard issued.token.count == 22, InviteToken.token(fromShareLink: issued.shareLink) == issued.token else {
+        throw SmokeError.unexpected("share link is not phone-lockbox-companion://i/<22-char token>")
     }
 }
 
-// MARK: - 5. Helper learns the pairing from its inbox
+await expectRejection("lookup of an unknown token is not_found") {
+    _ = try await helperClient.lookupInvite(token: InviteToken.generate())
+}
 
-await step("helper learns the pairing from its inbox") {
-    guard let pairing else { throw SmokeError.unexpected("no confirmed pairing") }
+await step("friend looks the token up and verifies the owner-signed invitation") {
+    guard let issuedInvite else { throw SmokeError.unexpected("no invite") }
+    let found = try await helperClient.lookupInvite(token: issuedInvite.token)
+    guard found.payload.inviteID == issuedInvite.invitation.payload.inviteID,
+          found.payload.ownerDisplayName == "Smoke Owner" else {
+        throw SmokeError.unexpected("lookup returned a different invitation")
+    }
+    invitation = found
+}
+
+await step("friend accepts: pairing and both-sided consent are active immediately") {
+    guard let issuedInvite, let invitation else { throw SmokeError.unexpected("no invitation to accept") }
+    let accepted = try await helperClient.acceptInvite(invitation, token: issuedInvite.token,
+                                                       approverDisplayName: "Smoke Friend",
+                                                       acceptanceID: UUID().uuidString, now: Date())
+    guard accepted.state == .active, accepted.ownerDisplayName == "Smoke Owner", accepted.approverDisplayName == "Smoke Friend" else {
+        throw SmokeError.unexpected("accept response is not the active, named pairing")
+    }
+    pairing = accepted
+}
+
+await expectRejection("the invite is single use: the link no longer resolves") {
+    guard let issuedInvite else { throw SmokeError.unexpected("no invite") }
+    _ = try await helperClient.lookupInvite(token: issuedInvite.token)
+}
+
+// MARK: - 3. Owner's inbox shows who joined, with a verifiable friend-signed acceptance
+
+await step("owner's inbox shows the joined pairing and JoinedAcceptanceCheck proves it") {
+    guard let issuedInvite, let pairing else { throw SmokeError.unexpected("missing invite or pairing") }
+    let response = try await ownerClient.fetchInboxResponse()
+    let verified = JoinedAcceptanceCheck.verifiedPairings(
+        in: response, invites: [issuedInvite.invitation.payload.inviteID: issuedInvite], ownerIdentity: ownerSigner.identity).verified
+    guard verified.contains(where: { $0.pairingID == pairing.pairingID }) else {
+        throw SmokeError.unexpected("owner inbox did not deliver a verifiable joined pairing")
+    }
+    guard let consent = response.consents?.first(where: { $0.pairingID == pairing.pairingID }),
+          consent.authorizes(.approveEarlyEnd), consent.authorizes(.receiveRequests) else {
+        throw SmokeError.unexpected("consent is not bilaterally active for both scopes after accept")
+    }
+    ownerConsent = consent
+    joinAcceptance = response.acceptances?.first
+}
+
+// MARK: - 4. Helper's inbox reports the pairing and the same consent
+
+await step("helper learns the pairing and active consent from its inbox") {
+    guard let pairing else { throw SmokeError.unexpected("no pairing") }
     let response = try await helperClient.fetchInboxResponse()
-    guard let learned = response.pairings?.first(where: { $0.pairingID == pairing.pairingID }) else {
-        throw SmokeError.unexpected("helper inbox did not report the pairing")
+    guard let learned = response.pairings?.first(where: { $0.pairingID == pairing.pairingID }), learned.state == .active else {
+        throw SmokeError.unexpected("helper inbox did not report an active pairing")
     }
-    guard learned.state == .active else {
-        throw SmokeError.unexpected("learned pairing is not active")
+    guard let consent = response.consents?.first(where: { $0.pairingID == pairing.pairingID }),
+          consent.authorizes(.approveEarlyEnd), consent.authorizes(.receiveRequests) else {
+        throw SmokeError.unexpected("helper inbox consent is not active")
     }
-}
-
-// MARK: - 6. Consent both sides; owner's anchored inbox shows both
-
-await step("owner grants approveEarlyEnd and receiveRequests") {
-    guard let pairing else { throw SmokeError.unexpected("no pairing") }
-    ownerConsent = try await ownerClient.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-}
-
-await step("helper accepts approveEarlyEnd and receiveRequests") {
-    guard let pairing else { throw SmokeError.unexpected("no pairing") }
-    helperConsent = try await helperClient.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-}
-
-await step("owner's anchored inbox shows bilateral consent") {
-    guard let pairing else { throw SmokeError.unexpected("no pairing") }
-    let response = try await ownerClient.fetchInboxResponse()
-    guard let consent = response.consents?.first(where: { $0.pairingID == pairing.pairingID }) else {
-        throw SmokeError.unexpected("owner inbox did not report consent")
-    }
-    guard consent.authorizes(.approveEarlyEnd), consent.authorizes(.receiveRequests) else {
-        throw SmokeError.unexpected("consent is not bilaterally active for both scopes")
-    }
+    helperConsent = consent
 }
 
 // MARK: - 7. Publish an exact session and request an early end

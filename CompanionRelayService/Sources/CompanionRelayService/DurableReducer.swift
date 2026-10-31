@@ -29,55 +29,65 @@ enum DurableProtocolReducer {
             guard signer == owner, invitation.payload.owner == owner else { throw CompanionError.unauthorized }
             try invitation.validate(at: now)
             guard ledger.invitations[invitation.payload.inviteID] == nil else { throw CompanionError.replay }
+            // A lookup key identifies exactly one invite.
+            guard !ledger.invitations.values.contains(where: { $0.invitation.payload.lookupKey == invitation.payload.lookupKey }) else {
+                throw CompanionError.replay
+            }
             ledger.invitations[invitation.payload.inviteID] = DurableInvitationRecord(invitation: invitation)
             return .invitation(invitation)
 
         case "accept":
+            // Pairing v3: one friend-signed operation consumes the invite and
+            // creates the active pairing and both-sided consent together.
             let signed = try decode(SignedAcceptance.self, envelope.payload)
-            guard signer == signed.acceptance.approver else { throw CompanionError.unauthorized }
-            try signed.acceptance.validate()
-            guard signed.acceptance.owner == owner,
-                  let invitation = ledger.invitations[signed.acceptance.inviteID],
-                  invitation.invitation.payload.owner == owner,
-                  invitation.consumedAt == nil,
-                  now < invitation.invitation.payload.expiresAt,
-                  signed.acceptance.issuedAt <= now.addingTimeInterval(60),
-                  verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance",
-                         fields: signed.acceptance.signingFields(), key: signed.acceptance.approver.publicKey) else {
+            let acceptance = signed.acceptance
+            guard signer == acceptance.approver else { throw CompanionError.unauthorized }
+            try acceptance.validate()
+            guard acceptance.owner == owner else { throw CompanionError.unauthorized }
+            // Unknown invite, wrong lookup key and a bad signature are one indistinguishable
+            // failure. The relay never sees the token; the owner verifies `tokenProof`.
+            guard let record = ledger.invitations[acceptance.inviteID],
+                  record.invitation.payload.owner == owner,
+                  InviteToken.constantTimeEqual(acceptance.lookupKey, record.invitation.payload.lookupKey),
+                  verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance.v3",
+                         fields: acceptance.signingFields(), key: acceptance.approver.publicKey),
+                  InviteToken.verifyPossession(of: acceptance, possessionKey: record.invitation.payload.possessionKey) else {
                 throw CompanionError.unauthorized
             }
-            guard ledger.pendingAcceptances[signed.acceptance.acceptanceID] == nil else { throw CompanionError.replay }
-            ledger.pendingAcceptances[signed.acceptance.acceptanceID] = signed.acceptance
-            return .acceptance(signed.acceptance)
-
-        case "confirm":
-            let signed = try decode(SignedConfirmation.self, envelope.payload)
-            guard signer == owner, signed.confirmation.owner == owner else { throw CompanionError.unauthorized }
-            guard let acceptance = ledger.pendingAcceptances[signed.confirmation.acceptanceID],
-                  acceptance.inviteID == signed.confirmation.inviteID,
-                  acceptance.approver.identityID == signed.confirmation.approverIdentityID,
-                  let invitation = ledger.invitations[acceptance.inviteID], invitation.consumedAt == nil,
-                  now < invitation.invitation.payload.expiresAt,
-                  signed.confirmation.issuedAt <= now.addingTimeInterval(60),
-                  acceptance.verificationCode == signed.confirmation.verificationCode,
-                  PairingAcceptance.code(invite: invitation.invitation.payload,
-                                         approver: acceptance.approver) == signed.confirmation.verificationCode,
-                  verify(signed.signature, domain: "\(CompanionCanonical.version).confirmation",
-                         fields: signed.confirmation.signingFields(), key: owner.publicKey) else {
-                throw CompanionError.wrongVerificationCode
+            let invitePayload = record.invitation.payload
+            guard acceptance.issuedAt <= now.addingTimeInterval(CompanionLimits.pairingClockSkew) else {
+                throw CompanionError.malformed("acceptance is from the future")
             }
-            ledger.invitations[acceptance.inviteID]?.consumedAt = now
-            ledger.pendingAcceptances = ledger.pendingAcceptances.filter { $0.value.inviteID != acceptance.inviteID }
-            let pairingID = durableBase64URL(Data(SHA256.hash(data: CompanionCanonical.bytes(
-                domain: "\(CompanionCanonical.version).pairing",
-                fields: [acceptance.inviteID, acceptance.approver.identityID])))).prefix(32).description
+            let pairingID = Pairing.derivedID(inviteID: acceptance.inviteID, approverIdentityID: acceptance.approver.identityID)
+            if record.consumedAt != nil {
+                // A retry of a lost response under a new operation ID returns this same approver's pairing.
+                if let existing = ledger.pairings[pairingID]?.pairing, existing.state == .active, existing.approver == acceptance.approver {
+                    return .pairing(existing)
+                }
+                throw CompanionError.replay
+            }
+            guard now < invitePayload.expiresAt else { throw CompanionError.expired }
+            guard acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invitePayload.grantedScopes else {
+                throw CompanionError.consentRequired
+            }
             guard ledger.pairings[pairingID] == nil else { throw CompanionError.replay }
             let epoch = try checkedPairingEpoch(ledger.pairingEpochs[pairingID] ?? 0)
-            let pairing = try Pairing(pairingID: pairingID, owner: owner,
-                                      approver: acceptance.approver, epoch: epoch,
-                                      createdAt: now, state: .active)
+            let pairing = try Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver,
+                                      epoch: epoch, createdAt: now, state: .active,
+                                      ownerDisplayName: invitePayload.ownerDisplayName,
+                                      approverDisplayName: acceptance.approverDisplayName)
+            // Equivalent to the owner-grant + approver-accept pair of mutations,
+            // applied atomically: generation 2, both sides active.
+            let consent = try RelationshipConsent(relationshipID: pairingID, pairingID: pairingID, pairEpoch: epoch,
+                                                  owner: owner, approver: acceptance.approver,
+                                                  ownerScopes: invitePayload.grantedScopes,
+                                                  approverScopes: acceptance.acceptedScopes,
+                                                  ownerState: .active, approverState: .active,
+                                                  updatedAt: now, generation: 2)
+            ledger.invitations[acceptance.inviteID]?.consumedAt = now
             ledger.pairings[pairingID] = DurablePairingRecord(pairing: pairing)
             ledger.pairingEpochs[pairingID] = epoch
+            ledger.relationshipConsents[pairingID] = consent
             return .pairing(pairing)
 
         case "consent":
@@ -327,7 +337,9 @@ enum DurableProtocolReducer {
             let activated = try Pairing(pairingID: replacement.replacementPairingID, owner: owner,
                                         approver: replacement.replacement,
                                         epoch: replacement.replacementEpoch,
-                                        createdAt: now, state: .active)
+                                        createdAt: now, state: .active,
+                                        ownerDisplayName: previous.ownerDisplayName,
+                                        approverDisplayName: previous.approverDisplayName)
             ledger.pairings[activated.pairingID] = DurablePairingRecord(pairing: activated)
             ledger.pairingEpochs[activated.pairingID] = activated.epoch
             return .pairing(activated)

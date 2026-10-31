@@ -12,8 +12,7 @@ import {
   verifyInvitationSignature,
   decodeSignedAcceptance,
   verifySignedAcceptanceSignature,
-  decodeSignedConfirmation,
-  verifySignedConfirmationSignature,
+  verifyAcceptancePossession,
   decodeConsentMutation,
   decodeActiveSession,
   decodeTrustedRequest,
@@ -32,9 +31,10 @@ import {
   approvalsEqual,
   isValidIdentifier
 } from "./protocol.js";
-import type { SignedOperation } from "./protocol.js";
-import { canonicalBytes, digest, base64url, COMPANION_VERSION, pairingVerificationCode } from "./canonical.js";
-import { normalizePendingAcceptance, type Ledger } from "./ledger.js";
+import type { SignedOperation, Pairing } from "./protocol.js";
+import { canonicalBytes, digest, base64url, COMPANION_VERSION } from "./canonical.js";
+import { timingSafeEqual } from "node:crypto";
+import type { Ledger } from "./ledger.js";
 import { relayError, type RelayErrorCode } from "./errors.js";
 
 /**
@@ -56,7 +56,6 @@ const R5_SCOPE_RECEIVE_REQUESTS = "receiveRequests" as const;
 export const OWNER_ONLY_KINDS = new Set([
   "ack",
   "invite",
-  "confirm",
   "consent",
   "session",
   "request",
@@ -180,7 +179,7 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       const invitation = decodeInvitation(JSON.parse(payload.toString("utf8")));
       if (!identitiesEqual(signer, owner) || !identitiesEqual(invitation.payload.owner, owner)) fail("unauthorized");
       if (now >= invitation.payload.expiresAt) fail("expired");
-      if (now < invitation.payload.issuedAt - 60) fail("malformed");
+      if (now < invitation.payload.issuedAt - 300) fail("malformed");
       if (!verifyInvitationSignature(invitation)) fail("invalid_signature");
       if (ledger.invitations[invitation.payload.inviteID]) fail("replay");
       ledger.invitations[invitation.payload.inviteID] = { invitation, consumedAt: null };
@@ -188,74 +187,76 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
     }
 
     case "accept": {
+      // Pairing v3 (docs/r5-pairing-v3-plan.md): one friend-signed operation
+      // that consumes the invite and, in this same reducer call (hence one
+      // transaction), creates the active pairing and the both-sided active
+      // consent. There is no pending-acceptance, confirm or consent step.
       const signed = decodeSignedAcceptance(JSON.parse(payload.toString("utf8")));
-      if (!identitiesEqual(signer, signed.acceptance.approver)) fail("unauthorized");
-      if (!identitiesEqual(signed.acceptance.owner, owner)) fail("unauthorized");
-      const inviteRecord = ledger.invitations[signed.acceptance.inviteID];
+      const acceptance = signed.acceptance;
+      if (!identitiesEqual(signer, acceptance.approver)) fail("unauthorized");
+      if (!identitiesEqual(acceptance.owner, owner)) fail("unauthorized");
+      const inviteRecord = ledger.invitations[acceptance.inviteID];
+      const invitePayload = inviteRecord?.invitation.payload;
+      // Unknown invite, foreign invite, a pre-v3 invite without a lookup key
+      // and a wrong lookup key are one indistinguishable failure. The relay
+      // never sees the token and cannot verify `tokenProof`; the OWNER device
+      // does (the possession signature below it CAN verify) (JoinedAcceptanceCheck), so a relay that fabricates an acceptance
+      // using the lookup key it stores cannot make the owner trust it.
       if (
         !inviteRecord ||
-        !identitiesEqual(inviteRecord.invitation.payload.owner, owner) ||
-        inviteRecord.consumedAt !== null ||
-        now >= inviteRecord.invitation.payload.expiresAt ||
-        signed.acceptance.issuedAt > now + 60 ||
-        !verifySignedAcceptanceSignature(signed)
+        !invitePayload ||
+        !identitiesEqual(invitePayload.owner, owner) ||
+        !Buffer.isBuffer(invitePayload.lookupKey) ||
+        !bufferEquals(invitePayload.lookupKey, acceptance.lookupKey) ||
+        !verifySignedAcceptanceSignature(signed) ||
+        // Proof of possession the relay CAN check: only a token holder can sign with the
+        // token-derived key, so someone who merely read the lookup key from the database or
+        // a log cannot burn the invite. Fails before anything is consumed.
+        !Buffer.isBuffer(invitePayload.possessionKey) ||
+        !verifyAcceptancePossession(acceptance, invitePayload.possessionKey)
       ) {
         fail("unauthorized");
       }
-      if (ledger.pendingAcceptances[signed.acceptance.acceptanceID]) fail("replay");
-      // R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a"): retain the
-      // approver's signature alongside the acceptance, so the owner's inbox
-      // can later deliver a verifiable `SignedAcceptance` (see
-      // `fetchInboxOperation`) instead of a bare, unsigned payload.
-      ledger.pendingAcceptances[signed.acceptance.acceptanceID] = { acceptance: signed.acceptance, signature: signed.signature };
-      return { kind: "acceptance", value: signed.acceptance };
-    }
-
-    case "confirm": {
-      const signed = decodeSignedConfirmation(JSON.parse(payload.toString("utf8")));
-      if (!identitiesEqual(signer, owner) || !identitiesEqual(signed.confirmation.owner, owner)) fail("unauthorized");
-      // `normalizePendingAcceptance` reads either shape: a row this reducer
-      // wrote (the `{acceptance, signature}` wrapper) or a legacy row from
-      // before this change (the bare acceptance). Confirm never needed the
-      // approver's signature itself (only the owner's own confirmation
-      // signature, checked below), so this is unaffected by which shape is
-      // stored.
-      const pendingRaw = ledger.pendingAcceptances[signed.confirmation.acceptanceID];
-      const acceptance = pendingRaw ? normalizePendingAcceptance(pendingRaw).acceptance : undefined;
-      const invite = acceptance ? ledger.invitations[acceptance.inviteID] : undefined;
-      const expectedCode = acceptance
-        ? pairingVerificationCode({
-            inviteID: acceptance.inviteID,
-            ownerIdentityID: owner.identityID,
-            approverIdentityID: acceptance.approver.identityID,
-            nonce: invite ? invite.invitation.payload.nonce : Buffer.alloc(0)
-          })
-        : null;
-      if (
-        !acceptance ||
-        acceptance.inviteID !== signed.confirmation.inviteID ||
-        acceptance.approver.identityID !== signed.confirmation.approverIdentityID ||
-        !invite ||
-        invite.consumedAt !== null ||
-        now >= invite.invitation.payload.expiresAt ||
-        signed.confirmation.issuedAt > now + 60 ||
-        acceptance.verificationCode !== signed.confirmation.verificationCode ||
-        expectedCode !== signed.confirmation.verificationCode ||
-        !verifySignedConfirmationSignature(signed)
-      ) {
-        fail("wrong_verification_code");
+      if (acceptance.issuedAt > now + ACCEPT_FUTURE_SKEW_SECONDS) fail("malformed");
+      if (inviteRecord.consumedAt !== null) {
+        // A retry of a lost response under a new operation ID: if this same
+        // approver already holds the active pairing this invite created,
+        // return it rather than reporting a replay.
+        const existing = ledger.pairings[derivedPairingID(acceptance.inviteID, acceptance.approver.identityID)];
+        if (existing && existing.pairing.state === "active" && identitiesEqual(existing.pairing.approver, acceptance.approver)) {
+          return { kind: "pairing", value: existing.pairing };
+        }
+        fail("replay");
       }
-      invite.consumedAt = now;
-      for (const id of Object.keys(ledger.pendingAcceptances)) {
-        const entry = ledger.pendingAcceptances[id];
-        if (entry && normalizePendingAcceptance(entry).acceptance.inviteID === acceptance.inviteID) delete ledger.pendingAcceptances[id];
-      }
+      if (now >= invitePayload.expiresAt) fail("expired");
+      // The friend must accept exactly the scopes the owner granted.
+      if (acceptance.acceptedScopes.join(",") !== [...invitePayload.grantedScopes].sort().join(",")) fail("consent_required");
       const pairingID = derivedPairingID(acceptance.inviteID, acceptance.approver.identityID);
       if (ledger.pairings[pairingID]) fail("replay");
       const epoch = checkedIncrement(ledger.pairingEpochs[pairingID] ?? 0);
-      const pairing = { pairingID, owner, approver: acceptance.approver, epoch, createdAt: now, state: "active" as const };
-      ledger.pairings[pairingID] = { pairing, revokedAt: null };
+      inviteRecord.consumedAt = now;
+      const pairing: Pairing = { pairingID, owner, approver: acceptance.approver, epoch, createdAt: now, state: "active" };
+      if (invitePayload.ownerDisplayName !== undefined) pairing.ownerDisplayName = invitePayload.ownerDisplayName;
+      if (acceptance.approverDisplayName !== undefined) pairing.approverDisplayName = acceptance.approverDisplayName;
+      ledger.pairings[pairingID] = { pairing, revokedAt: null, acceptance: signed };
       ledger.pairingEpochs[pairingID] = epoch;
+      ledger.relationshipConsents[pairingID] = {
+        schemaVersion: 2,
+        relationshipID: pairingID,
+        pairingID,
+        pairEpoch: epoch,
+        // Equivalent to the v2 owner-grant + approver-accept sequence, applied
+        // atomically: both mutations advance the generation from 0, so a v3
+        // pairing starts at generation 2 exactly as a fully-consented v2 one did.
+        generation: 2,
+        owner,
+        approver: acceptance.approver,
+        ownerScopes: [...invitePayload.grantedScopes].sort(),
+        approverScopes: [...acceptance.acceptedScopes].sort(),
+        ownerState: "active",
+        approverState: "active",
+        updatedAt: now
+      };
       return { kind: "pairing", value: pairing };
     }
 
@@ -535,7 +536,10 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
         approver: proposal.replacement,
         epoch: proposal.replacementEpoch,
         createdAt: now,
-        state: "active" as const
+        state: "active" as const,
+        // Carry both display names across a replacement so People does not lose who this is.
+        ...(previous.ownerDisplayName !== undefined ? { ownerDisplayName: previous.ownerDisplayName } : {}),
+        ...(previous.approverDisplayName !== undefined ? { approverDisplayName: previous.approverDisplayName } : {})
       };
       ledger.pairings[activated.pairingID] = { pairing: activated, revokedAt: null };
       ledger.pairingEpochs[activated.pairingID] = activated.epoch;
@@ -613,6 +617,14 @@ function revokeConsent(ledger: Ledger, pairingID: string, now: number): void {
   consent.generation = checkedIncrement(consent.generation);
   consent.updatedAt = now;
 }
+
+/** Constant-time buffer comparison. */
+function bufferEquals(a: Buffer, b: Buffer): boolean {
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** How far ahead of the relay's clock a friend's acceptance may be stamped (device clock skew), in seconds. */
+const ACCEPT_FUTURE_SKEW_SECONDS = 300;
 
 function derivedPairingID(inviteID: string, approverIdentityID: string): string {
   // Port of the `confirm` case's pairing ID derivation:

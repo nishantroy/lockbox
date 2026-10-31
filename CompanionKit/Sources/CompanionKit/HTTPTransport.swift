@@ -24,10 +24,20 @@ public protocol AsyncCompanionTransport: Sendable {
     /// Foreground fetch is authoritative. Notification/APNs delivery is
     /// intentionally outside this package and never authorizes an action.
     func fetchInbox(_ operation: SignedOperation) async throws -> InboxResponse
+
+    /// Pairing v3: `POST /v1/invite/lookup {"lookupKey"}`. Unauthenticated (the
+    /// friend has no identity yet); resolves an invite lookup key (never the
+    /// token) to the owner-signed invitation while it is unexpired and unused. The caller must verify the result
+    /// (`Invitation.validate(at:matchingToken:)`), never trust the relay.
+    func lookupInvite(lookupKey: String) async throws -> Invitation
 }
 
 public extension AsyncCompanionTransport {
     func consent(relationshipID: String) async throws -> RelationshipConsent {
+        throw CompanionError.notFound
+    }
+
+    func lookupInvite(lookupKey: String) async throws -> Invitation {
         throw CompanionError.notFound
     }
 }
@@ -321,6 +331,13 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         return response
     }
 
+    public func lookupInvite(lookupKey: String) async throws -> Invitation {
+        struct LookupBody: Encodable { let lookupKey: String }
+        struct LookupResponse: Decodable { let invitation: Invitation }
+        let response: LookupResponse = try await post(path: "v1/invite/lookup", body: LookupBody(lookupKey: lookupKey))
+        return response.invitation
+    }
+
     /// `GET /v1/health` → `{"ok":true}`. Not part of `AsyncCompanionTransport`
     /// (health has no signed operation and no relay authority), but exposed
     /// for a Settings "check connection" affordance.
@@ -403,7 +420,11 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         do {
             return try await session.data(for: request)
         } catch let error as URLError {
+            // A cancelled task is not a connectivity failure; surface it as cancellation.
+            if error.code == .cancelled { throw CancellationError() }
             throw error.code == .timedOut ? CompanionTransportError.timedOut : CompanionTransportError.unavailable
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw CompanionTransportError.unavailable
         }
@@ -413,6 +434,11 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         struct ErrorBody: Decodable { let error: String }
         let decodedCode = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
         switch status {
+        case 404:
+            // Only the relay's own JSON error ({"error":"not_found"}) is a not-found answer;
+            // a bare 404 (wrong path, a proxy or CDN page) is "relay unavailable".
+            guard let decodedCode else { return .unavailable }
+            return .server(.fromTransportCode(decodedCode))
         case 400, 401, 403, 409, 413, 429:
             return .server(.fromTransportCode(decodedCode ?? Self.defaultCode(for: status)))
         case 500...599:
@@ -428,6 +454,7 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         case 401: return "invalid_signature"
         case 403: return "unauthorized"
         case 409: return "stale_revision"
+        case 404: return "not_found"
         case 413: return "payload_too_large"
         case 429: return "rate_limited"
         default: return "malformed"
@@ -466,33 +493,50 @@ public struct AsyncCompanionClient: Sendable {
         return try await transport.submit(operation).validated(for: operation).result
     }
 
-    public func createInvite(inviteID: String, validFor: TimeInterval, now: Date, nonce: Data? = nil) async throws -> Invitation {
+    /// Creates, signs and submits a pairing-v3 invite. The returned `token` is the
+    /// only copy: the relay and the signed payload carry just its hash.
+    public func createInvite(inviteID: String, validFor: TimeInterval, now: Date, nonce: Data? = nil,
+                             token: String? = nil, ownerDisplayName: String? = nil,
+                             grantedScopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) async throws -> IssuedInvite {
         guard signer.identity.role == .owner, validFor > 0, validFor <= CompanionLimits.maxInviteLifetime else { throw CompanionError.unauthorized }
+        let token = token ?? InviteToken.generate()
+        guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
         let payload = try InvitePayload(inviteID: inviteID, owner: signer.identity, issuedAt: now,
-                                        expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? randomNonce())
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())
+                                        expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? randomNonce(),
+                                        tokenHash: InviteToken.inviteHash(token: token, ownerPublicKey: signer.identity.publicKey, inviteID: inviteID),
+                                        lookupKey: InviteToken.lookupKey(token),
+                                        possessionKey: try InviteToken.possessionPublicKey(token) ?? { throw CompanionError.malformed("invalid invite token") }(),
+                                        ownerDisplayName: ownerDisplayName,
+                                        grantedScopes: grantedScopes)
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: signature)
         _ = try await submit("invite", invitation)
+        return IssuedInvite(invitation: invitation, token: token)
+    }
+
+    /// Resolves a link token to its owner-signed invitation and verifies it
+    /// (owner signature, still live, hash binds this exact token).
+    public func lookupInvite(token: String) async throws -> Invitation {
+        guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
+        let invitation = try await transport.lookupInvite(lookupKey: InviteToken.lookupKeyString(token))
+        try invitation.validate(at: now(), matchingToken: token)
         return invitation
     }
 
-    public func accept(_ invitation: Invitation, acceptanceID: String, now: Date) async throws -> PairingAcceptance {
+    /// Accepting is the friend's consent to the granted scopes: one signed
+    /// operation that yields the active pairing (and active consent). The
+    /// response is checked against the invitation before it is returned.
+    public func acceptInvite(_ invitation: Invitation, token: String, approverDisplayName: String? = nil,
+                             acceptanceID: String, now: Date) async throws -> Pairing {
         guard signer.identity.role == .trustedApprover else { throw CompanionError.unauthorized }
-        try invitation.validate(at: now)
-        let acceptance = try PairingAcceptance(acceptanceID: acceptanceID, invite: invitation.payload, approver: signer.identity, issuedAt: now)
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).acceptance", fields: acceptance.signingFields())
-        _ = try await submit("accept", SignedAcceptance(acceptance: acceptance, signature: signature))
-        return acceptance
-    }
-
-    public func confirm(_ acceptance: PairingAcceptance, verificationCode: String, now: Date) async throws -> Pairing {
-        guard signer.identity == acceptance.owner, signer.identity.role == .owner else { throw CompanionError.unauthorized }
-        let confirmation = try PairingConfirmation(acceptance: acceptance, owner: signer.identity, verificationCode: verificationCode, issuedAt: now)
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).confirmation", fields: confirmation.signingFields())
-        guard case let .pairing(pairing) = try await submit("confirm", SignedConfirmation(confirmation: confirmation, signature: signature)) else {
+        try invitation.validate(at: now, matchingToken: token)
+        let acceptance = try PairingAcceptance(acceptanceID: acceptanceID, invite: invitation.payload, token: token,
+                                               approver: signer.identity, approverDisplayName: approverDisplayName, issuedAt: now)
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).acceptance.v3", fields: acceptance.signingFields())
+        guard case let .pairing(pairing) = try await submit("accept", SignedAcceptance(acceptance: acceptance, signature: signature)) else {
             throw CompanionError.malformed("relay response")
         }
-        try validateConfirmResponse(pairing, acceptance: acceptance, signerIdentity: signer.identity)
+        try validateAcceptResponse(pairing, invitation: invitation, acceptance: acceptance, signerIdentity: signer.identity)
         return pairing
     }
 
@@ -557,7 +601,7 @@ public struct AsyncCompanionClient: Sendable {
         let createdAt = now()
         let request = try TrustedRequest(requestID: requestID, owner: signer.identity, targetBindings: bindings,
                                          session: session, message: nil, createdAt: createdAt,
-                                         expiresAt: createdAt.addingTimeInterval(validFor))
+                                         expiresAt: min(createdAt.addingTimeInterval(validFor), session.endsAt))
         guard case let .request(value) = try await submit("request", request) else { throw CompanionError.malformed("relay response") }
         return value
     }

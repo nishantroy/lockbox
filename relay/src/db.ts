@@ -308,6 +308,40 @@ export async function ownersForApprover(client: pg.Pool | pg.PoolClient, approve
 export const GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 60;
 export const GLOBAL_RATE_LIMIT_MAX = 60;
 
+let warnedAboutIgnoredOverride = false;
+
+/**
+ * Local-testing escape hatch: lets the dev server (`npm run dev:test`) raise a
+ * rate limit so app integration tests need not sleep between runs. Honoured
+ * only when the process is demonstrably the local dev server (`RELAY_LOCAL_DEV=1`, set
+ * by scripts/dev-server.ts) and not a production deployment: it is
+ * IGNORED (the strict default applies) otherwise, and whenever `VERCEL_ENV=production`,
+ * `NODE_ENV=production` or any `VERCEL` marker is present, or when the value is
+ * not a positive integer. Ignoring rather than throwing keeps a misconfigured
+ * production deployment safe and serving.
+ */
+export function rateLimitMax(defaultMax: number, envName: string, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[envName];
+  if (raw === undefined || raw === "") return defaultMax;
+  // Needs a positive local opt-in that only scripts/dev-server.ts sets (RELAY_LOCAL_DEV=1), in
+  // addition to none of the production markers being present.
+  const production = env.RELAY_LOCAL_DEV !== "1" || env.VERCEL_ENV === "production" || env.NODE_ENV === "production" || env.VERCEL !== undefined;
+  const value = Number(raw);
+  if (production || !Number.isSafeInteger(value) || value <= 0) {
+    if (!warnedAboutIgnoredOverride) {
+      warnedAboutIgnoredOverride = true;
+      // eslint-disable-next-line no-console
+      console.error(`${envName} ignored (production environment or invalid value); using the default limit of ${defaultMax}`);
+    }
+    return defaultMax;
+  }
+  return value;
+}
+
+export function globalRateLimitMax(): number {
+  return rateLimitMax(GLOBAL_RATE_LIMIT_MAX, "RELAY_RATE_LIMIT_MAX");
+}
+
 /**
  * Global, DB-backed, fixed-window rate limiter keyed by `subject` (e.g.
  * `signer:<identityID>` or `ip:<address>`). Charged in its own implicit
@@ -384,4 +418,61 @@ export async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClie
   } finally {
     client.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pairing v3: invite token index (migrations/004_invite_token.sql)
+// ---------------------------------------------------------------------------
+
+export class InviteTokenConflictError extends Error {
+  constructor() {
+    super("invite_token_conflict");
+  }
+}
+
+/** Records the lookup-key -> (owner, invite) routing row in the invite's own transaction. A key already claimed by any invite (live, consumed or not yet swept) is refused. */
+export async function recordInviteToken(client: pg.PoolClient, lookupKey: Buffer, ownerID: string, inviteID: string, expiresAtSeconds: number): Promise<void> {
+  const inserted = await client.query(
+    `INSERT INTO companion_invite_token (lookup_key, owner_id, invite_id, expires_at) VALUES ($1, $2, $3, to_timestamp($4))
+     ON CONFLICT (lookup_key) DO NOTHING
+     RETURNING owner_id`,
+    [lookupKey, ownerID, inviteID, expiresAtSeconds]
+  );
+  if ((inserted.rowCount ?? 0) === 1) return;
+  throw new InviteTokenConflictError();
+}
+
+/** Marks an invite's token row consumed ("accept"). The row stays as a tombstone until it expires so the key cannot be re-registered by another owner. Idempotent. */
+export async function consumeInviteToken(client: pg.Pool | pg.PoolClient, ownerID: string, inviteID: string, nowSeconds: number): Promise<void> {
+  await client.query(`UPDATE companion_invite_token SET consumed_at = to_timestamp($3) WHERE owner_id = $1 AND invite_id = $2 AND consumed_at IS NULL`, [ownerID, inviteID, nowSeconds]);
+}
+
+/** Hard-deletes an invite's token row (only when the ledger invite itself is purged). Scoped by owner. */
+export async function deleteInviteToken(client: pg.Pool | pg.PoolClient, ownerID: string, inviteID: string): Promise<void> {
+  await client.query(`DELETE FROM companion_invite_token WHERE owner_id = $1 AND invite_id = $2`, [ownerID, inviteID]);
+}
+
+export interface InviteTokenRow {
+  lookupKey: Buffer;
+  ownerID: string;
+  inviteID: string;
+  expiresAt: number;
+  consumed: boolean;
+}
+
+/** Looks up a token row by its lookup key. The key is a hash of an unguessable 128-bit token, so an index probe leaks nothing about near-miss tokens. */
+export async function findInviteToken(client: pg.Pool | pg.PoolClient, lookupKey: Buffer): Promise<InviteTokenRow | null> {
+  const result = await client.query<{ lookup_key: Buffer; owner_id: string; invite_id: string; expires_at: Date; consumed_at: Date | null }>(
+    `SELECT lookup_key, owner_id, invite_id, expires_at, consumed_at FROM companion_invite_token WHERE lookup_key = $1`,
+    [lookupKey]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return { lookupKey: row.lookup_key, ownerID: row.owner_id, inviteID: row.invite_id, expiresAt: row.expires_at.getTime() / 1000, consumed: row.consumed_at !== null };
+}
+
+/** Deletes token rows (live or tombstoned) whose invite expired before `cutoffSeconds`. Retention passes the 30-day cutoff so an expired or consumed lookup key stays registered (cannot be re-registered by another owner) until the ledger invite itself is purged. */
+export async function purgeExpiredInviteTokens(client: pg.Pool | pg.PoolClient, cutoffSeconds: number): Promise<number> {
+  const result = await client.query(`DELETE FROM companion_invite_token WHERE expires_at < to_timestamp($1)`, [cutoffSeconds]);
+  return result.rowCount ?? 0;
 }

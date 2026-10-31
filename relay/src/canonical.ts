@@ -85,25 +85,56 @@ export function deviceIdentityID(publicKey: Buffer): string {
 }
 
 /**
- * Port of `PairingAcceptance.code(invite:approver:)`: a six-digit numeric
- * verification code derived from the invite/approver identity, not itself a
- * signature. See CompanionKit/Sources/CompanionKit/ProtocolModels.swift.
+ * Pairing v3 (docs/r5-pairing-v3-plan.md): the invite token is a random
+ * 128-bit value, 22 base64url characters, and it NEVER reaches the relay.
+ * Three domain-separated values derive from it (must match `InviteToken` in
+ * CompanionKit):
+ *   - lookupKey  = H("invite-lookup", token): the only thing the relay stores
+ *     or is asked for. Anyone with the link can compute it; the relay cannot
+ *     invert it.
+ *   - tokenHash  = H("invite-token", token, ownerPublicKey, inviteID): signed
+ *     into the invite. Only a token holder can recompute it, so a friend can
+ *     tell the invite was issued by that owner for that token, and a relay
+ *     that knows only the lookup key cannot forge or swap an invite.
+ *   - possession keypair = Ed25519 from seed H("invite-possession", token): the
+ *     public key is signed into the invite and the acceptance carries a signature
+ *     by the private key, which the RELAY verifies before consuming the invite.
+ *   - proof      = H("accept-proof", token, approverPublicKey, acceptanceID):
+ *     carried in the acceptance; only a token holder can compute it, so the
+ *     owner can tell the acceptance came from the link holder, not the relay.
  */
-export function pairingVerificationCode(params: {
-  inviteID: string;
-  ownerIdentityID: string;
-  approverIdentityID: string;
-  nonce: Buffer;
-}): string {
-  const bytes = canonicalBytes(`${COMPANION_VERSION}.pairing-code`, [
-    params.inviteID,
-    params.ownerIdentityID,
-    params.approverIdentityID,
-    base64url(params.nonce)
-  ]);
-  const hash = digest(bytes);
-  const number = hash.subarray(0, 4).reduce((acc, byte) => ((acc << 8) | byte) >>> 0, 0) % 1_000_000;
-  return String(number).padStart(6, "0");
+export const INVITE_TOKEN_LENGTH = 22;
+const INVITE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{22}$/;
+const LOOKUP_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+export function isWellFormedInviteToken(token: unknown): token is string {
+  return typeof token === "string" && INVITE_TOKEN_PATTERN.test(token);
+}
+
+/** A lookup key on the wire: base64url, unpadded, of 32 bytes. */
+export function isWellFormedLookupKey(value: unknown): value is string {
+  return typeof value === "string" && LOOKUP_KEY_PATTERN.test(value);
+}
+
+export function inviteLookupKey(token: string): Buffer {
+  return digest(canonicalBytes(`${COMPANION_VERSION}.invite-lookup`, [token]));
+}
+
+export function inviteTokenHash(token: string, ownerPublicKey: Buffer, inviteID: string): Buffer {
+  return digest(canonicalBytes(`${COMPANION_VERSION}.invite-token`, [token, base64url(ownerPublicKey), inviteID]));
+}
+
+export function acceptanceProof(token: string, approverPublicKey: Buffer, acceptanceID: string): Buffer {
+  return digest(canonicalBytes(`${COMPANION_VERSION}.accept-proof`, [token, base64url(approverPublicKey), acceptanceID]));
+}
+
+/** Seed of the token-derived possession keypair: H("invite-possession", token). */
+export function invitePossessionSeed(token: string): Buffer {
+  return digest(canonicalBytes(`${COMPANION_VERSION}.invite-possession`, [token]));
+}
+
+export function generateInviteToken(): string {
+  return base64url(cryptoRandomBytes(16));
 }
 
 export function randomNonce(size = 24): Buffer {

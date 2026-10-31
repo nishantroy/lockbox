@@ -24,6 +24,52 @@ final class DurableRelayServiceTests: XCTestCase {
                                                 payload: Payload(value: value), signer: signer)
     }
 
+    func testV3AcceptCreatesPairingAndConsentAtomicallyAndIsSingleUse() throws {
+        let ownerSigner = try owner()
+        let friend = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let late = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let store = InMemoryDurableRelayStore()
+        // "accept" is signed by a not-yet-paired friend; the invite token is the authority, checked in the reducer.
+        let policy = DurableAuthorizationPolicy(ownerOnlyKinds: ["invite"], approverKinds: ["accept"]) { _, _, _ in true }
+        let service = DurableRelayService(store: store, authorization: policy)
+        let now = Date()
+        let token = InviteToken.generate()
+        let payload = try InvitePayload(inviteID: "durable-invite", owner: ownerSigner.identity, issuedAt: now,
+                                        expiresAt: now.addingTimeInterval(600), nonce: Data(repeating: 3, count: 24),
+                                        tokenHash: InviteToken.inviteHash(token: token, ownerPublicKey: ownerSigner.identity.publicKey,
+                                                                          inviteID: "durable-invite"),
+                                        lookupKey: InviteToken.lookupKey(token),
+                                        possessionKey: InviteToken.possessionPublicKey(token)!, ownerDisplayName: "Alex")
+        let invitation = try Invitation(payload: payload, signature: try ownerSigner.sign(
+            domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields()))
+        _ = try service.submit(try DurableOperationFactory.make(kind: "invite", operationID: "inv", expectedRevision: 0,
+                                                                payload: invitation, signer: ownerSigner),
+                               owner: ownerSigner.identity)
+
+        func acceptOp(_ signer: DeviceSigner, id: String, revision: Int64, token: String) throws -> SignedOperation {
+            let acceptance = try PairingAcceptance(acceptanceID: id, invite: payload, token: token,
+                                                   approver: signer.identity, approverDisplayName: "Sam", issuedAt: now)
+            let sig = try signer.sign(domain: "\(CompanionCanonical.version).acceptance.v3", fields: acceptance.signingFields())
+            return try DurableOperationFactory.make(kind: "accept", operationID: id, expectedRevision: revision,
+                                                    payload: SignedAcceptance(acceptance: acceptance, signature: sig), signer: signer)
+        }
+        let response = try service.submit(try acceptOp(friend, id: "acc-1", revision: 1, token: token), owner: ownerSigner.identity)
+        guard case let .pairing(pairing) = response.result else { return XCTFail("expected a pairing") }
+        XCTAssertEqual(pairing.approverDisplayName, "Sam")
+        XCTAssertEqual(pairing.ownerDisplayName, "Alex")
+        let ledger = try XCTUnwrap(try store.read().owners[ownerSigner.identity.identityID])
+        let consent = try XCTUnwrap(ledger.relationshipConsents[pairing.pairingID])
+        XCTAssertEqual(consent.ownerState, .active)
+        XCTAssertEqual(consent.approverState, .active)
+        XCTAssertEqual(consent.generation, 2)
+        XCTAssertNotNil(ledger.invitations["durable-invite"]?.consumedAt)
+
+        XCTAssertThrowsError(try service.submit(try acceptOp(late, id: "acc-2", revision: 2, token: token), owner: ownerSigner.identity)) {
+            XCTAssertEqual($0 as? CompanionError, .replay)
+        }
+        XCTAssertEqual(try store.read().owners[ownerSigner.identity.identityID]?.pairings.count, 1)
+    }
+
     func testDuplicateRetryReturnsCommittedResponseWithoutRunningMutationAgain() throws {
         let signer = try owner()
         let store = InMemoryDurableRelayStore()

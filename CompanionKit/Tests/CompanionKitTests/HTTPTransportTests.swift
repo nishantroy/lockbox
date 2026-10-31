@@ -8,9 +8,13 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     struct Stub {
         let status: Int
         let body: Data
+        var failure: URLError.Code?
 
         init(status: Int, body: Data) {
             self.status = status; self.body = body
+        }
+        init(failure: URLError.Code) {
+            self.status = 0; self.body = Data(); self.failure = failure
         }
     }
 
@@ -38,6 +42,10 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let stub = handler(request)
+        if let failure = stub.failure {
+            client?.urlProtocol(self, didFailWithError: URLError(failure))
+            return
+        }
         let response = HTTPURLResponse(url: request.url!, statusCode: stub.status,
                                        httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -88,13 +96,31 @@ private func encodedVerificationResponse(operationID: String, revision: UInt64,
 private let fixedTime = Date(timeIntervalSince1970: 1_700_000_000)
 private let testBaseURL = URL(string: "http://127.0.0.1:8002")!
 
-private func makeInvite() throws -> (DeviceSigner, Invitation) {
+/// A fixed, well-formed invite token for stubbed-relay tests (22 base64url characters).
+private let testInviteToken = String(repeating: "A", count: 22)
+
+private func makeInvite(ownerName: String? = nil) throws -> (DeviceSigner, Invitation) {
     let ownerKeys = InMemoryDeviceKeyStore()
     let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
-    let payload = try InvitePayload(inviteID: "invite-http", owner: ownerSigner.identity, issuedAt: fixedTime,
-                                    expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 9, count: 24))
-    let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())
-    return (ownerSigner, try Invitation(payload: payload, signature: signature))
+    return (ownerSigner, try signedInvite(ownerSigner: ownerSigner, inviteID: "invite-http", nonceByte: 9, ownerName: ownerName))
+}
+
+private func signedInvite(ownerSigner: DeviceSigner, inviteID: String, nonceByte: UInt8, ownerName: String? = nil) throws -> Invitation {
+    let payload = try InvitePayload(inviteID: inviteID, owner: ownerSigner.identity, issuedAt: fixedTime,
+                                    expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: nonceByte, count: 24),
+                                    tokenHash: InviteToken.inviteHash(token: testInviteToken, ownerPublicKey: ownerSigner.identity.publicKey, inviteID: inviteID),
+                                    lookupKey: InviteToken.lookupKey(testInviteToken),
+                                    possessionKey: InviteToken.possessionPublicKey(testInviteToken)!, ownerDisplayName: ownerName)
+    let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
+    return try Invitation(payload: payload, signature: signature)
+}
+
+private func encodedPairingResponse(operationID: String, revision: UInt64, pairing: Pairing,
+                                    ownerIdentityID: String? = nil, stateRoot: Data? = nil) throws -> Data {
+    let response = try RelayResponse(operationID: operationID, revision: revision, result: .pairing(pairing),
+                                     ownerIdentityID: ownerIdentityID, stateRoot: stateRoot)
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+    return try encoder.encode(response)
 }
 
 /// Test convenience: reads a checkpoint back out of a store without needing
@@ -420,76 +446,170 @@ final class HTTPTransportTests: XCTestCase {
         XCTAssertEqual(checkpoint?.revision, 12)
     }
 
-    // MARK: - Malicious relay: confirm response validation
+    // MARK: - Pairing v3: invite lookup and malicious accept responses
 
-    func testConfirmRejectsARelayThatSwapsTheApproverKeyInTheResponse() async throws {
-        let ownerKeys = InMemoryDeviceKeyStore()
-        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
-        let approverKeys = InMemoryDeviceKeyStore()
-        let realApproverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
-        let attackerKeys = InMemoryDeviceKeyStore()
-        let attackerSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: attackerKeys)
-
-        let payload = try InvitePayload(inviteID: "invite-confirm-swap", owner: ownerSigner.identity, issuedAt: fixedTime,
-                                        expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 2, count: 24))
-        let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())
-        let invitation = try Invitation(payload: payload, signature: signature)
-        let acceptance = try PairingAcceptance(acceptanceID: "accept-confirm-swap", invite: invitation.payload,
-                                               approver: realApproverSigner.identity, issuedAt: fixedTime)
-
+    func testLookupInvitePostsTheTokenAndVerifiesTheReturnedInvitation() async throws {
+        let (ownerSigner, invitation) = try makeInvite(ownerName: "Alex")
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
         let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
-        let client = AsyncCompanionClient(signer: ownerSigner, transport: transport, now: { fixedTime })
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/invite/lookup")
+            XCTAssertEqual(request.httpMethod, "POST")
+            let body = try! JSONSerialization.jsonObject(with: bodyData(from: request)) as! [String: String]
+            // Only the lookup key is sent; the token itself never leaves the device.
+            XCTAssertEqual(body, ["lookupKey": InviteToken.lookupKeyString(testInviteToken)])
+            XCTAssertFalse(String(decoding: bodyData(from: request), as: UTF8.self).contains(testInviteToken))
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            struct Wrapper: Encodable { let invitation: Invitation }
+            return .init(status: 200, body: try! encoder.encode(Wrapper(invitation: invitation)))
+        }
+        let found = try await client.lookupInvite(token: testInviteToken)
+        XCTAssertEqual(found.payload.ownerDisplayName, "Alex")
+        XCTAssertEqual(found.payload.owner, ownerSigner.identity)
+
+        // A relay that returns an invitation for a different token is refused.
+        StubURLProtocol.handler = { _ in
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            struct Wrapper: Encodable { let invitation: Invitation }
+            return .init(status: 200, body: try! encoder.encode(Wrapper(invitation: invitation)))
+        }
+        do {
+            _ = try await client.lookupInvite(token: String(repeating: "B", count: 22))
+            XCTFail("expected a token/hash mismatch to be rejected")
+        } catch CompanionError.malformed {
+            // expected
+        }
+    }
+
+    func testRelayCannotSwapInInvitationItSignedItself() async throws {
+        // An active relay knows the lookup key. It answers with an invitation signed by its OWN key
+        // that reuses that lookup key; without the token it cannot compute the owner-bound token hash.
+        let relayOwner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let forgedPayload = try InvitePayload(inviteID: "relay-made", owner: relayOwner.identity, issuedAt: fixedTime,
+                                              expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 4, count: 24),
+                                              tokenHash: Data(repeating: 7, count: 32),
+                                              lookupKey: InviteToken.lookupKey(testInviteToken),
+                                              possessionKey: Data(repeating: 5, count: 32), ownerDisplayName: "Your friend")
+        let forged = try Invitation(payload: forgedPayload, signature: try relayOwner.sign(
+            domain: "\(CompanionCanonical.version).invite.v3", fields: forgedPayload.signingFields()))
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { _ in
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            struct Wrapper: Encodable { let invitation: Invitation }
+            return .init(status: 200, body: try! encoder.encode(Wrapper(invitation: forged)))
+        }
+        do {
+            _ = try await client.lookupInvite(token: testInviteToken)
+            XCTFail("a relay-signed invitation must be rejected")
+        } catch CompanionError.malformed {
+            // expected
+        }
+    }
+
+    func testBareNotFoundIsUnavailableButTheRelaysJSONErrorIsNotFound() async throws {
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { _ in .init(status: 404, body: Data("<html>Not Found</html>".utf8)) }
+        do {
+            _ = try await client.lookupInvite(token: testInviteToken)
+            XCTFail("expected unavailable")
+        } catch let error as CompanionTransportError { XCTAssertEqual(error, .unavailable) }
+    }
+
+    func testLookupInviteMapsNotFoundAndRateLimited() async throws {
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        for (status, code, expected) in [(404, "not_found", CompanionError.notFound), (429, "rate_limited", CompanionError.rateLimited)] {
+            StubURLProtocol.handler = { _ in .init(status: status, body: Data(#"{"error":"\#(code)"}"#.utf8)) }
+            do {
+                _ = try await client.lookupInvite(token: testInviteToken)
+                XCTFail("expected \(code)")
+            } catch let error as CompanionTransportError {
+                XCTAssertEqual(error, .server(expected))
+            }
+        }
+    }
+
+    func testAcceptRejectsARelayThatSwapsTheApproverKeyInTheResponse() async throws {
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let realApproverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let attackerSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let invitation = try signedInvite(ownerSigner: ownerSigner, inviteID: "invite-accept-swap", nonceByte: 2)
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: realApproverSigner, transport: transport, now: { fixedTime })
 
         StubURLProtocol.handler = { request in
             let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
-            // The relay confirms with a pairing naming the attacker as
-            // approver instead of the identity that actually accepted.
-            let swappedPairing = try! Pairing(pairingID: "pairing-confirm-swap", owner: ownerSigner.identity,
-                                              approver: attackerSigner.identity, epoch: 1, createdAt: fixedTime, state: .active)
-            let response = try! RelayResponse(operationID: signed.operationID, revision: 1, result: .pairing(swappedPairing))
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            return .init(status: 200, body: try! encoder.encode(response))
+            // The relay answers with a pairing naming the attacker as approver
+            // instead of the identity that actually accepted.
+            let swapped = try! Pairing(pairingID: Pairing.derivedID(inviteID: invitation.payload.inviteID,
+                                                                    approverIdentityID: realApproverSigner.identity.identityID),
+                                       owner: ownerSigner.identity, approver: attackerSigner.identity, epoch: 1,
+                                       createdAt: fixedTime, state: .active)
+            return .init(status: 200, body: try! encodedPairingResponse(operationID: signed.operationID, revision: 1, pairing: swapped))
         }
         do {
-            _ = try await client.confirm(acceptance, verificationCode: acceptance.verificationCode, now: fixedTime)
+            _ = try await client.acceptInvite(invitation, token: testInviteToken, acceptanceID: "accept-swap", now: fixedTime)
             XCTFail("expected rejection of a swapped approver")
         } catch CompanionError.malformed {
             // expected
         }
     }
 
-    func testConfirmRejectsARelayThatSubstitutesTheOwner() async throws {
-        let ownerKeys = InMemoryDeviceKeyStore()
-        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
-        let approverKeys = InMemoryDeviceKeyStore()
-        let realApproverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
-        let attackerOwnerKeys = InMemoryDeviceKeyStore()
-        let attackerOwnerSigner = try DeviceSigner.create(role: .owner, keyStore: attackerOwnerKeys)
-
-        let payload = try InvitePayload(inviteID: "invite-owner-swap", owner: ownerSigner.identity, issuedAt: fixedTime,
-                                        expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 5, count: 24))
-        let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())
-        let invitation = try Invitation(payload: payload, signature: signature)
-        let acceptance = try PairingAcceptance(acceptanceID: "accept-owner-swap", invite: invitation.payload,
-                                               approver: realApproverSigner.identity, issuedAt: fixedTime)
-
+    func testAcceptRejectsARelayThatSubstitutesTheOwnerOrAltersNames() async throws {
+        let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let realApproverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let attackerOwnerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let invitation = try signedInvite(ownerSigner: ownerSigner, inviteID: "invite-accept-owner-swap", nonceByte: 5, ownerName: "Alex")
         let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
-        let client = AsyncCompanionClient(signer: ownerSigner, transport: transport, now: { fixedTime })
+        let client = AsyncCompanionClient(signer: realApproverSigner, transport: transport, now: { fixedTime })
+        let pairingID = Pairing.derivedID(inviteID: invitation.payload.inviteID,
+                                          approverIdentityID: realApproverSigner.identity.identityID)
 
-        StubURLProtocol.handler = { request in
-            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
-            let swappedPairing = try! Pairing(pairingID: "pairing-owner-swap", owner: attackerOwnerSigner.identity,
-                                              approver: realApproverSigner.identity, epoch: 1, createdAt: fixedTime, state: .active)
-            let response = try! RelayResponse(operationID: signed.operationID, revision: 1, result: .pairing(swappedPairing))
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            return .init(status: 200, body: try! encoder.encode(response))
+        // (owner, ownerDisplayName, approverDisplayName) the hostile relay reports.
+        let hostile: [(DeviceIdentity, String?, String?)] = [
+            (attackerOwnerSigner.identity, "Alex", "Sam"),
+            (ownerSigner.identity, "Mallory", "Sam"),
+            (ownerSigner.identity, "Alex", "Someone else")
+        ]
+        for (owner, ownerName, approverName) in hostile {
+            StubURLProtocol.handler = { request in
+                let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+                let pairing = try! Pairing(pairingID: pairingID, owner: owner, approver: realApproverSigner.identity, epoch: 1,
+                                           createdAt: fixedTime, state: .active,
+                                           ownerDisplayName: ownerName, approverDisplayName: approverName)
+                return .init(status: 200, body: try! encodedPairingResponse(operationID: signed.operationID, revision: 1, pairing: pairing))
+            }
+            do {
+                _ = try await client.acceptInvite(invitation, token: testInviteToken, approverDisplayName: "Sam",
+                                                  acceptanceID: "accept-hostile", now: fixedTime)
+                XCTFail("expected rejection of a response that does not match the accepted invitation")
+            } catch CompanionError.malformed {
+                // expected
+            }
         }
+    }
+
+    func testCancelledURLRequestIsCancellationNotUnavailable() async throws {
+        let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
+        StubURLProtocol.handler = { _ in .init(failure: .cancelled) }
         do {
-            _ = try await client.confirm(acceptance, verificationCode: acceptance.verificationCode, now: fixedTime)
-            XCTFail("expected rejection of a substituted owner")
-        } catch CompanionError.malformed {
-            // expected
-        }
+            _ = try await client.lookupInvite(token: testInviteToken)
+            XCTFail("expected cancellation")
+        } catch is CancellationError {
+        } catch { XCTFail("expected CancellationError, got \(error)") }
+        StubURLProtocol.handler = { _ in .init(failure: .notConnectedToInternet) }
+        do {
+            _ = try await client.lookupInvite(token: testInviteToken)
+            XCTFail("expected unavailable")
+        } catch let error as CompanionTransportError { XCTAssertEqual(error, .unavailable) }
     }
 
     func testHealthEndpointReportsOk() async throws {
@@ -789,10 +909,7 @@ final class HTTPTransportTests: XCTestCase {
         let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
         let ownerKeys = InMemoryDeviceKeyStore()
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: ownerKeys)
-        let payload = try InvitePayload(inviteID: "invite-helper", owner: ownerSigner.identity, issuedAt: fixedTime,
-                                        expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 1, count: 24))
-        let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())
-        let invitation = try Invitation(payload: payload, signature: signature)
+        let invitation = try signedInvite(ownerSigner: ownerSigner, inviteID: "invite-helper", nonceByte: 1)
         let anchorStore = InMemoryRollbackAnchorStore()
         let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession(), anchorStore: anchorStore)
         let client = AsyncCompanionClient(signer: approverSigner, transport: transport, now: { fixedTime })
@@ -802,12 +919,16 @@ final class HTTPTransportTests: XCTestCase {
             // ledger (correct per contract for a helper-signed op) with a
             // real state root, a helper-signed operation must never be
             // anchored by this device.
-            let body = try! encodedRelayResponse(operationID: signed.operationID, revision: 1,
-                                                 ownerIdentityID: ownerSigner.identity.identityID,
-                                                 stateRoot: Data(repeating: 1, count: 32))
+            let pairing = try! Pairing(pairingID: Pairing.derivedID(inviteID: invitation.payload.inviteID,
+                                                                    approverIdentityID: approverSigner.identity.identityID),
+                                       owner: ownerSigner.identity, approver: approverSigner.identity, epoch: 1,
+                                       createdAt: fixedTime, state: .active)
+            let body = try! encodedPairingResponse(operationID: signed.operationID, revision: 1, pairing: pairing,
+                                                   ownerIdentityID: ownerSigner.identity.identityID,
+                                                   stateRoot: Data(repeating: 1, count: 32))
             return .init(status: 200, body: body)
         }
-        _ = try await client.accept(invitation, acceptanceID: "accept-helper", now: fixedTime)
+        _ = try await client.acceptInvite(invitation, token: testInviteToken, acceptanceID: "accept-helper", now: fixedTime)
         XCTAssertNil(try loadCheckpoint(anchorStore, ownerIdentityID: ownerSigner.identity.identityID))
     }
 

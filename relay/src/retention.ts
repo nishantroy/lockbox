@@ -31,6 +31,8 @@ import {
   saveOwnerRow,
   deleteRetentionMarker,
   deleteApproverPairing,
+  deleteInviteToken,
+  purgeExpiredInviteTokens,
   readOwnerLedger,
   insertOperation,
   purgeStaleRateLimits,
@@ -39,7 +41,7 @@ import {
   GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
   type StoredOperation
 } from "./db.js";
-import { emptyLedger, normalizePendingAcceptance, type Marker } from "./ledger.js";
+import { emptyLedger, type Marker } from "./ledger.js";
 import { computeStateRoot } from "./service.js";
 import { digest } from "./canonical.js";
 import { randomUUID } from "node:crypto";
@@ -53,6 +55,8 @@ export interface RetentionSummary {
   purgedConsents: number;
   purgedInvitations: number;
   purgedPendingAcceptances: number;
+  /** Pairing v3: `companion_invite_token` rows deleted (expired, or removed with a purged invite). */
+  purgedInviteTokens: number;
   purgedNonceMarkers: number;
   purgedSessions: number;
   purgedRateLimitSignerEntries: number;
@@ -72,6 +76,7 @@ function empty(): RetentionSummary {
     purgedConsents: 0,
     purgedInvitations: 0,
     purgedPendingAcceptances: 0,
+    purgedInviteTokens: 0,
     purgedNonceMarkers: 0,
     purgedSessions: 0,
     purgedRateLimitSignerEntries: 0,
@@ -159,6 +164,9 @@ export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, 
 
   const purgedOperations = await pool.query(`DELETE FROM companion_operation WHERE committed_at < to_timestamp($1)`, [cutoff]);
   summary.purgedOperationRows = purgedOperations.rowCount ?? 0;
+  // Pairing v3 token rows (live, expired or consumed tombstones) are kept until 30 days after
+  // expiry, matching the ledger invite purge, so an expired lookup key cannot be re-registered.
+  summary.purgedInviteTokens += await purgeExpiredInviteTokens(pool, cutoff);
   summary.purgedRateLimitRows = await purgeStaleRateLimits(pool, nowSeconds, GLOBAL_RATE_LIMIT_WINDOW_SECONDS);
 
   return summary;
@@ -258,14 +266,20 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
       delete ledger.invitations[inviteID];
       summary.purgedInvitations += 1;
       changed = true;
+      // Pairing v3: the token index row goes with its invite (it is normally
+      // already gone -- deleted on accept, or swept at expiry below).
+      await deleteInviteToken(client, ownerID, inviteID);
     }
   }
-  for (const [acceptanceID, raw] of Object.entries(ledger.pendingAcceptances)) {
-    const { acceptance } = normalizePendingAcceptance(raw);
-    const invite = ledger.invitations[acceptance.inviteID];
-    const terminalAt = invite ? invite.invitation.payload.expiresAt : acceptance.issuedAt;
+  // Pairing v2 leftovers: an unconfirmed v2 acceptance can never be confirmed
+  // any more (v3 removed "confirm"); drop it once its invite is old enough.
+  for (const [acceptanceID, raw] of Object.entries(ledger.pendingAcceptances ?? {})) {
+    const legacy = (raw ?? {}) as { acceptance?: { inviteID?: string; issuedAt?: number }; inviteID?: string; issuedAt?: number };
+    const acceptance = legacy.acceptance ?? legacy;
+    const invite = acceptance.inviteID ? ledger.invitations[acceptance.inviteID] : undefined;
+    const terminalAt = invite ? invite.invitation.payload.expiresAt : (acceptance.issuedAt ?? 0);
     if (terminalAt < cutoff) {
-      delete ledger.pendingAcceptances[acceptanceID];
+      delete ledger.pendingAcceptances![acceptanceID];
       summary.purgedPendingAcceptances += 1;
       changed = true;
     }
