@@ -755,9 +755,11 @@ final class CompanionCoordinator: ObservableObject {
     var revokeScopesOverride: (@MainActor (_ pairing: Pairing, _ scopes: [CompanionScope]) async throws -> RelationshipConsent)?
     /// Test-only seams (never compiled into release): inspect/seed state without a relay round trip.
     var issuedInvitesForTesting: [String: IssuedInvite] { issuedInvites }
+    /// Seeds an invite as if it had just been issued. Does not prune: a test
+    /// seeding an old invite (issued in the past) must be able to attach its
+    /// person first; launch/refresh pruning is tested separately.
     func insertIssuedInviteForTesting(_ issued: IssuedInvite) {
         issuedInvites[issued.invitation.payload.inviteID] = issued
-        pruneIssuedInvites(now: Date())
         saveIssuedInvites()
     }
     /// Re-reads the invite store (as a refresh would) and reports what happened.

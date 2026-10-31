@@ -13,6 +13,8 @@ struct PeopleView: View {
 
     /// Scroll anchor of the incoming-invite card (heading visible at the top).
     static let incomingInviteScrollID = "people.incomingInviteCard"
+    /// Scroll anchor of the newest "‹Name› joined" notice.
+    static let joinedNoticeScrollID = "people.joinedNotice"
 
 #if canImport(CompanionKit)
     private var incomingInviteKey: String {
@@ -33,6 +35,17 @@ struct PeopleView: View {
             withAnimation { proxy.scrollTo(Self.incomingInviteScrollID, anchor: .top) }
         }
     }
+
+    /// A new "‹Name› joined" notice is brought into view: the owner is usually
+    /// scrolled down at the invite card when the friend accepts (pre-push UI
+    /// run, 2026-10-31: the notice appeared off-screen above).
+    private func scrollToJoinedNotice(_ proxy: ScrollViewProxy) {
+        guard !companion.joinedNotices.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            withAnimation { proxy.scrollTo(Self.joinedNoticeScrollID, anchor: .top) }
+        }
+    }
 #endif
 
     var body: some View {
@@ -41,6 +54,9 @@ struct PeopleView: View {
             page
                 .onChange(of: incomingInviteKey) { _, _ in scrollToIncomingInvite(proxy) }
                 .onAppear { scrollToIncomingInvite(proxy) }
+                .onChange(of: companion.joinedNotices.map(\.id)) { old, new in
+                    if new.contains(where: { !old.contains($0) }) { scrollToJoinedNotice(proxy) }
+                }
         }
 #else
         page
@@ -60,8 +76,9 @@ struct PeopleView: View {
                         .id(Self.incomingInviteScrollID)
                 }
                 // Owner side: one-time, dismissable, non-blocking.
-                ForEach(companion.joinedNotices) { notice in
+                ForEach(Array(companion.joinedNotices.enumerated()), id: \.element.id) { index, notice in
                     JoinedNoticeCard(notice: notice) { companion.dismissJoinedNotice(id: notice.id) }
+                        .id(index == 0 ? Self.joinedNoticeScrollID : "people.joinedNotice.\(notice.id)")
                 }
                 if companion.inviteStoreIsCorrupt, companion.ownerIdentity != nil {
                     InviteStoreResetCard(companion: companion)
@@ -440,10 +457,14 @@ private struct InviteSomeoneCard: View {
                 if let issued = companion.pendingInvite {
                     // The link stops being offered the moment it expires, even
                     // if nothing else on screen changes.
-                    TimelineView(.explicit([issued.invitation.payload.expiresAt])) { context in
-                        inviteActions(issued: issued,
-                                      expired: context.date >= issued.invitation.payload.expiresAt
-                                          || Date() >= issued.invitation.payload.expiresAt)
+                    // Judge expiry by the real clock only: for a future
+                    // `.explicit` entry SwiftUI may hand the first render that
+                    // entry's (future) date, which made a fresh link look
+                    // expired (pre-push UI run, 2026-10-31). The second entry
+                    // covers an update delivered slightly early.
+                    let expiresAt = issued.invitation.payload.expiresAt
+                    TimelineView(.explicit([expiresAt, expiresAt.addingTimeInterval(1)])) { _ in
+                        inviteActions(issued: issued, expired: Date() >= expiresAt)
                     }
                 } else {
                     inviteActions(issued: nil, expired: false)

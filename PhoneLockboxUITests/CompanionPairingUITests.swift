@@ -218,14 +218,19 @@ final class CompanionPairingUITests: XCTestCase {
             throw CompanionUITestError(description: "owner name field never appeared")
         }
         nameField.tap()
-        nameField.typeText(ownerName)
-        let returnKey = app.keyboards.buttons["Return"]
-        if returnKey.exists { returnKey.tap() }
+        // "\n" submits the field. The return key has no "Return" label on
+        // current keyboards, and a tap that only dismisses the keyboard never
+        // reaches the button underneath (pre-push run, 2026-10-31).
+        nameField.typeText(ownerName + "\n")
+        let keyboardGone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count == 0"), object: app.keyboards)
+        _ = await XCTWaiter.fulfillment(of: [keyboardGone], timeout: 10)
 
         let createButton = app.buttons["inviteSomeone.createInviteButton"]
         guard createButton.waitForExistence(timeout: 30) else {
             throw CompanionUITestError(description: "'Create an invite to share' button never appeared")
         }
+        let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true AND isEnabled == true"), object: createButton)
+        _ = await XCTWaiter.fulfillment(of: [hittable], timeout: 10)
         createButton.tap()
 
         let linkTextElement = app.staticTexts["inviteSomeone.inviteLinkText"]

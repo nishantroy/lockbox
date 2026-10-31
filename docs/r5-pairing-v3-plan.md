@@ -357,3 +357,13 @@ No simulator was booted. The new app unit tests, `CompanionLocalRelayFlowTests` 
 - **P2-4.** (a) `testAConsumedInviteIsNotRestoredAsThePendingLink` now revokes the person through an inbox update, so the token is still held when `restorePendingInvite` runs (DEBUG seam `restorePendingInviteForTesting`); it fails without the `inviteCreatedAnyPerson` filter. (b) The UI copy step asserts the button exists and that its label is "Copied" straight after the tap.
 - **Copy tweak.** Identity-storage error now reads "Couldn't save this device's secure key, so nothing was sent. Try again; if your phone is locked, unlock it first."
 - Validation: CompanionKit `swift test`, root `swift test`, `xcodebuild build-for-testing` (generic simulator, `CODE_SIGNING_ALLOWED=NO`) and `git diff --check` re-run; results in the hand-off. Still not run: any simulator test.
+
+## P3c pre-push suite run (2026-10-31, iPhone Air simulator, local relay `dev:test`)
+
+First run of the P3b/P3c app tests: unit 130 tests (1 failure), UI 4 tests (1 failure). Fixes were made by the parent (Claude Opus) during integration, not by a builder. They are small, and the Opus UX review gets them as part of its input:
+1. **Test bug.** `testAJoinedPersonKeepsItsInviteEvenAfterItExpires` (P3b, never run before): the test-only `insertIssuedInviteForTesting` pruned with the real clock, deleting the 40-day-old invite before its person was attached. The seam no longer prunes; launch/refresh pruning keep their own test.
+2. **Test bug.** The UI helper looked for a "Return" key that current keyboards don't label, so its create tap only dismissed the keyboard. It now types "\n", waits for the keyboard to close and for the button to be hittable.
+3. **App bug (from the review follow-up P2-2).** A freshly created link showed "This link expired" at once: for a future `.explicit` TimelineView entry, SwiftUI can pass that entry's date to the first render. Expiry is now judged only by `Date()`, with a second entry 1 s after expiry.
+4. **App bug (UX).** "‹Name› joined" appeared off-screen at the top while the owner was scrolled down at the invite card. People now scrolls to a newly added joined notice.
+
+**Final results after the fixes:** `xcodebuild test -scheme PhoneLockbox` gave 130 tests, 0 failures, 1 skipped. `-scheme PhoneLockboxUITests` gave 4 tests, 0 failures.
