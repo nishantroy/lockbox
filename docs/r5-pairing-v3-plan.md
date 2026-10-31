@@ -195,3 +195,10 @@ Removed: `Invitation.shareLink`/`fromShareLink`, `AsyncCompanionClient.accept`/`
 **P3b note:** `InvitePayload`/`PairingAcceptance` gained `possessionKey`/`possessionSignature` (no app change beyond using `createInvite`/`acceptInvite`).
 
 **Validation (build output under `/Users/nishantroy/code/.build-cache/phone-lockbox/agent-a444bb184a546cde2/`):** relay `npm test` 11 files, **185 passed**, `npm run typecheck` clean; CompanionKit **163 passed**; CompanionRelayService **19 passed**; root `swift test` **177 passed**; `tools/relay-smoke` builds (not run).
+
+### P3a polish (final Opus review findings; Sonnet 5.5 builder, 2026-10-31)
+
+1. `IssuedInvite` now conforms to `CustomStringConvertible`, `CustomDebugStringConvertible` and `CustomReflectable`; the token and share link render as `<redacted>` in `print`, `dump`, `Mirror` and string interpolation. `Codable` is kept (the app persists it, in the Keychain). No other type stores the plaintext token.
+2. Invisible-filler names: the explicit blank set (both `relay/src/protocol.ts` and `PairingFields.isBlankScalar`) gained U+FFA0, U+200C, U+034F, U+180E, U+2061-2064, U+FE00-FE0F and U+1D173-1D17A. An explicit set was kept over a general-category rule because several fillers (U+3164, U+FFA0, U+115F/1160) are category Lo, so a category test cannot exclude them. ZWJ, ZWNJ and VS16 remain legal inside names with a visible scalar; Swift-signed vectors `zwnj-persian` and `emoji-vs16` added to `vectors.json`.
+3. Retention: the ledger purge for invites keys on `max(consumedAt, expiresAt) + 30d` (a consumed invite's token tombstone previously went at `consumedAt + 30d`, before expiry + 30d). The Swift in-memory/durable references have no retention purge, so nothing to mirror. Test added.
+4. Comment at `reducer.ts` accept-path rewritten; `JoinedAcceptanceCheck.verifiedPairings` no longer holds a `()?` value (warning gone).

@@ -31,6 +31,26 @@ final class JoinedAcceptanceCheckTests: XCTestCase {
                                    signer: signer.identity, body: body, signature: signature)
     }
 
+    func testIssuedInviteNeverRevealsTokenInDescriptions() throws {
+        let f = try fixture()
+        let token = f.issued.token
+        XCTAssertFalse(token.isEmpty)
+        var dumped = ""
+        dump(f.issued, to: &dumped)
+        let renderings = [String(describing: f.issued), String(reflecting: f.issued), "\(f.issued)", dumped,
+                          String(describing: Mirror(reflecting: f.issued).children.map { "\($0.label ?? ""): \($0.value)" }),
+                          String(describing: [f.issued]), String(describing: ["k": f.issued])]
+        for text in renderings {
+            XCTAssertFalse(text.contains(token), "token leaked in: \(text)")
+            XCTAssertFalse(text.contains(f.issued.shareLink), "share link leaked in: \(text)")
+            XCTAssertTrue(text.contains("<redacted>"))
+        }
+        // Codable persistence is unchanged (the app stores this in the Keychain).
+        let decoded = try JSONDecoder().decode(IssuedInvite.self, from: JSONEncoder().encode(f.issued))
+        XCTAssertEqual(decoded, f.issued)
+        XCTAssertEqual(decoded.token, token)
+    }
+
     private func fixture() throws -> Fixture {
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
         let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
