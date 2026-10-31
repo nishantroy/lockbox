@@ -195,3 +195,33 @@ Removed: `Invitation.shareLink`/`fromShareLink`, `AsyncCompanionClient.accept`/`
 **P3b note:** `InvitePayload`/`PairingAcceptance` gained `possessionKey`/`possessionSignature` (no app change beyond using `createInvite`/`acceptInvite`).
 
 **Validation (build output under `/Users/nishantroy/code/.build-cache/phone-lockbox/agent-a444bb184a546cde2/`):** relay `npm test` 11 files, **185 passed**, `npm run typecheck` clean; CompanionKit **163 passed**; CompanionRelayService **19 passed**; root `swift test` **177 passed**; `tools/relay-smoke` builds (not run).
+
+## P3b build results (2026-10-31)
+
+Built by a Claude **Sonnet** subagent (model `claude-sonnet-5-5`), branch `p3b-app` from `r5-relay` at `1e3e508`. Not yet independently reviewed (Opus code review and separate UX/design-polish review are the next gates).
+
+### Files changed
+`PhoneLockbox/Companion/CompanionCoordinator.swift` (rewritten invite/accept/trust/refresh paths), `PhoneLockbox/Companion/IssuedInviteStore.swift` (new), `PhoneLockbox/Companion/CompanionPrototype.swift`, `PhoneLockbox/Views/PeopleView.swift`, `PhoneLockbox/ContentView.swift` (comment), `PhoneLockboxTests/CompanionPairingV3Tests.swift` (new; replaces deleted `CompanionPairingV2Tests.swift`), `CompanionLocalRelayFlowTests.swift`, `FriendReleaseWiringTests.swift`, `PhoneLockboxUITests/CompanionPairingUITests.swift` (rewritten), regenerated `PhoneLockbox.xcodeproj/project.pbxproj`. `CompanionKit/**`, `relay/**` untouched; `project.yml` untouched (sources are directory globs).
+
+### How each item was met
+1. **Link.** `phone-lockbox-companion://i/<token>` via `InviteToken`; `lookUpInvite` -> `AsyncCompanionClient.lookupInvite(token:)` (which uses `lookupInvite(lookupKey:)`) plus an explicit `Invitation.validate(at:matchingToken:)`; prompt "‹Owner› invited you to be a trusted person" with Accept / Not now. not_found/used, expired, rate-limited, unreachable and invalid links each get a calm message. A pasted link is the manual fallback. Opening your own link is refused with a message.
+2. **Accept.** `acceptIncomingInvite` -> `acceptInvite(..., approverDisplayName:)`; the returned `Pairing` is stored directly; the friend row reads "You're a trusted person for ‹Owner›". No waiting state, no switches. Transient failures keep the prompt for retry; final ones replace it with a message.
+3. **Owner.** Each `IssuedInvite` is stored in the Keychain (`KeychainIssuedInviteStore`, one item, `AfterFirstUnlockThisDeviceOnly`; token never in UserDefaults or logs), kept while a person created by it exists (retention 30 days after expiry otherwise), and deleted when the person is removed. People are added only from `JoinedAcceptanceCheck.verifiedPairings`; consents are accepted only for verified people; requests target and approvals (`selectFriendRelease`) are accepted only from verified people. `integrityWarnings` -> calm `people.integrityNotice` card. One-time dismissable "‹Name› joined" notice (seen pairing IDs tracked in the App Group defaults). Duplicate accepts by the same friend are one row (dedupe by approver identity; Remove revokes all duplicates). Pre-v3 pairings decode as unverified: hidden, with a "send a new invite" hint. **`CompanionTrustMerge` itself is in CompanionKit (not mine), so it was not edited:** the app no longer uses its pending-acceptance machinery (passes `[]`) and handles the owner "add" path with the join check instead; stale `CompanionPendingAcceptance`/`pruneExpiredPendingAcceptances` in CompanionKit are now unused by the app.
+4. **Names.** Owner name asked once in the invite card, editable ("Edit"), validated with `PairingFields.validateDisplayName` and signed into new invites; friend name entered on Accept and prefilled afterwards. Placeholders replaced by pairing display names (fallbacks "Unnamed person"/"Someone" only for nameless pre-v3 pairings).
+5. **Auto-refresh.** `PeopleView` `.task(id: scenePhase)` runs `runAutoRefreshLoop`: immediately, then every 5 s while an invite is outstanding or a request pending, else 30 s; cancelled when People is not visible or the scene is not active; pull-to-refresh kept. `refreshInbox` flight capped at `maxRefreshPasses = 3`.
+6. **Ask to end early.** Checkmark rows (`isSelected` trait), preselected and non-interactive when exactly one person; "Ask ‹Name›" / "Ask 2 people"; hint instead of a disabled button when nobody is trusted. Friend inbox rows use the owner's real name.
+7. **Tests.** See below. The 22 s sleep in `requireRelay()` is removed; tests expect `cd relay && npm run dev:test`.
+
+### Removed UI
+Pending-acceptance card (Confirm / Not them / name field / grant switch), consent switches on both person rows, "Waiting for the person who invited you to confirm", all six-digit/code copy, the legacy long-link handling, `confirmPendingAcceptance`, `setOwnerGrant`, stored `Invitation`/pending-acceptance defaults (legacy keys are deleted at launch). Added: friend-side "Stop being a trusted person" (opt-out) since the switches that allowed it are gone.
+
+### Validation (compile-only, exact)
+- `xcodegen generate`; `xcodebuild build -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -derivedDataPath /Users/nishantroy/code/.build-cache/phone-lockbox/agent-a8417ae781fc1e795/DerivedData CODE_SIGNING_ALLOWED=NO`: **BUILD SUCCEEDED** (before tests were rewritten).
+- Same command with `build-for-testing`: **TEST BUILD SUCCEEDED** (app, unit tests and UI tests compile).
+
+### NOT run
+No simulator was booted; `xcodebuild test`, the new unit tests (`CompanionPairingV3Tests`, 24 tests incl. fixtures built offline from CompanionKit's in-memory relay), the relay-backed `CompanionLocalRelayFlowTests`, and all `PhoneLockboxUITests` have not been executed. `swift test` for packages was not run (no package changes). No relay was started.
+
+### Notes
+- The UI test cannot start a real lock, so "owner asks" is covered in `CompanionLocalRelayFlowTests`; the UI test has a scripted owner send the request to the app-as-friend and asserts "‹Owner› is asking for help". The friend polls at the 30 s idle cadence, so that wait is up to ~30 s.
+- Model: Claude Sonnet.

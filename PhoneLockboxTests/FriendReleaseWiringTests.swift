@@ -210,7 +210,7 @@ final class FriendReleaseWiringTests: XCTestCase {
     }
 
     private func person(for fixture: Fixture) -> CompanionPerson {
-        CompanionPerson(nickname: "Friend", localRole: .iAmOwner, pairing: fixture.pairing, consent: fixture.consent)
+        CompanionPerson(nickname: "Friend", localRole: .iAmOwner, pairing: fixture.pairing, consent: fixture.consent, joinVerified: true)
     }
 
     func testSelectFriendReleaseHappyPath() throws {
@@ -227,6 +227,23 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertEqual(request.requestID, fixture.request.requestID)
         XCTAssertEqual(selectedApproval.approvalID, approval.approvalID)
         XCTAssertTrue(trustedApprover.isActive)
+    }
+
+    /// Pairing v3: an approval is accepted only from a person the join check verified.
+    func testSelectFriendReleaseRejectsAnUnverifiedPerson() throws {
+        let fixture = try makeFixture()
+        let approval = try makeApproval(request: fixture.request, pairing: fixture.pairing,
+                                        approverIdentity: fixture.approverSigner.identity, signingSigner: fixture.approverSigner)
+        let response = try InboxResponse(ownerIdentityID: fixture.ownerSigner.identity.identityID, revision: 1,
+                                         requests: [fixture.request], approvals: [approval])
+        var unverified = person(for: fixture)
+        unverified.joinVerified = false
+        XCTAssertThrowsError(try CompanionCoordinator.selectFriendRelease(
+            response: response, requestID: fixture.request.requestID, people: [unverified],
+            ownerIdentity: fixture.ownerSigner.identity
+        )) { error in
+            XCTAssertEqual(error as? CompanionError, .unknownIdentity)
+        }
     }
 
     func testSelectFriendReleaseRejectsASubstitutedApprover() throws {

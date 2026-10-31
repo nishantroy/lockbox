@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		088C033D0B032FBAB0FD8661 /* CompanionKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7BC707BB36F96F1716EB6078 /* CompanionKit */; };
-		093C5AC93F07AA91632E9494 /* CompanionPairingV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */; };
 		0C189D58217CC2903569661C /* TaskUnlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */; };
 		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
 		127ADDDC4FEA5FDBC2DD4FE4 /* WeekendSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */; };
@@ -67,6 +66,7 @@
 		CE64409932253EE99055B4B3 /* CompanionLocalRelayFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */; };
 		CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */; };
 		D5B2284D818113D61BF8D5D8 /* IssuedInviteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64231289C6D39E0A1CBB6D2B /* IssuedInviteStore.swift */; };
+		D853158CBDB8A43B030AA065 /* CompanionPairingV3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65A0B225BE4252E6CF870F25 /* CompanionPairingV3Tests.swift */; };
 		DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4937C609973AA395FE5785C2 /* LockboxPolicy.swift */; };
 		E1D349757CE70CDEC1E006F2 /* QuickActionIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26ED6896A4C96EDDD895D840 /* QuickActionIntents.swift */; };
 		E4EE663BF81E00D83BB7D66D /* DeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -158,7 +158,6 @@
 		2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContracts.swift; sourceTree = "<group>"; };
 		30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistant.swift; sourceTree = "<group>"; };
 		35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryGate.swift; sourceTree = "<group>"; };
-		366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingV2Tests.swift; sourceTree = "<group>"; };
 		42E93866048FAF912545941E /* CompanionPairingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingUITests.swift; sourceTree = "<group>"; };
 		4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendReleaseWiringTests.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -173,6 +172,7 @@
 		5A49845AEC0FC73B3304327A /* GalleryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryViews.swift; sourceTree = "<group>"; };
 		63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeLifecycle.swift; sourceTree = "<group>"; };
 		64231289C6D39E0A1CBB6D2B /* IssuedInviteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IssuedInviteStore.swift; sourceTree = "<group>"; };
+		65A0B225BE4252E6CF870F25 /* CompanionPairingV3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingV3Tests.swift; sourceTree = "<group>"; };
 		6755A170D9EDAE417B2C0F1B /* LockboxLiveActivity.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = LockboxLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		67DB89A18388EAA81743EAEE /* PhoneLockboxTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PhoneLockboxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		68BD59D904BD226107FFF407 /* AmbientKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AmbientKit; path = AmbientKit; sourceTree = SOURCE_ROOT; };
@@ -355,7 +355,7 @@
 			isa = PBXGroup;
 			children = (
 				5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */,
-				366CF69527A4B2B8D27F1CC8 /* CompanionPairingV2Tests.swift */,
+				65A0B225BE4252E6CF870F25 /* CompanionPairingV3Tests.swift */,
 				4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */,
 				EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */,
 				007587A21F60E1CD46B8904F /* QuickActionRouteTests.swift */,
@@ -767,7 +767,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CE64409932253EE99055B4B3 /* CompanionLocalRelayFlowTests.swift in Sources */,
-				093C5AC93F07AA91632E9494 /* CompanionPairingV2Tests.swift in Sources */,
+				D853158CBDB8A43B030AA065 /* CompanionPairingV3Tests.swift in Sources */,
 				EE9DA6E228EF2D19028C2BDB /* FriendReleaseWiringTests.swift in Sources */,
 				E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */,
 				3633D5BF5B4871E3827366BB /* QuickActionRouteTests.swift in Sources */,

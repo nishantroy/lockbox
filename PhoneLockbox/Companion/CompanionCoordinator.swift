@@ -610,6 +610,8 @@ final class CompanionCoordinator: ObservableObject {
     }
     @discardableResult
     func ensureOwnerIdentityForTesting() throws -> DeviceIdentity { try ensureIdentity(role: .owner) }
+    @discardableResult
+    func ensureApproverIdentityForTesting() throws -> DeviceIdentity { try ensureIdentity(role: .trustedApprover) }
     func testOnlySeedPerson(_ pairing: Pairing, nickname: String, role: CompanionPerson.LocalRole,
                             consent: RelationshipConsent? = nil, joinVerified: Bool) {
         people.append(CompanionPerson(nickname: nickname, localRole: role, pairing: pairing, consent: consent, joinVerified: joinVerified))
