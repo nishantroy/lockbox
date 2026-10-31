@@ -17,7 +17,7 @@ enum CompanionLocalError: Error, Equatable {
         case .storageUnavailable:
             return "Phone Lockbox can't use its saved-data storage on this device, so nothing was sent. Quit and reopen the app, then try again."
         case .identityStorage:
-            return "Couldn't save this device's secure key, so nothing was sent. Unlock your phone and try again."
+            return "Couldn't save this device's secure key, so nothing was sent. Try again; if your phone is locked, unlock it first."
         }
     }
 }
@@ -762,6 +762,7 @@ final class CompanionCoordinator: ObservableObject {
     }
     /// Re-reads the invite store (as a refresh would) and reports what happened.
     func reloadInviteStoreForTesting() { reloadInviteStore() }
+    func restorePendingInviteForTesting() { restorePendingInvite() }
     @discardableResult
     func ensureOwnerIdentityForTesting() throws -> DeviceIdentity { try ensureIdentity(role: .owner) }
     @discardableResult

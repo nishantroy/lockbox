@@ -236,11 +236,9 @@ final class CompanionPairingUITests: XCTestCase {
 
         // Copy link answers visibly: the button reads "Copied" for about two seconds.
         let copyButton = app.buttons["inviteSomeone.copyLinkButton"]
-        if copyButton.waitForExistence(timeout: 10) {
-            copyButton.tap()
-            let copied = expectation(for: NSPredicate(format: "label == 'Copied'"), evaluatedWith: copyButton)
-            await fulfillment(of: [copied], timeout: 2)
-        }
+        XCTAssertTrue(copyButton.waitForExistence(timeout: 10), "Copy link button never appeared")
+        copyButton.tap()
+        XCTAssertEqual(copyButton.label, "Copied")
         return link
     }
 

@@ -699,14 +699,18 @@ final class CompanionPairingV3Tests: XCTestCase {
     }
 
     func testAConsumedInviteIsNotRestoredAsThePendingLink() throws {
-        let rig = try makeOwnerRig()
-        let join = try makeJoin(rig)
-        var removed = join.pairing
-        removed.state = .revoked
-        rig.store.invites[join.issued.invitation.payload.inviteID] = join.issued
-        rig.coordinator.testOnlySeedPerson(removed, nickname: "Ari", role: .iAmOwner, consent: join.consent, joinVerified: true)
-        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
-        XCTAssertNil(relaunched.pendingInvite)
+        // The launch discard deletes a removed person's token, so the restore
+        // filter is exercised where the token is still held: the person is
+        // revoked by the relay (an inbox update) during the session.
+        let (rig, join) = try makeTrustedOwner()
+        var revoked = join.pairing
+        revoked.state = .revoked
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [revoked], consents: [join.consent], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertNotNil(rig.coordinator.issuedInvitesForTesting[join.issued.invitation.payload.inviteID], "token still held")
+        XCTAssertNil(rig.coordinator.pendingInvite)
+        rig.coordinator.restorePendingInviteForTesting()
+        XCTAssertNil(rig.coordinator.pendingInvite, "a consumed invite is never offered again")
     }
 
     func testThePendingLinkComesBackWhenAnUnreadableStoreReadsAgain() throws {
@@ -834,10 +838,10 @@ final class CompanionPairingV3Tests: XCTestCase {
 
     #if os(iOS)
     func testCopyLinkPasteboardAllowsUniversalClipboardAndStillExpires() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let options = CompanionPasteboard.options(now: now)
+        let expiry = Date(timeIntervalSince1970: 1_800_000_000)
+        let options = CompanionPasteboard.options(expiresAt: expiry)
         XCTAssertNil(options[.localOnly], "localOnly would stop Universal Clipboard")
-        XCTAssertEqual(options[.expirationDate] as? Date, now.addingTimeInterval(CompanionCoordinator.inviteLifetime))
+        XCTAssertEqual(options[.expirationDate] as? Date, expiry, "the copied link goes when the invite expires")
     }
     #endif
 }

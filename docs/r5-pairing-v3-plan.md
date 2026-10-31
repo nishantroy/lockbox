@@ -330,3 +330,11 @@ Local errors never read as relay problems (+ failing key store on Accept); expir
 
 ### NOT run
 No simulator was booted. The new app unit tests, `CompanionLocalRelayFlowTests` and all `PhoneLockboxUITests` have not been executed, so the app-level tests above are compile-checked only and still need their first run in the pre-push suite. No relay was started; nothing touched the production relay or port 8002.
+
+### P3c-app review follow-up (Opus review approved 355e13a; same Sonnet builder, model `claude-sonnet-5-5`)
+- **P2-1.** `CopyLinkButton` resets `copied` on disappear and is keyed by the invite ID, so "Copied" cannot stick or carry over to the next invite.
+- **P2-2.** The expiry check uses the `TimelineView` context date as well as `Date()`. The copied link's pasteboard expiry is now the invite's own `expiresAt` (`CompanionPasteboard.options(expiresAt:)`).
+- **P2-3.** While the saved invites are corrupt, the create button is disabled with the footnote "Reset saved invites first (see above), then create an invite." (`inviteSomeone.resetFirstHint`). The reset card shows only when an owner identity exists on the device.
+- **P2-4.** (a) `testAConsumedInviteIsNotRestoredAsThePendingLink` now revokes the person through an inbox update, so the token is still held when `restorePendingInvite` runs (DEBUG seam `restorePendingInviteForTesting`); it fails without the `inviteCreatedAnyPerson` filter. (b) The UI copy step asserts the button exists and that its label is "Copied" straight after the tap.
+- **Copy tweak.** Identity-storage error now reads "Couldn't save this device's secure key, so nothing was sent. Try again; if your phone is locked, unlock it first."
+- Validation: CompanionKit `swift test`, root `swift test`, `xcodebuild build-for-testing` (generic simulator, `CODE_SIGNING_ALLOWED=NO`) and `git diff --check` re-run; results in the hand-off. Still not run: any simulator test.

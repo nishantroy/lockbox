@@ -63,7 +63,7 @@ struct PeopleView: View {
                 ForEach(companion.joinedNotices) { notice in
                     JoinedNoticeCard(notice: notice) { companion.dismissJoinedNotice(id: notice.id) }
                 }
-                if companion.inviteStoreIsCorrupt {
+                if companion.inviteStoreIsCorrupt, companion.ownerIdentity != nil {
                     InviteStoreResetCard(companion: companion)
                 }
                 // First run (nobody invited, no owner setup yet) or a link was
@@ -183,13 +183,13 @@ private struct PrototypeLabelCard: View {
 /// tapped in Messages.
 @MainActor enum CompanionPasteboard {
     /// Not `.localOnly`, so Universal Clipboard can paste the link on the owner's
-    /// Mac (build-22 QA). It still disappears after an hour, the invite's own lifetime.
-    static func options(now: Date = Date()) -> [UIPasteboard.OptionsKey: Any] {
-        [.expirationDate: now.addingTimeInterval(CompanionCoordinator.inviteLifetime)]
+    /// Mac (build-22 QA). It disappears when the invite itself expires.
+    static func options(expiresAt: Date) -> [UIPasteboard.OptionsKey: Any] {
+        [.expirationDate: expiresAt]
     }
 
-    @MainActor static func copy(_ text: String) {
-        UIPasteboard.general.setItems([["public.utf8-plain-text": text]], options: options())
+    @MainActor static func copy(_ text: String, expiresAt: Date) {
+        UIPasteboard.general.setItems([["public.utf8-plain-text": text]], options: options(expiresAt: expiresAt))
     }
 }
 
@@ -197,12 +197,13 @@ private struct PrototypeLabelCard: View {
 /// with a checkmark, with a light haptic and a VoiceOver announcement.
 private struct CopyLinkButton: View {
     let link: String
+    let expiresAt: Date
     @State private var copied = false
     @State private var resetTask: Task<Void, Never>?
 
     var body: some View {
         Button {
-            CompanionPasteboard.copy(link)
+            CompanionPasteboard.copy(link, expiresAt: expiresAt)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             UIAccessibility.post(notification: .announcement, argument: "Invite link copied")
             copied = true
@@ -219,7 +220,7 @@ private struct CopyLinkButton: View {
         .accessibilityLabel(copied ? "Copied" : "Copy link")
         .accessibilityHint("Copies the invite link to the clipboard, so you can paste it into a message")
         .accessibilityIdentifier("inviteSomeone.copyLinkButton")
-        .onDisappear { resetTask?.cancel() }
+        .onDisappear { resetTask?.cancel(); copied = false }
     }
 }
 #endif
@@ -439,8 +440,10 @@ private struct InviteSomeoneCard: View {
                 if let issued = companion.pendingInvite {
                     // The link stops being offered the moment it expires, even
                     // if nothing else on screen changes.
-                    TimelineView(.explicit([issued.invitation.payload.expiresAt])) { _ in
-                        inviteActions(issued: issued, expired: Date() >= issued.invitation.payload.expiresAt)
+                    TimelineView(.explicit([issued.invitation.payload.expiresAt])) { context in
+                        inviteActions(issued: issued,
+                                      expired: context.date >= issued.invitation.payload.expiresAt
+                                          || Date() >= issued.invitation.payload.expiresAt)
                     }
                 } else {
                     inviteActions(issued: nil, expired: false)
@@ -461,9 +464,16 @@ private struct InviteSomeoneCard: View {
                       systemImage: "link.badge.plus")
             }
             .buttonStyle(LockboxActionButtonStyle(emphasis: expired ? .primary : .secondary))
-            .disabled(isCreating || isEditingName || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
+            .disabled(isCreating || isEditingName || companion.inviteStoreIsCorrupt || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
             .accessibilityHint("Creates a one-use invitation link")
             .accessibilityIdentifier("inviteSomeone.createInviteButton")
+
+            if companion.inviteStoreIsCorrupt {
+                Text("Reset saved invites first (see above), then create an invite.")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+                    .accessibilityIdentifier("inviteSomeone.resetFirstHint")
+            }
 
             if let issued, expired {
                 Label("This link expired. Create a new one.", systemImage: "clock.badge.exclamationmark")
@@ -488,7 +498,8 @@ private struct InviteSomeoneCard: View {
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                 .accessibilityIdentifier("inviteSomeone.shareLinkButton")
                 #if os(iOS)
-                CopyLinkButton(link: issued.shareLink)
+                CopyLinkButton(link: issued.shareLink, expiresAt: issued.invitation.payload.expiresAt)
+                    .id(issued.invitation.payload.inviteID)
                 #endif
                 Text("When they tap Accept, they appear under your trusted people. There's nothing for you to confirm.")
                     .font(.footnote)
