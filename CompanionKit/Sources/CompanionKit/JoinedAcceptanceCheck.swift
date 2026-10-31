@@ -111,8 +111,8 @@ public enum JoinedAcceptanceCheck {
             let pairing = (inbox.pairings ?? []).first {
                 $0.pairingID == Pairing.derivedID(inviteID: signed.acceptance.inviteID, approverIdentityID: signed.acceptance.approver.identityID)
             }
-            let valid = pairing.flatMap { try? verify(signedAcceptance: signed, pairing: $0, issued: issued, ownerIdentity: ownerIdentity) }
-            if valid == nil {
+            let isValid = pairing.map { (try? verify(signedAcceptance: signed, pairing: $0, issued: issued, ownerIdentity: ownerIdentity)) != nil } ?? false
+            if !isValid {
                 warnings.append("relay reported an acceptance for invite \(signed.acceptance.inviteID) that failed verification")
             }
         }

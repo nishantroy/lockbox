@@ -293,6 +293,13 @@ function isBlankScalar(cp: number): boolean {
     cp === 0x2060 ||
     cp === 0x2800 ||
     cp === 0x3164 ||
+    cp === 0xffa0 ||
+    cp === 0x200c ||
+    cp === 0x034f ||
+    cp === 0x180e ||
+    (cp >= 0x2061 && cp <= 0x2064) ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0x1d173 && cp <= 0x1d17a) ||
     (cp >= 0xe0000 && cp <= 0xe007f)
   );
 }

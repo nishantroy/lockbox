@@ -261,7 +261,9 @@ async function purgeOwner(client: pg.PoolClient, ownerID: string, cutoff: number
   }
 
   for (const [inviteID, record] of Object.entries(ledger.invitations)) {
-    const terminalAt = record.consumedAt ?? record.invitation.payload.expiresAt;
+    // A consumed invite's token row is a tombstone until the invite would have
+    // expired anyway, so the purge keys on the later of consumption and expiry.
+    const terminalAt = Math.max(record.consumedAt ?? 0, record.invitation.payload.expiresAt);
     if (terminalAt < cutoff) {
       delete ledger.invitations[inviteID];
       summary.purgedInvitations += 1;
