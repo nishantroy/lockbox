@@ -3,6 +3,25 @@ import Foundation
 #if canImport(CompanionKit)
 import CompanionKit
 
+/// A failure on this device before anything is sent to the relay. These must
+/// never read as "couldn't reach the relay" (build-22 QA): that message is for
+/// transport errors only.
+enum CompanionLocalError: Error, Equatable {
+    /// The App Group suite (where identities and people are kept) can't be used.
+    case storageUnavailable
+    /// This device's signing key couldn't be created or saved in the Keychain.
+    case identityStorage
+
+    var message: String {
+        switch self {
+        case .storageUnavailable:
+            return "Phone Lockbox can't use its saved-data storage on this device, so nothing was sent. Quit and reopen the app, then try again."
+        case .identityStorage:
+            return "Couldn't save this device's secure key, so nothing was sent. Try again; if your phone is locked, unlock it first."
+        }
+    }
+}
+
 /// Local-only registry entry for one paired relationship. The relay (v1) has
 /// no "list my pairings" endpoint outside of `/v1/inbox`'s `pairings`/
 /// `consents` arrays, so the device's own cache — refreshed on every inbox
@@ -326,6 +345,7 @@ final class CompanionCoordinator: ObservableObject {
                 issuedInvites = [:]
                 self.inviteStore.removeAll()
             }
+            discardInvitesOfRemovedPeople()
             pruneIssuedInvites(now: Date())
             restorePendingInvite()
             recomputeJoinedNotices()
@@ -350,7 +370,7 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     private func ensureIdentity(role: CompanionRole) throws -> DeviceIdentity {
-        guard let sharedDefaults else { throw CompanionError.malformed("companion storage is unavailable") }
+        guard let sharedDefaults else { throw CompanionLocalError.storageUnavailable }
         let key = role == .owner ? Self.ownerIdentityDefaultsKey : Self.approverIdentityDefaultsKey
         if let existing = decodedIdentity(forKey: key) {
             // A missing private key is a repair state, not silently
@@ -359,7 +379,8 @@ final class CompanionCoordinator: ObservableObject {
             return existing
         }
         let manager = IdentityManager(keyStore: keyStore)
-        let stored = try manager.create(role: role)
+        let stored: StoredIdentity
+        do { stored = try manager.create(role: role) } catch { throw CompanionLocalError.identityStorage }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         sharedDefaults.set(try encoder.encode(stored.identity), forKey: key)
         if role == .owner { ownerIdentity = stored.identity } else { approverIdentity = stored.identity }
@@ -379,19 +400,77 @@ final class CompanionCoordinator: ObservableObject {
         sharedDefaults.set(data, forKey: Self.peopleDefaultsKey)
     }
 
-    /// `true` when the last read of the invite store failed (locked or
-    /// unreadable Keychain). While set, nothing is written to the store and
-    /// owner-side people keep whatever verified state they already had.
-    private(set) var inviteStoreFailed = false
+    /// How the last read of the invite store went. While it is anything but
+    /// `.readable`, nothing is written to the store and owner-side people keep
+    /// whatever verified state they already had.
+    enum InviteStoreStatus: Equatable {
+        case readable
+        /// Keychain locked (`errSecInteractionNotAllowed`): resolves after unlocking.
+        case locked
+        /// Another read error, usually transient.
+        case unavailable
+        /// The item no longer decodes: needs `resetUnreadableInviteStore()`.
+        case corrupt
+    }
+    @Published private(set) var inviteStoreStatus: InviteStoreStatus = .readable
+    var inviteStoreFailed: Bool { inviteStoreStatus != .readable }
+    /// Owner side: the saved invites are damaged and offer a reset instead of a retry.
+    var inviteStoreIsCorrupt: Bool { inviteStoreStatus == .corrupt }
+
     static let inviteStoreReadFailedMessage =
         "Couldn't read this device's saved invites just now. Your trusted people are unchanged; try again after unlocking your phone."
+    static let inviteStoreUnavailableMessage =
+        "Couldn't read this device's saved invites just now. Your trusted people are unchanged; try again in a moment."
+    static let inviteStoreCorruptMessage =
+        "This device's saved invites are damaged and can't be read. Reset them to create invites again. Links not yet used will stop working, and people who joined earlier will need a new invite."
+
+    /// The calm message for the current unreadable state (`nil` while readable
+    /// and for `.corrupt`, which has its own card with the reset action).
+    var inviteStoreProblemMessage: String? {
+        switch inviteStoreStatus {
+        case .readable, .corrupt: return nil
+        case .locked: return Self.inviteStoreReadFailedMessage
+        case .unavailable: return Self.inviteStoreUnavailableMessage
+        }
+    }
 
     private func loadIssuedInvites() {
         switch inviteStore.load() {
-        case .found(let invites): issuedInvites = invites; inviteStoreFailed = false
-        case .notFound: issuedInvites = [:]; inviteStoreFailed = false
-        case .failed: issuedInvites = [:]; inviteStoreFailed = true
+        case .found(let invites): issuedInvites = invites; inviteStoreStatus = .readable
+        case .notFound: issuedInvites = [:]; inviteStoreStatus = .readable
+        case .locked: issuedInvites = [:]; inviteStoreStatus = .locked
+        case .failed: issuedInvites = [:]; inviteStoreStatus = .unavailable
+        case .corrupt: issuedInvites = [:]; inviteStoreStatus = .corrupt
         }
+        // The notice came from checking against invites that can't be read now; it is
+        // recomputed from the next snapshot once they can.
+        if inviteStoreFailed { integrityNotice = nil }
+    }
+
+    /// Retries a failed read. On success, restores what a successful read
+    /// would have shown and finishes any removal that had to wait for it.
+    private func retryInviteStoreReadIfNeeded() {
+        guard inviteStoreFailed else { return }
+        reloadInviteStore()
+    }
+
+    private func reloadInviteStore() {
+        loadIssuedInvites()
+        guard !inviteStoreFailed else { return }
+        discardInvitesOfRemovedPeople()
+        restorePendingInvite()
+    }
+
+    /// The recovery route for a damaged invite item: clears it. Only allowed
+    /// while the item really is corrupt, so a locked phone can never lead to
+    /// deleting good data.
+    func resetUnreadableInviteStore() {
+        guard inviteStoreStatus == .corrupt else { return }
+        inviteStore.removeAll()
+        issuedInvites = [:]
+        inviteStoreStatus = .readable
+        pendingInvite = nil
+        lastError = nil
     }
 
     /// Never writes while the store is unreadable (it could overwrite the real item).
@@ -401,12 +480,42 @@ final class CompanionCoordinator: ObservableObject {
         return inviteStore.save(issuedInvites)
     }
 
-    /// After a relaunch, shows the newest unexpired unused invite's link again.
+    /// Shows the newest unexpired, never-used invite's link again (after a
+    /// relaunch, or once an unreadable store reads again). An invite that
+    /// created a person, including one since removed, is consumed on the relay
+    /// and is never offered again.
     private func restorePendingInvite() {
+        guard pendingInvite == nil else { return }
         let now = Date()
         pendingInvite = issuedInvites.values
-            .filter { now < $0.invitation.payload.expiresAt && !inviteHasPerson($0) }
+            .filter { now < $0.invitation.payload.expiresAt && !inviteCreatedAnyPerson($0) }
             .max { $0.invitation.payload.issuedAt < $1.invitation.payload.issuedAt }
+    }
+
+    /// Whether any owner-side person, active or since removed, came from this invite.
+    private func inviteCreatedAnyPerson(_ issued: IssuedInvite) -> Bool {
+        let inviteID = issued.invitation.payload.inviteID
+        return people.contains {
+            $0.localRole == .iAmOwner
+                && Pairing.derivedID(inviteID: inviteID, approverIdentityID: $0.pairing.approver.identityID) == $0.pairing.pairingID
+        }
+    }
+
+    /// Deletes the stored invites of every removed (revoked) owner-side person.
+    /// Removal while the store was unreadable could not delete the token then;
+    /// the revoked person stays in `people`, so this finishes the job after any
+    /// successful read, including after a relaunch.
+    private func discardInvitesOfRemovedPeople() {
+        guard !inviteStoreFailed else { return }
+        let before = issuedInvites.count
+        for person in people where person.localRole == .iAmOwner && person.pairing.state == .revoked {
+            for (id, issued) in issuedInvites where
+                Pairing.derivedID(inviteID: issued.invitation.payload.inviteID, approverIdentityID: person.pairing.approver.identityID) == person.pairing.pairingID {
+                issuedInvites.removeValue(forKey: id)
+            }
+        }
+        if issuedInvites.count != before { saveIssuedInvites() }
+        if let pendingInvite, issuedInvites[pendingInvite.invitation.payload.inviteID] == nil { self.pendingInvite = nil }
     }
 
     private func saveSeenJoinedPairingIDs() {
@@ -561,8 +670,10 @@ final class CompanionCoordinator: ObservableObject {
         }
     }
 
-    private static func describe(_ error: Error) -> String {
+    static func describe(_ error: Error) -> String {
         switch error {
+        case let local as CompanionLocalError:
+            return local.message
         case CompanionTransportError.unavailable, CompanionTransportError.timedOut:
             return "Couldn't reach the relay. Check your connection and try again."
         case CompanionTransportError.malformedResponse:
@@ -611,7 +722,7 @@ final class CompanionCoordinator: ObservableObject {
     /// Backs the `-resetCompanionStateForUITests` launch argument. Deletes
     /// any existing owner/approver private key from the Keychain, clears
     /// every companion App Group key this coordinator owns (identities,
-    /// paired people, pending acceptances, the friend-approval gate, and
+    /// paired people, the friend-approval gate, and
     /// the friend-release use-ID map), and resets every rollback-anchor
     /// checkpoint. Deliberately leaves `relayBaseURLDefaultsKey` alone — the
     /// `-relayBaseURL` override above already governs that independently.
@@ -638,6 +749,8 @@ final class CompanionCoordinator: ObservableObject {
     #if DEBUG
     /// Test-only: replaces the relay `createInvite` call (inviteID, ownerName).
     var issueInviteOverride: (@MainActor (_ inviteID: String, _ ownerName: String) async throws -> IssuedInvite)?
+    /// Test-only: replaces the owner-side relay `revoke` call.
+    var revokePairingOverride: (@MainActor (_ pairing: Pairing) async throws -> Void)?
     /// Test-only: replaces the friend-side `revokeScopes` call.
     var revokeScopesOverride: (@MainActor (_ pairing: Pairing, _ scopes: [CompanionScope]) async throws -> RelationshipConsent)?
     /// Test-only seams (never compiled into release): inspect/seed state without a relay round trip.
@@ -647,6 +760,9 @@ final class CompanionCoordinator: ObservableObject {
         pruneIssuedInvites(now: Date())
         saveIssuedInvites()
     }
+    /// Re-reads the invite store (as a refresh would) and reports what happened.
+    func reloadInviteStoreForTesting() { reloadInviteStore() }
+    func restorePendingInviteForTesting() { restorePendingInvite() }
     @discardableResult
     func ensureOwnerIdentityForTesting() throws -> DeviceIdentity { try ensureIdentity(role: .owner) }
     @discardableResult
@@ -695,8 +811,12 @@ final class CompanionCoordinator: ObservableObject {
             lastError = "Add your name first, so the person you invite knows it's from you."
             return
         }
-        if inviteStoreFailed { loadIssuedInvites() }
-        guard !inviteStoreFailed else { lastError = Self.inviteStoreReadFailedMessage; return }
+        retryInviteStoreReadIfNeeded()
+        guard !inviteStoreFailed else {
+            // A damaged store has its own card with the reset action.
+            lastError = inviteStoreProblemMessage
+            return
+        }
         do {
             let identity = try ensureIdentity(role: .owner)
             let issued: IssuedInvite
@@ -914,6 +1034,8 @@ final class CompanionCoordinator: ObservableObject {
         case CompanionError.rateLimited, CompanionTransportError.server(.rateLimited): return true
         case CompanionError.keyUnavailable, CompanionTransportError.server(.keyUnavailable): return true
         case CompanionError.relayRollback, CompanionError.responseVerificationFailed: return true
+        // Local storage problems say nothing about the invite; let the friend retry.
+        case is CompanionLocalError: return true
         default: return false
         }
     }
@@ -924,10 +1046,10 @@ final class CompanionCoordinator: ObservableObject {
         if let index = people.firstIndex(where: { $0.pairing.pairingID == pairing.pairingID }) {
             // Advance-only: never overwrite an existing record with a different owner/approver or an older epoch.
             switch CompanionTrustMerge.decide(pairing: pairing, viewerIdentityID: pairing.approver.identityID,
-                                              existingPairing: people[index].pairing, pendingAcceptances: []) {
+                                              existingPairing: people[index].pairing) {
             case .update(let updated): people[index].pairing = updated
             case .unchanged: break
-            case .add, .rejected:
+            case .rejected:
                 lastError = "The relay returned a pairing that conflicts with one already stored; ignoring it."
                 return false
             }
@@ -972,6 +1094,7 @@ final class CompanionCoordinator: ObservableObject {
             let identity = try ensureIdentity(role: .trustedApprover)
             let group = people.filter { $0.localRole == .iAmApprover && $0.pairing.state == .active
                 && $0.pairing.owner.identityID == person.pairing.owner.identityID }
+            var allApplied = true
             for member in group {
                 let scopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]
                 let consent: RelationshipConsent
@@ -984,9 +1107,10 @@ final class CompanionCoordinator: ObservableObject {
                 #else
                 consent = try await makeClient(signer: try signer(for: identity)).revokeScopes(pairing: member.pairing, scopes: scopes)
                 #endif
-                applyOwnConsentUpdate(consent, forPairingID: member.pairing.pairingID)
+                if !applyOwnConsentUpdate(consent, forPairingID: member.pairing.pairingID) { allApplied = false }
             }
-            lastError = nil; needsRepair = false
+            // A warning set by an ignored consent stays on screen.
+            if allApplied { lastError = nil; needsRepair = false }
         } catch { fail(error) }
     }
 
@@ -1004,8 +1128,7 @@ final class CompanionCoordinator: ObservableObject {
             } else {
                 consent = try await client.revokeScopes(pairing: person.pairing, scopes: [scope])
             }
-            applyOwnConsentUpdate(consent, forPairingID: person.pairing.pairingID)
-            lastError = nil; needsRepair = false
+            if applyOwnConsentUpdate(consent, forPairingID: person.pairing.pairingID) { lastError = nil; needsRepair = false }
         } catch { fail(error) }
     }
 
@@ -1014,14 +1137,19 @@ final class CompanionCoordinator: ObservableObject {
     /// routed through the same `CompanionTrustMerge.decide(consent:)` check
     /// as inbox-observed consent (matching pairing ID/epoch/owner/approver,
     /// generation never regressing) rather than stored as-is.
-    private func applyOwnConsentUpdate(_ consent: RelationshipConsent, forPairingID pairingID: String) {
-        guard let index = people.firstIndex(where: { $0.pairing.pairingID == pairingID }) else { return }
+    /// Returns `false` when the consent was ignored (and says why in
+    /// `lastError`); the caller must not clear that warning afterwards.
+    @discardableResult
+    private func applyOwnConsentUpdate(_ consent: RelationshipConsent, forPairingID pairingID: String) -> Bool {
+        guard let index = people.firstIndex(where: { $0.pairing.pairingID == pairingID }) else { return false }
         switch CompanionTrustMerge.decide(consent: consent, for: people[index].pairing, existingConsent: people[index].consent) {
         case .accepted(let accepted):
             people[index].consent = accepted
             savePeople()
+            return true
         case .rejected(let reason):
             lastError = "The relay returned unexpected consent data (\(reason)); ignoring it."
+            return false
         }
     }
 
@@ -1032,13 +1160,24 @@ final class CompanionCoordinator: ObservableObject {
     /// created it, so no stale token outlives the pairing.
     func revokePairing(_ person: CompanionPerson) async {
         guard isAvailable, person.localRole == .iAmOwner else { return }
+        // If the invite store can't be read, the token is deleted later (see
+        // `discardInvitesOfRemovedPeople`): the person stays marked as removed.
+        retryInviteStoreReadIfNeeded()
         do {
             let identity = try ensureIdentity(role: .owner)
             let client = makeClient(signer: try signer(for: identity))
             let group = people.filter { $0.localRole == .iAmOwner && $0.pairing.state == .active
                 && $0.pairing.approver.identityID == person.pairing.approver.identityID }
             for member in group {
+                #if DEBUG
+                if let revokePairingOverride {
+                    try await revokePairingOverride(member.pairing)
+                } else {
+                    try await client.revoke(member.pairing)
+                }
+                #else
                 try await client.revoke(member.pairing)
+                #endif
                 // Marked revoked in place rather than deleted, so a later
                 // inbox fetch that still lists this pairing (now `.revoked`
                 // there too) can only confirm the same state through
@@ -1068,12 +1207,40 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     static let minimumAskLeadTime: TimeInterval = 30
+    static let lockAboutToEndMessage = "This lock is about to end."
+    static let lockAlreadyEndedMessage = "That lock has already ended, so there's nothing left to ask about."
+    static let chooseSomeoneToAskMessage = "Choose at least one trusted person to ask."
+
+    /// What an Ask can say about a lock ending at `end`, judged at `now`:
+    /// `nil` when it can go ahead, otherwise the message to show instead.
+    static func askBlockedMessage(end: Date, now: Date) -> String? {
+        let remaining = end.timeIntervalSince(now)
+        if remaining >= minimumAskLeadTime { return nil }
+        return remaining > 0 ? lockAboutToEndMessage : lockAlreadyEndedMessage
+    }
+
+    /// How long a request may live: until the lock ends, or 24 hours if sooner.
+    /// `nil` when the lock is already over at `requestTime`.
+    static func askValidity(end: Date, requestTime: Date) -> TimeInterval? {
+        let remaining = end.timeIntervalSince(requestTime)
+        guard remaining > 0 else { return nil }
+        return min(remaining, CompanionLimits.maxRequestLifetime)
+    }
+
+    #if DEBUG
+    /// Test-only: replaces the two relay calls of an Ask (publish the session,
+    /// create the request) so the Ask logic runs without a relay. Receives the
+    /// session, the single instant the request lifetime is derived from, the
+    /// lifetime, and the people asked.
+    var askRelayOverride: (@MainActor (_ session: ActiveSession, _ requestTime: Date, _ validFor: TimeInterval,
+                                       _ targets: [CompanionPerson]) async throws -> Void)?
+    #endif
 
     func requestEarlyEnd(sessionID: String, activeSetID: String, start: Date, end: Date,
                         to targets: [CompanionPerson]) async {
         guard isAvailable else { return }
         guard !targets.isEmpty, targets.allSatisfy({ $0.localRole == .iAmOwner && $0.joinVerified && $0.pairing.state == .active && $0.isFullyTrustedForEarlyEnd }) else {
-            lastError = "Choose at least one trusted person to ask."
+            lastError = Self.chooseSomeoneToAskMessage
             return
         }
         do {
@@ -1081,13 +1248,25 @@ final class CompanionCoordinator: ObservableObject {
             // Checked before publishing anything: a lock that is over (or
             // about to be) has no request worth sending, and a request must
             // outlive the round trip to be answerable.
-            guard end.timeIntervalSinceNow >= Self.minimumAskLeadTime else {
-                lastError = end.timeIntervalSinceNow > 0 ? "This lock is about to end." : "That lock has already ended, so there's nothing left to ask about."
+            if let blocked = Self.askBlockedMessage(end: end, now: Date()) {
+                lastError = blocked
                 return
             }
-            let client = makeClient(signer: try signer(for: identity))
             let session = try ActiveSession(owner: identity, sessionID: sessionID, activeSetID: activeSetID,
                                             startsAt: start, endsAt: end)
+            #if DEBUG
+            if let askRelayOverride {
+                let requestTime = Date()
+                guard let validFor = Self.askValidity(end: end, requestTime: requestTime) else {
+                    lastError = Self.lockAlreadyEndedMessage
+                    return
+                }
+                try await askRelayOverride(session, requestTime, validFor, targets)
+                lastError = nil; needsRepair = false
+                return
+            }
+            #endif
+            let client = makeClient(signer: try signer(for: identity))
             _ = try await client.publishSession(session)
             // P3-0 root cause (build-21 "Ask now never reached the friend"):
             // `TrustedRequest` requires `expiresAt <= session.endsAt`, but
@@ -1100,12 +1279,10 @@ final class CompanionCoordinator: ObservableObject {
             // single instant the lifetime is derived from, so the request
             // expires exactly when the session ends (or in 24h, if sooner).
             let requestTime = Date()
-            let remaining = end.timeIntervalSince(requestTime)
-            guard remaining > 0 else {
-                lastError = "That lock has already ended, so there's nothing left to ask about."
+            guard let validFor = Self.askValidity(end: end, requestTime: requestTime) else {
+                lastError = Self.lockAlreadyEndedMessage
                 return
             }
-            let validFor = min(remaining, CompanionLimits.maxRequestLifetime)
             let requestClient = makeClient(signer: try signer(for: identity), now: { requestTime })
             _ = try await requestClient.requestUnlock(requestID: UUID().uuidString, pairings: targets.map(\.pairing),
                                                       consents: targets.compactMap(\.consent), session: session,
@@ -1655,6 +1832,20 @@ final class CompanionCoordinator: ObservableObject {
     static let fastRefreshInterval: TimeInterval = 5
     static let idleRefreshInterval: TimeInterval = 30
 
+    /// The link on screen has passed its expiry: the card says so and offers a new one.
+    var pendingInviteIsExpired: Bool {
+        guard let pendingInvite else { return false }
+        return Date() >= pendingInvite.invitation.payload.expiresAt
+    }
+
+    /// Friend first-run: nobody has been invited and nothing is set up on the
+    /// owner side, or a link was just opened, so "Got an invite link?" goes
+    /// above the owner invite card instead of below all its copy.
+    var showsAcceptInviteFirst: Bool {
+        if case .none = incomingInvite {} else { return true }
+        return ownerDisplayName.isEmpty && pendingInvite == nil && people.isEmpty
+    }
+
     /// True while an unexpired invite has not yet produced a person on this device.
     var hasOutstandingInvite: Bool {
         let now = Date()
@@ -1688,7 +1879,7 @@ final class CompanionCoordinator: ObservableObject {
     private func performInboxRefresh() async {
         isRefreshing = true
         defer { isRefreshing = false }
-        if inviteStoreFailed { loadIssuedInvites() }
+        retryInviteStoreReadIfNeeded()
         pruneIssuedInvites(now: Date())
         var items: [CompanionInboxItem] = []
         var encounteredError: Error?
@@ -1733,7 +1924,7 @@ final class CompanionCoordinator: ObservableObject {
         if let encounteredError {
             fail(encounteredError)
         } else if inviteStoreFailed && ownerIdentity != nil {
-            lastError = Self.inviteStoreReadFailedMessage
+            lastError = inviteStoreProblemMessage
         } else if anyFetchSucceeded || (ownerIdentity == nil && approverIdentity == nil) {
             lastError = nil; needsRepair = false
         }
@@ -1760,6 +1951,7 @@ final class CompanionCoordinator: ObservableObject {
         var verifiedIDs: Set<String> = []
         // A local Keychain read error must never demote people who were verified before.
         let canVerify = !(isOwnerView && inviteStoreFailed)
+        if isOwnerView && !canVerify { integrityNotice = nil }
         if isOwnerView && canVerify {
             let result = JoinedAcceptanceCheck.verifiedPairings(in: response, invites: issuedInvites, ownerIdentity: viewerIdentity)
             verifiedIDs = Set(result.verified.map(\.pairingID))
@@ -1778,12 +1970,11 @@ final class CompanionCoordinator: ObservableObject {
             let resolvedPairing: Pairing?
             if let existingIndex {
                 switch CompanionTrustMerge.decide(pairing: pairing, viewerIdentityID: viewerIdentity.identityID,
-                                                  existingPairing: people[existingIndex].pairing, pendingAcceptances: []) {
+                                                  existingPairing: people[existingIndex].pairing) {
                 case .unchanged: resolvedPairing = people[existingIndex].pairing
                 case .update(let updated):
                     people[existingIndex].pairing = updated
                     resolvedPairing = updated
-                case .add: resolvedPairing = nil
                 case .rejected:
                     rejections += 1
                     resolvedPairing = nil
@@ -1813,9 +2004,9 @@ final class CompanionCoordinator: ObservableObject {
         if rejections > 0 || !(response.pairings ?? []).isEmpty { savePeople() }
         if isOwnerView {
             recomputeJoinedNotices()
-            if let pendingInvite, Date() >= pendingInvite.invitation.payload.expiresAt || inviteHasPerson(pendingInvite) {
-                self.pendingInvite = nil
-            }
+            // An expired link stays (shown as expired, with a one-tap new invite);
+            // only a link that already created a person is dropped.
+            if let pendingInvite, inviteHasPerson(pendingInvite) { self.pendingInvite = nil }
         }
         return rejections
     }

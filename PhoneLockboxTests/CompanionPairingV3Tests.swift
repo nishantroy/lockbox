@@ -531,5 +531,318 @@ final class CompanionPairingV3Tests: XCTestCase {
         guard case .ready = friend.incomingInvite else { return XCTFail("the friend can simply tap Accept again") }
         XCTAssertNotNil(friend.lastError)
     }
+
+    // MARK: - P3c-app: local errors, expiry, invite-store recovery, Ask
+
+    private struct FailingKeyStore: DeviceKeyStore {
+        func save(privateKey: Data, for identityID: String) throws { throw CompanionError.keyUnavailable }
+        func loadPrivateKey(for identityID: String) throws -> Data? { nil }
+        func deletePrivateKey(for identityID: String) throws {}
+    }
+
+    /// An owner coordinator with one verified, fully trusted person and the invite that created them.
+    private func makeTrustedOwner(now: Date = Date()) throws -> (OwnerRig, Join) {
+        let rig = try makeOwnerRig(now: now)
+        let join = try makeJoin(rig)
+        rig.coordinator.insertIssuedInviteForTesting(join.issued)
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [join.consent], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(rig.coordinator.trustedApprovers.count, 1)
+        return (rig, join)
+    }
+
+    func testLocalFailuresNeverReadAsRelayProblems() async throws {
+        for local in [CompanionLocalError.storageUnavailable, .identityStorage] {
+            let message = CompanionCoordinator.describe(local)
+            XCTAssertFalse(message.localizedCaseInsensitiveContains("relay"), message)
+            XCTAssertFalse(message.localizedCaseInsensitiveContains("reach"), message)
+        }
+        XCTAssertTrue(CompanionCoordinator.describe(CompanionTransportError.unavailable).contains("reach the relay"))
+        XCTAssertTrue(CompanionCoordinator.describe(CompanionTransportError.timedOut).contains("reach the relay"))
+
+        // A Keychain that refuses the new device key: Accept explains it, keeps the prompt, sends nothing.
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "p3c.\(UUID().uuidString)"))
+        let friend = CompanionCoordinator(keyStore: FailingKeyStore(), sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        friend.acceptInviteOverride = { _, _, _ in XCTFail("must not reach the relay"); throw CompanionError.unauthorized }
+        let incoming = IncomingInvite(invitation: join.issued.invitation, token: join.issued.token)
+        friend.incomingInvite = .ready(incoming)
+        let accepted = await friend.acceptIncomingInvite(incoming, name: "Sam")
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(friend.lastError, CompanionLocalError.identityStorage.message)
+        XCTAssertFalse(friend.needsRepair)
+        guard case .ready = friend.incomingInvite else { return XCTFail("the prompt stays so Accept can be tried again") }
+    }
+
+    func testAnExpiredPendingInviteIsShownAsExpiredAndStopsFastPolling() async throws {
+        let rig = try makeOwnerRig(now: Date().addingTimeInterval(-7_200))   // issued two hours ago, expired an hour ago
+        let join = try makeJoin(rig)
+        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Owner"))
+        rig.coordinator.issueInviteOverride = { _, _ in join.issued }
+        await rig.coordinator.createInvite()
+        XCTAssertNotNil(rig.coordinator.pendingInvite)
+        XCTAssertTrue(rig.coordinator.pendingInviteIsExpired)
+        XCTAssertFalse(rig.coordinator.hasOutstandingInvite)
+        XCTAssertEqual(rig.coordinator.autoRefreshInterval, CompanionCoordinator.idleRefreshInterval)
+
+        // A refresh does not make the expired link disappear or come back to life.
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [], consents: [], acceptances: []), viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertTrue(rig.coordinator.pendingInviteIsExpired)
+
+        // A relaunch does not offer an expired link again.
+        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertNil(relaunched.pendingInvite)
+
+        // Creating a new one replaces it.
+        let fresh = try makeOwnerRig()
+        let freshJoin = try makeJoin(fresh)
+        rig.coordinator.issueInviteOverride = { _, _ in freshJoin.issued }
+        await rig.coordinator.createInvite()
+        XCTAssertFalse(rig.coordinator.pendingInviteIsExpired)
+        XCTAssertEqual(rig.coordinator.pendingInvite?.invitation.payload.inviteID, freshJoin.issued.invitation.payload.inviteID)
+    }
+
+    func testALinkThatCreatedAPersonStopsBeingOffered() async throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Owner"))
+        rig.coordinator.issueInviteOverride = { _, _ in join.issued }
+        await rig.coordinator.createInvite()
+        XCTAssertNotNil(rig.coordinator.pendingInvite)
+        XCTAssertFalse(rig.coordinator.pendingInviteIsExpired)
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [join.pairing], consents: [join.consent], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertNil(rig.coordinator.pendingInvite, "the link was used; the card goes back to creating a new one")
+    }
+
+    func testAKeychainDecodeFailureIsToldApartFromALockedPhone() async throws {
+        let (rig, join) = try makeTrustedOwner()
+        XCTAssertNotNil(rig.store.invites[join.issued.invitation.payload.inviteID])
+
+        // Locked: a retry later is the answer; the reset must refuse and the item must survive.
+        rig.store.failLoads = true; rig.store.failureKind = .locked
+        let locked = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertEqual(locked.inviteStoreStatus, .locked)
+        XCTAssertFalse(locked.inviteStoreIsCorrupt)
+        XCTAssertEqual(locked.inviteStoreProblemMessage, CompanionCoordinator.inviteStoreReadFailedMessage)
+        locked.resetUnreadableInviteStore()
+        XCTAssertEqual(rig.store.invites.count, 1, "a locked phone never leads to deleting good data")
+        XCTAssertEqual(locked.inviteStoreStatus, .locked)
+
+        // Any other read error: transient wording, still no reset.
+        rig.store.failureKind = .failed
+        let other = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertEqual(other.inviteStoreStatus, .unavailable)
+        XCTAssertEqual(other.inviteStoreProblemMessage, CompanionCoordinator.inviteStoreUnavailableMessage)
+        other.resetUnreadableInviteStore()
+        XCTAssertEqual(rig.store.invites.count, 1)
+
+        // Corrupt: its own state with a recovery route and no relay call while it lasts.
+        rig.store.failureKind = .corrupt
+        let corrupt = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertTrue(corrupt.inviteStoreIsCorrupt)
+        XCTAssertNil(corrupt.inviteStoreProblemMessage, "the reset card carries the wording")
+        XCTAssertTrue(CompanionCoordinator.inviteStoreCorruptMessage.contains("Reset"))
+        XCTAssertTrue(corrupt.setOwnerDisplayName("Owner"))
+        corrupt.issueInviteOverride = { _, _ in XCTFail("must not reach the relay"); throw CompanionError.unauthorized }
+        await corrupt.createInvite()
+        XCTAssertNil(corrupt.pendingInvite)
+        XCTAssertEqual(rig.store.invites.count, 1, "nothing written over the unreadable item")
+
+        // Reset clears the item and makes invites work again.
+        rig.store.failLoads = false
+        corrupt.resetUnreadableInviteStore()
+        XCTAssertEqual(corrupt.inviteStoreStatus, .readable)
+        XCTAssertTrue(rig.store.invites.isEmpty)
+        let fresh = try makeJoin(rig)
+        corrupt.issueInviteOverride = { _, _ in fresh.issued }
+        await corrupt.createInvite()
+        XCTAssertNotNil(corrupt.pendingInvite)
+        XCTAssertNil(corrupt.lastError)
+    }
+
+    func testRemovingAPersonWhileTheInviteStoreIsUnreadableLeavesNoTokenBehind() async throws {
+        let (rig, join) = try makeTrustedOwner()
+        let inviteID = join.issued.invitation.payload.inviteID
+        rig.store.failLoads = true
+        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertTrue(relaunched.inviteStoreFailed)
+        var revoked: [String] = []
+        relaunched.revokePairingOverride = { revoked.append($0.pairingID) }
+        await relaunched.revokePairing(try XCTUnwrap(relaunched.trustedPeople.first))
+        XCTAssertEqual(revoked, [join.pairing.pairingID])
+        XCTAssertNil(relaunched.lastError)
+        XCTAssertNotNil(rig.store.invites[inviteID], "the unreadable item was not touched")
+
+        // Once the store reads again the removed person's token goes.
+        rig.store.failLoads = false
+        relaunched.reloadInviteStoreForTesting()
+        XCTAssertTrue(rig.store.invites.isEmpty)
+        XCTAssertTrue(relaunched.issuedInvitesForTesting.isEmpty)
+        XCTAssertNil(relaunched.pendingInvite)
+    }
+
+    func testARemovalThatCouldNotDeleteItsTokenIsFinishedAtNextLaunch() async throws {
+        let (rig, _) = try makeTrustedOwner()
+        rig.store.failLoads = true
+        let whileLocked = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        whileLocked.revokePairingOverride = { _ in }
+        await whileLocked.revokePairing(try XCTUnwrap(whileLocked.trustedPeople.first))
+        XCTAssertEqual(rig.store.invites.count, 1, "could not be deleted while unreadable")
+
+        // The app is quit; on the next launch the store reads and the removed person's token goes.
+        rig.store.failLoads = false
+        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertTrue(rig.store.invites.isEmpty, "the removed person's token does not outlive them")
+        XCTAssertNil(relaunched.pendingInvite, "a consumed invite is never offered again")
+    }
+
+    func testAConsumedInviteIsNotRestoredAsThePendingLink() throws {
+        // The launch discard deletes a removed person's token, so the restore
+        // filter is exercised where the token is still held: the person is
+        // revoked by the relay (an inbox update) during the session.
+        let (rig, join) = try makeTrustedOwner()
+        var revoked = join.pairing
+        revoked.state = .revoked
+        rig.coordinator.applyInboxSnapshot(try inbox(pairings: [revoked], consents: [join.consent], acceptances: [join.signed]),
+                                           viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertNotNil(rig.coordinator.issuedInvitesForTesting[join.issued.invitation.payload.inviteID], "token still held")
+        XCTAssertNil(rig.coordinator.pendingInvite)
+        rig.coordinator.restorePendingInviteForTesting()
+        XCTAssertNil(rig.coordinator.pendingInvite, "a consumed invite is never offered again")
+    }
+
+    func testThePendingLinkComesBackWhenAnUnreadableStoreReadsAgain() throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        rig.coordinator.insertIssuedInviteForTesting(join.issued)
+        rig.store.failLoads = true
+        let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
+        XCTAssertNil(relaunched.pendingInvite)
+        rig.store.failLoads = false
+        relaunched.reloadInviteStoreForTesting()
+        XCTAssertEqual(relaunched.pendingInvite?.invitation.payload.inviteID, join.issued.invitation.payload.inviteID)
+        XCTAssertEqual(relaunched.inviteStoreStatus, .readable)
+    }
+
+    func testStopKeepsAConsentWarningItSetItself() async throws {
+        let rig = try makeOwnerRig()
+        let first = try makeJoin(rig), other = try makeJoin(rig)
+        let friend = try makeFriend()
+        friend.testOnlySeedPerson(first.pairing, nickname: "Owner", role: .iAmApprover, consent: first.consent, joinVerified: false)
+        // The relay answers with a consent that belongs to a different pairing: it is ignored and says so.
+        friend.revokeScopesOverride = { _, _ in other.consent }
+        await friend.stopBeingTrustedPerson(for: try XCTUnwrap(friend.helpingPeople.first))
+        let warning = try XCTUnwrap(friend.lastError)
+        XCTAssertTrue(warning.contains("unexpected consent data"), warning)
+        XCTAssertFalse(try XCTUnwrap(friend.people.first).approverStoppedHelping, "nothing was recorded as stopped")
+    }
+
+    func testTheIntegrityNoticeIsClearedWhileTheInviteStoreIsUnreadable() throws {
+        let rig = try makeOwnerRig()
+        let inviteID = UUID().uuidString
+        let a = try makeJoin(rig, friendName: "Ari", inviteID: inviteID)
+        let other = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        let acceptance = try PairingAcceptance(acceptanceID: UUID().uuidString, invite: a.issued.invitation.payload, token: a.issued.token,
+                                               approver: other.identity, approverDisplayName: "Bo", issuedAt: rig.now)
+        let b = SignedAcceptance(acceptance: acceptance,
+                                 signature: try other.sign(domain: "\(CompanionCanonical.version).acceptance.v3", fields: acceptance.signingFields()))
+        let bPairing = try Pairing(pairingID: Pairing.derivedID(inviteID: inviteID, approverIdentityID: other.identity.identityID),
+                                   owner: rig.ownerSigner.identity, approver: other.identity, epoch: 1, createdAt: rig.now,
+                                   state: .active, ownerDisplayName: "Owner", approverDisplayName: "Bo")
+        rig.coordinator.insertIssuedInviteForTesting(a.issued)
+        let snapshot = try inbox(pairings: [a.pairing, bPairing], consents: [a.consent], acceptances: [a.signed, b])
+        rig.coordinator.applyInboxSnapshot(snapshot, viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(rig.coordinator.integrityNotice, CompanionCoordinator.integrityNoticeText)
+
+        rig.store.failLoads = true
+        rig.coordinator.reloadInviteStoreForTesting()
+        XCTAssertNil(rig.coordinator.integrityNotice, "it came from invites that can't be read right now")
+        // And a snapshot handled while unreadable does not bring it back.
+        rig.coordinator.applyInboxSnapshot(snapshot, viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertNil(rig.coordinator.integrityNotice)
+
+        // Once readable again it is recomputed from the snapshot.
+        rig.store.failLoads = false
+        rig.store.invites[a.issued.invitation.payload.inviteID] = a.issued
+        rig.coordinator.reloadInviteStoreForTesting()
+        rig.coordinator.applyInboxSnapshot(snapshot, viewerIdentity: rig.ownerSigner.identity)
+        XCTAssertEqual(rig.coordinator.integrityNotice, CompanionCoordinator.integrityNoticeText)
+    }
+
+    func testAskGoesThroughTheAppLevelPathWithoutARelay() async throws {
+        let (rig, _) = try makeTrustedOwner()
+        struct Call { let session: ActiveSession; let requestTime: Date; let validFor: TimeInterval; let targets: [CompanionPerson] }
+        var calls: [Call] = []
+        rig.coordinator.askRelayOverride = { session, requestTime, validFor, targets in
+            calls.append(Call(session: session, requestTime: requestTime, validFor: validFor, targets: targets))
+        }
+        let end = Date().addingTimeInterval(3_600)
+        await rig.coordinator.requestEarlyEnd(sessionID: UUID().uuidString, activeSetID: UUID().uuidString,
+                                              start: Date().addingTimeInterval(-300), end: end, to: rig.coordinator.trustedApprovers)
+        XCTAssertNil(rig.coordinator.lastError)
+        let call = try XCTUnwrap(calls.first)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(call.targets.map(\.nickname), ["Ari"])
+        XCTAssertEqual(call.session.endsAt, end)
+        // The P3-0 invariant: a request never outlives its session.
+        XCTAssertLessThanOrEqual(call.requestTime.addingTimeInterval(call.validFor), end)
+        XCTAssertEqual(call.validFor, end.timeIntervalSince(call.requestTime), accuracy: 0.001)
+
+        // A very long lock is capped at the maximum request lifetime.
+        let longEnd = Date().addingTimeInterval(CompanionLimits.maxRequestLifetime * 3)
+        await rig.coordinator.requestEarlyEnd(sessionID: UUID().uuidString, activeSetID: UUID().uuidString,
+                                              start: Date().addingTimeInterval(-300), end: longEnd, to: rig.coordinator.trustedApprovers)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[1].validFor, CompanionLimits.maxRequestLifetime)
+    }
+
+    func testAskSaysWhenTheLockIsAboutToEndOrAlreadyEnded() async throws {
+        let (rig, _) = try makeTrustedOwner()
+        var sent = 0
+        rig.coordinator.askRelayOverride = { _, _, _, _ in sent += 1 }
+
+        await rig.coordinator.requestEarlyEnd(sessionID: "s", activeSetID: "a", start: Date().addingTimeInterval(-300),
+                                              end: Date().addingTimeInterval(10), to: rig.coordinator.trustedApprovers)
+        XCTAssertEqual(rig.coordinator.lastError, "This lock is about to end.")
+
+        await rig.coordinator.requestEarlyEnd(sessionID: "s", activeSetID: "a", start: Date().addingTimeInterval(-300),
+                                              end: Date().addingTimeInterval(-5), to: rig.coordinator.trustedApprovers)
+        XCTAssertEqual(rig.coordinator.lastError, "That lock has already ended, so there's nothing left to ask about.")
+        XCTAssertEqual(sent, 0, "nothing is sent for a lock that is over or about to be")
+
+        let now = Date()
+        XCTAssertNil(CompanionCoordinator.askBlockedMessage(end: now.addingTimeInterval(30), now: now))
+        XCTAssertEqual(CompanionCoordinator.askBlockedMessage(end: now.addingTimeInterval(29.9), now: now), "This lock is about to end.")
+        XCTAssertEqual(CompanionCoordinator.askBlockedMessage(end: now, now: now),
+                       "That lock has already ended, so there's nothing left to ask about.")
+        XCTAssertNil(CompanionCoordinator.askValidity(end: now, requestTime: now))
+    }
+
+    func testGotAnInviteLinkComesFirstOnlyBeforeAnyOwnerSetup() throws {
+        let friend = try makeFriend()
+        XCTAssertTrue(friend.showsAcceptInviteFirst, "fresh install")
+        XCTAssertTrue(friend.setOwnerDisplayName("Sam"))
+        XCTAssertFalse(friend.showsAcceptInviteFirst, "owner setup has begun")
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        friend.incomingInvite = .ready(IncomingInvite(invitation: join.issued.invitation, token: join.issued.token))
+        XCTAssertTrue(friend.showsAcceptInviteFirst, "a link was just opened")
+        friend.dismissIncomingInvite()
+        XCTAssertFalse(friend.showsAcceptInviteFirst)
+        // An owner with someone already joined keeps the owner layout.
+        let (owner, _) = try makeTrustedOwner()
+        XCTAssertFalse(owner.coordinator.showsAcceptInviteFirst)
+    }
+
+    #if os(iOS)
+    func testCopyLinkPasteboardAllowsUniversalClipboardAndStillExpires() {
+        let expiry = Date(timeIntervalSince1970: 1_800_000_000)
+        let options = CompanionPasteboard.options(expiresAt: expiry)
+        XCTAssertNil(options[.localOnly], "localOnly would stop Universal Clipboard")
+        XCTAssertEqual(options[.expirationDate] as? Date, expiry, "the copied link goes when the invite expires")
+    }
+    #endif
 }
 #endif

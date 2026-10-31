@@ -311,3 +311,49 @@ Ran: `npm ci` in `relay/` (node_modules was missing); scratch database `p3c_prot
 - P2-c (accepted risk): a stored name made *only* of the new invisible scalars would be rejected if a pairing op re-sent it. Such names are invisible by design, not legitimate.
 
 Merged into `r5-relay` as `47bac5c` (compile-only: no app code changed). The production relay needs a forward-only redeploy, with no migration.
+
+## P3c-app build results (2026-10-31)
+
+Built by a Claude **Sonnet** subagent (model `claude-sonnet-5-5`), branch `p3c-app` from `r5-relay` at `4da3126`. Not yet reviewed. The UX/design-polish review runs on the pre-push suite screenshots. Only the `PhoneLockbox/**`, `PhoneLockboxTests/**`, `PhoneLockboxUITests/**`, `TrustMerge.swift` (+ test) and this doc were touched; `relay/**`, `ProtocolModels.swift` and `project.yml` are untouched (no new source files, so no project regeneration).
+
+### Items
+1. **Copy link.** `.localOnly` dropped; the one-hour expiry stays (`CompanionPasteboard.options`). New `CopyLinkButton`: after a tap it reads "Copied" with a checkmark for about 2 s, light haptic, VoiceOver announcement "Invite link copied". Identifier `inviteSomeone.copyLinkButton` unchanged; the Share button gained `inviteSomeone.shareLinkButton`. UI test taps Copy and waits for the "Copied" label.
+2. **Accurate errors.** New `CompanionLocalError` (`storageUnavailable`, `identityStorage`). `ensureIdentity` throws them instead of `malformed("companion storage is unavailable")` or a bare Keychain error; `describe` maps them to calm local messages, and Accept keeps the prompt open so the friend can retry. Only `unavailable`/`timedOut` transport errors say "Couldn't reach the relay". `describe` is now internal for tests.
+3. **Opening an invite** scrolls People to the incoming-invite card (`.id("people.incomingInviteCard")`, `ScrollViewReader`, `anchor: .top`) on appear and whenever the invite state changes (loading, ready, failed), after a 150 ms layout wait.
+4. **Expired pending invite.** `pendingInvite` is kept after expiry (only an invite that created a person clears it). `pendingInviteIsExpired`; the card (a `TimelineView` firing at the expiry instant) shows "This link expired. Create a new one." in place of Share and Copy, and the create button reads "Create a new invite" as primary. `hasOutstandingInvite` already excluded expired invites, so fast polling stops. A relaunch still restores only unexpired, unused invites.
+5. **Friend first-run.** `showsAcceptInviteFirst` (a link was opened, or no owner name, no pending invite and no people): "Got an invite link?" renders above "Set up a trusted person"; otherwise unchanged order.
+6. **P3b P2s.**
+   - P2-1: `IssuedInviteLoad` is now `found / notFound / locked / failed / corrupt`. `errSecInteractionNotAllowed` is `locked`, other statuses `failed`, a decode failure `corrupt`. `InviteStoreStatus` replaces the Bool. Corrupt shows its own card with "Reset saved invites" (confirmation dialog) calling `resetUnreadableInviteStore()`, which refuses unless the state is `corrupt`, so a locked phone can never delete good data. While unreadable nothing is written and verified people stay verified.
+   - P2-2: removal while unreadable proceeds on the relay and marks the person revoked; `discardInvitesOfRemovedPeople()` then deletes the token of every revoked owner-side person after any successful read (refresh, create, relaunch). `restorePendingInvite` skips any invite that created a person, active or removed.
+   - P2-3: a failed read is retried at refresh, `createInvite` and `revokePairing`; on success it discards removed people's tokens and restores the pending link.
+   - P2-4: `applyOwnConsentUpdate` returns a Bool; Stop and `setApproverAccept` clear `lastError` only when every consent was applied.
+   - P2-5: `integrityNotice` is cleared when a read fails and is not recomputed while unreadable.
+7. **P3-0 leftovers.** Test seam `askRelayOverride` (DEBUG) replaces the publish + request calls, so an Ask test runs with no relay; `askBlockedMessage` and `askValidity` are pure and tested for the "about to end" (under 30 s) and "already ended" messages and the 24 h cap. `revokePairingOverride` seam added for removal tests.
+8. **Confirm step removed.** `CompanionPendingAcceptance`, `pruneExpiredPendingAcceptances`, the `pendingAcceptances:` parameter and the now-unreachable `CompanionTrustDecision.add` case are gone from `TrustMerge.swift`; with no local record `decide` rejects for both roles. Callers updated; `legacyDefaultsKeys` cleanup kept; stale comments fixed.
+
+### New or changed user-facing strings (for the UX reviewer)
+- Copy button: "Copy link" -> "Copied" (checkmark, ~2 s); VoiceOver label the same; hint "Copies the invite link to the clipboard, so you can paste it into a message"; announcement "Invite link copied".
+- Expired card: "This link expired. Create a new one." (hint "The old link no longer works"); create button "Create a new invite" (was "Create an invite to share" while a link is live or none exists).
+- Local errors: "Phone Lockbox can't use its saved-data storage on this device, so nothing was sent. Quit and reopen the app, then try again." and "Couldn't save this device's secure key, so nothing was sent. Unlock your phone and try again."
+- Invite store: unchanged locked wording ("...try again after unlocking your phone."); new "Couldn't read this device's saved invites just now. Your trusted people are unchanged; try again in a moment."; corrupt card "This device's saved invites are damaged and can't be read. Reset them to create invites again. Links not yet used will stop working, and people who joined earlier will need a new invite."; button "Reset saved invites" (hint "Clears the damaged saved invites on this device"); dialog title "Reset saved invites?", message "Links not yet used will stop working, and people who joined earlier will need a new invite.", actions "Reset" / "Cancel".
+- Share button identifier only; Ask wording is unchanged (constants now named, text identical): "This lock is about to end.", "That lock has already ended, so there's nothing left to ask about.", "Choose at least one trusted person to ask."
+
+### Tests added (`PhoneLockboxTests/CompanionPairingV3Tests.swift`, `TrustMergeTests.swift`)
+Local errors never read as relay problems (+ failing key store on Accept); expired pending link (shown expired, idle polling, not restored, replaced); used link dropped; Keychain locked vs failed vs corrupt (reset only when corrupt, nothing written meanwhile, recovery); removal while unreadable and at next launch; consumed invite not restored; pending link returns after a failed read recovers; Stop keeps its own consent warning; integrity notice cleared while unreadable and recomputed after; app-level Ask without a relay (invariant createdAt+validFor <= session end, 24 h cap); about-to-end / already-ended messages; Accept-first ordering; pasteboard options without `.localOnly`. CompanionKit: TrustMerge tests rewritten for the signature without pending acceptances (no role adds from the inbox; friend still advances a stored pairing; unrelated pairing rejected).
+
+### Validation (exact; build output under `/Users/nishantroy/code/.build-cache/phone-lockbox/agent-a96e14a196e1c56dd/`)
+- `swift test --package-path CompanionKit --scratch-path .../spm-companionkit`: **161 passed**, 0 failures (was 163: the pending-acceptance tests were removed or rewritten).
+- Root `swift test --scratch-path .../spm-root`: **177 passed** in total, 0 failures.
+- `xcodebuild build-for-testing -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'generic/platform=iOS Simulator' -derivedDataPath .../DerivedData CODE_SIGNING_ALLOWED=NO`: **TEST BUILD SUCCEEDED** (app, unit tests, UI tests compile).
+- `git diff --check`: clean.
+
+### NOT run
+No simulator was booted. The new app unit tests, `CompanionLocalRelayFlowTests` and all `PhoneLockboxUITests` have not been executed, so the app-level tests above are compile-checked only and still need their first run in the pre-push suite. No relay was started; nothing touched the production relay or port 8002.
+
+### P3c-app review follow-up (Opus review approved 355e13a; same Sonnet builder, model `claude-sonnet-5-5`)
+- **P2-1.** `CopyLinkButton` resets `copied` on disappear and is keyed by the invite ID, so "Copied" cannot stick or carry over to the next invite.
+- **P2-2.** The expiry check uses the `TimelineView` context date as well as `Date()`. The copied link's pasteboard expiry is now the invite's own `expiresAt` (`CompanionPasteboard.options(expiresAt:)`).
+- **P2-3.** While the saved invites are corrupt, the create button is disabled with the footnote "Reset saved invites first (see above), then create an invite." (`inviteSomeone.resetFirstHint`). The reset card shows only when an owner identity exists on the device.
+- **P2-4.** (a) `testAConsumedInviteIsNotRestoredAsThePendingLink` now revokes the person through an inbox update, so the token is still held when `restorePendingInvite` runs (DEBUG seam `restorePendingInviteForTesting`); it fails without the `inviteCreatedAnyPerson` filter. (b) The UI copy step asserts the button exists and that its label is "Copied" straight after the tap.
+- **Copy tweak.** Identity-storage error now reads "Couldn't save this device's secure key, so nothing was sent. Try again; if your phone is locked, unlock it first."
+- Validation: CompanionKit `swift test`, root `swift test`, `xcodebuild build-for-testing` (generic simulator, `CODE_SIGNING_ALLOWED=NO`) and `git diff --check` re-run; results in the hand-off. Still not run: any simulator test.

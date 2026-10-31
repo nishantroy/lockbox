@@ -232,7 +232,14 @@ final class CompanionPairingUITests: XCTestCase {
         guard linkTextElement.waitForExistence(timeout: 30) else {
             throw CompanionUITestError(description: "invite link text never appeared after creating an invite")
         }
-        return (linkTextElement.value as? String) ?? ""
+        let link = (linkTextElement.value as? String) ?? ""
+
+        // Copy link answers visibly: the button reads "Copied" for about two seconds.
+        let copyButton = app.buttons["inviteSomeone.copyLinkButton"]
+        XCTAssertTrue(copyButton.waitForExistence(timeout: 10), "Copy link button never appeared")
+        copyButton.tap()
+        XCTAssertEqual(copyButton.label, "Copied")
+        return link
     }
 
     private func attachScreenshot(named name: String) {
