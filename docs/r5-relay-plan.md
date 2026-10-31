@@ -222,3 +222,9 @@ Vercel deployment (needs the owner's account; the target is Hobby plus Neon), AP
   - The parent re-ran it against production.
 
 **Still open:** a two-phone device run, the first natural cron execution, and redeploying after B2a/B2c.
+
+## Deployment: pairing v3 (2026-10-31)
+
+Owner approved the forward-only v3 deploy. Parent applied migrations `004_invite_token.sql` and `005_invite_lookup_key.sql` to production Neon over `DATABASE_URL_UNPOOLED` (production previously had 001–003), then `cd relay && vercel deploy --prod` from `r5-relay` at `094af6f` (P3a + P3a polish; includes P3-0 app changes, irrelevant to the relay).
+
+Checks against production: `GET /v1/health` → `200 {"ok":true}`; `POST /v1/invite/lookup` with an unknown key → `{"error":"not_found"}`; `tools/relay-smoke` (v3 flow, two throwaway identities) passed all 24 steps. **No rollback:** pre-v3 relay code cannot read v3 ledgers; build ≤21 apps can no longer pair.
