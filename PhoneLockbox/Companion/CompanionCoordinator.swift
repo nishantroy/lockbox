@@ -451,11 +451,11 @@ final class CompanionCoordinator: ObservableObject {
 
     // MARK: - Transport
 
-    private func makeClient(signer: DeviceSigner) -> AsyncCompanionClient {
+    private func makeClient(signer: DeviceSigner, now: @escaping @Sendable () -> Date = Date.init) -> AsyncCompanionClient {
         let baseURL = URL(string: relayBaseURLString) ?? URL(string: Self.defaultRelayBaseURLString)!
         let transport = HTTPCompanionTransport(baseURL: baseURL, session: makeSession(), anchorStore: anchorStore,
                                                enforceStateRoot: true)
-        return AsyncCompanionClient(signer: signer, transport: transport)
+        return AsyncCompanionClient(signer: signer, transport: transport, now: now)
     }
 
     private func signer(for identity: DeviceIdentity) throws -> DeviceSigner {
@@ -463,9 +463,23 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     private func fail(_ error: Error) {
+        // A cancelled caller is not a relay failure and must never raise a
+        // banner (see `refreshInbox`).
+        if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+            #if DEBUG
+            print("[CompanionCoordinator] fail ignored (cancelled): \(String(reflecting: error))")
+            #endif
+            return
+        }
         needsRepair = Self.isKeyUnavailable(error)
         lastError = Self.describe(error)
         #if DEBUG
+        // P3-0: the user-facing banner collapses many distinct failures
+        // (local validation, anchor/integrity checks, relay rejections) into
+        // a few strings. This names the exact underlying error. Error cases
+        // carry only codes/short detail strings -- never keys, signatures or
+        // nonces.
+        print("[CompanionCoordinator] fail: \(String(reflecting: error)) -> \"\(lastError ?? "")\"")
         // Opus review of 70c7d27 (docs follow-up): `.unavailable` and
         // `.timedOut` share one user-facing banner ("Couldn't reach the
         // relay…"), so a transient flake's exact transport-level cause is
@@ -1018,11 +1032,28 @@ final class CompanionCoordinator: ObservableObject {
             let session = try ActiveSession(owner: identity, sessionID: sessionID, activeSetID: activeSetID,
                                             startsAt: start, endsAt: end)
             _ = try await client.publishSession(session)
-            let validFor = min(max(60, end.timeIntervalSince(Date())), CompanionLimits.maxRequestLifetime)
-            _ = try await client.requestUnlock(requestID: UUID().uuidString, pairings: targets.map(\.pairing),
-                                               consents: targets.compactMap(\.consent), session: session,
-                                               targets: targets.map { $0.pairing.approver.identityID },
-                                               validFor: validFor)
+            // P3-0 root cause (build-21 "Ask now never reached the friend"):
+            // `TrustedRequest` requires `expiresAt <= session.endsAt`, but
+            // the lifetime used to be computed from one `Date()` here while
+            // `requestUnlock` stamped `createdAt` from a *later* `Date()`
+            // inside the client -- so `createdAt + validFor` overshot the
+            // session end by the elapsed microseconds and the request was
+            // rejected locally ("invalid trusted request") whenever the lock
+            // had under 24h left (i.e. always). Pin the client clock to the
+            // single instant the lifetime is derived from, so the request
+            // expires exactly when the session ends (or in 24h, if sooner).
+            let requestTime = Date()
+            let remaining = end.timeIntervalSince(requestTime)
+            guard remaining > 0 else {
+                lastError = "That lock has already ended, so there's nothing left to ask about."
+                return
+            }
+            let validFor = min(remaining, CompanionLimits.maxRequestLifetime)
+            let requestClient = makeClient(signer: try signer(for: identity), now: { requestTime })
+            _ = try await requestClient.requestUnlock(requestID: UUID().uuidString, pairings: targets.map(\.pairing),
+                                                      consents: targets.compactMap(\.consent), session: session,
+                                                      targets: targets.map { $0.pairing.approver.identityID },
+                                                      validFor: validFor)
             lastError = nil; needsRepair = false
             await refreshInbox()
         } catch { fail(error) }
@@ -1485,8 +1516,35 @@ final class CompanionCoordinator: ObservableObject {
     /// into the local person registry through `CompanionTrustMerge`'s
     /// field-locked, untrusted-by-default rules. When the App Group is
     /// unavailable this is a no-op that leaves `lastError` exactly as it is.
+    /// P3-0 (build-21 "pull-to-refresh always shows a relay error"): SwiftUI
+    /// cancels the `.refreshable`/`.task` closure's task whenever it decides
+    /// the hosting view was replaced or the gesture ended early. Because
+    /// `refreshInbox` used to run its `URLSession` calls *inside* that
+    /// structured task, a cancel made `session.data(for:)` throw
+    /// `URLError.cancelled`, which `HTTPCompanionTransport` maps to
+    /// `.unavailable` -- the "Couldn't reach the relay" banner -- even though
+    /// the relay had already answered HTTP 200 (exactly the Vercel evidence).
+    /// The refresh now runs in one unstructured, single-flight task: caller
+    /// cancellation neither aborts the request nor raises a banner, and a
+    /// `.task` + pull-to-refresh overlap joins the in-flight fetch instead of
+    /// racing it.
     func refreshInbox() async {
         guard isAvailable else { return }
+        if let flight = refreshFlight {
+            await flight.value
+            return
+        }
+        let flight = Task { @MainActor [weak self] in
+            if let self { await self.performInboxRefresh() }
+        }
+        refreshFlight = flight
+        await flight.value
+        refreshFlight = nil
+    }
+
+    private var refreshFlight: Task<Void, Never>?
+
+    private func performInboxRefresh() async {
         isRefreshing = true
         defer { isRefreshing = false }
         let prunedCount = pendingAcceptances.count

@@ -69,3 +69,32 @@ Owns `PhoneLockbox/Companion/**`, `PhoneLockbox/Views/PeopleView.swift`, `PhoneL
 ## Docs
 
 Update `docs/companion-security.md` (accepted risk, token model), the R5 relay contract table, the roadmap and `docs/development.md` (build 22).
+
+## P3-0 build results
+
+Builder: Claude Sonnet (isolated worktree, branch `p3-0-fix` from `7669928`). Not yet independently reviewed.
+
+### Root cause 4 — "Ask now never reached the friend" (proven)
+
+`CompanionCoordinator.requestEarlyEnd` computed `validFor = min(max(60, end - Date()), 24h)` from one `Date()` and then called `AsyncCompanionClient.requestUnlock`, which stamps `createdAt = now()` from a **later** `Date()`. `TrustedRequest.init` (`CompanionKit/.../ProtocolModels.swift`, `expiresAt <= session.endsAt`) therefore threw `CompanionError.malformed("invalid trusted request")` **locally, before any network call**, for every lock with under 24 h left (always). `publishSession` had already succeeded (hence revision 13, `currentSessionID` set, empty `requests`); retries replayed the identical, deterministic-ID session operation (200, no new row). Banner shown: **"The relay rejected that action (malformed)."** (misleading: nothing was rejected by the relay). Fix: derive the lifetime and the client clock from one captured instant (`requestTime`), no 60 s floor (a floor can never be valid past the session end), and a calm message if the lock already ended.
+
+### Root cause 3 — pull-to-refresh error (mechanism proven; on-device trigger inferred)
+
+I could **not** reproduce a refresh error by any server-state or anchor path: against the real local relay, owner refresh was clean after pairing, after consents, after a session publish with no request, after an idempotent session replay, and after a request (all in `CompanionLocalRelayFlowTests`). What does exactly match "HTTP 200 on every `/v1/inbox`, yet an error banner" is **task cancellation**: `refreshInbox` ran its `URLSession` calls inside the `.refreshable`/`.task` structured task; when SwiftUI cancels that task, `session.data(for:)` throws `URLError.cancelled`, `HTTPCompanionTransport.performRequest` maps *every* `URLError` except `.timedOut` to `.unavailable`, and `describe` shows **"Couldn't reach the relay. Check your connection and try again."** The relay has already answered 200. Test `testCancelledRefreshDoesNotRaiseRelayErrorAndStillLoadsInbox` fails before the fix with exactly that banner. Caveat: I did not observe SwiftUI cancelling the task on the physical phone; if the owner still sees a banner on build 22, the new DEBUG `fail:` log line names the real underlying error. Fix: refresh now runs in one unstructured single-flight task (a cancelled or overlapping caller neither aborts the fetch nor raises a banner), and `fail` ignores cancellation.
+
+### Found in files I do not own (suggested for P3a)
+
+`CompanionKit/Sources/CompanionKit/HTTPTransport.swift` `performRequest`: `URLError.cancelled` should rethrow as `CancellationError` (or a distinct case) instead of `.unavailable`; `.unavailable` also hides DNS/TLS/ATS causes, so a `.notConnectedToInternet`/`.cannotConnectToHost` split would help. `TrustedRequest.init` / `AsyncCompanionClient.requestUnlock` could take an explicit `createdAt`/clamp `expiresAt` to `session.endsAt` so callers cannot hit the trap.
+
+### Files changed
+
+`PhoneLockbox/Companion/CompanionCoordinator.swift` (request lifetime fix, single-flight uncancellable refresh, cancellation-aware `fail`, DEBUG `fail:` diagnostic naming the underlying error, `makeClient(now:)`), `PhoneLockboxTests/CompanionLocalRelayFlowTests.swift` (new; needs a local relay on 127.0.0.1:8002, otherwise `XCTSkip`), regenerated `PhoneLockbox.xcodeproj/project.pbxproj`.
+
+### Validation
+
+Local relay: `cd relay && npm ci && npm run db:migrate && npm run dev` (port 8002, Postgres 56330). Simulator iPhone Air `83C2D731-9185-4288-A535-E3D51197FA4B`, `xcodebuild -project PhoneLockbox.xcodeproj -scheme PhoneLockbox -destination 'platform=iOS Simulator,id=83C2D731-9185-4288-A535-E3D51197FA4B' -derivedDataPath DerivedData-p30 CODE_SIGNING_ALLOWED=NO test -only-testing:PhoneLockboxTests[/...]`.
+
+- Before Ask fix: `testAskNowReachesFriendAndOwnerRefreshStaysClean` and `testSecondAskForSameSessionStillCreatesRequest` failed (6 assertion failures, `fail: malformed("invalid trusted request")`).
+- After Ask fix: `CompanionLocalRelayFlowTests` 3 tests, 0 failures.
+- Before refresh fix (Ask fix kept): `testCancelledRefreshDoesNotRaiseRelayErrorAndStillLoadsInbox` failed (2 failures, "Couldn't reach the relay…", inbox empty).
+- Final: `-only-testing:PhoneLockboxTests` on the iPhone Air simulator, local relay running: **101 tests, 1 skipped (pre-existing), 0 failures**, `** TEST SUCCEEDED **`; `CompanionLocalRelayFlowTests` 4 tests, 0 failures. UI tests not run (no UI/view code touched).
