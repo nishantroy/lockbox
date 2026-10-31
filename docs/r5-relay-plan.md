@@ -38,6 +38,7 @@ All bodies are JSON as encoded by Swift `JSONEncoder` with `.sortedKeys`; binary
 | --- | --- | --- | --- |
 | `POST /v1/operations` | one `SignedOperation` | `200` `RelayResponse` incl. new owner revision and state root | `400` invalid, `401` bad signature/unknown key, `403` unauthorized, `409` stale revision or idempotency conflict, `413`, `429` rate limited |
 | `POST /v1/inbox` | a signed fetch `SignedOperation` (as `CompanionTransport.fetchInbox` expects) | `200` `InboxResponse` for the signer only | same as above |
+| `POST /v1/invite/lookup` | `{"token": "<22 base64url chars>"}`, unauthenticated, rate limited per client IP (20/min) | `200 {"invitation": Invitation}` while the invite is unexpired and unused | `400` malformed token, `404 not_found` (unknown, expired and used are indistinguishable), `429` |
 | `GET /v1/health` | — | `200 {"ok":true}` with no data | — |
 
 - Re-sending the same `operationID` with an identical body returns the stored response. The same ID with a different body returns `409`.
@@ -131,6 +132,13 @@ Vercel deployment (needs the owner's account; the target is Hobby plus Neon), AP
 - Each slice was independently reviewed by a separate Claude **Opus** subagent. No Luna/Terra models were used.
   - B1 went through three fix rounds and was approved.
   - A went through two fix rounds and was approved with minor fixes. The final P2 round was applied, then verified by the parent's tests; it was not re-reviewed.
+
+**Contract v1.4** (R5 pairing v3, `docs/r5-pairing-v3-plan.md`'s "Slice P3a", 2026-10-31; supersedes the pairing parts of v1.3):
+- `invite` payload adds `tokenHash` (domain-separated SHA-256 of a 22-char owner-generated bearer token), optional `ownerDisplayName` (<=40 scalars) and `grantedScopes`; owner signature domain `...invite.v3`.
+- `accept` is a friend-signed `SignedAcceptance` carrying the plaintext `token`, optional `approverDisplayName` and `acceptedScopes` (must equal `grantedScopes`); domain `...acceptance.v3`. It returns a `pairing` and, in the same transaction, creates the active pairing and consent (generation 2, both sides active). There is no `confirm` operation (`unsupported_operation`) and no verification code.
+- `Pairing` gains optional `ownerDisplayName`/`approverDisplayName`; `createdAt` is the moment the friend joined.
+- `/v1/inbox` drops `pendingAcceptances` and, on an owner fetch, adds `acceptances` (the friend-signed acceptance behind each v3 pairing) so the owner device can verify pairings with `JoinedAcceptanceCheck`.
+- New `POST /v1/invite/lookup` (table above). Migration `004_invite_token.sql` adds the hashed-token index. v2 invites and acceptances are no longer accepted (prototype; owner re-pairs).
 
 **Contract v1.3** (R5 pairing v2, `docs/r5-pairing-v2-plan.md`'s "Slice P2a", 2026-10-02; supersedes v1.1/v1.2 below where they differ): `/v1/inbox` additionally returns `pendingAcceptances` — every `ledger.pendingAcceptances` entry (as a verifiable `SignedAcceptance`, not the bare acceptance) whose invite exists, is unconsumed and has not expired. Same presence rule as `approvals`/`ownerIdentityID`: populated only on an owner fetch of their own ledger, omitted entirely on a helper/approver fetch. This replaces the owner typing a six-digit code read aloud by the friend (see the pairing v2 plan's "Owner decision"); `OwnerAcceptanceCheck` (CompanionKit) verifies an entry locally and derives the expected code before `confirm`. The wire contract itself did not change again for Slice P2b (2026-10-02): P2b is the app-side consumer (`CompanionCoordinator`/`PeopleView`) that actually removed the typed-code UI, the acceptance share-back, and now shows/confirms `pendingAcceptances` with one tap — see the pairing v2 plan's "Build results: P2a" and "Build results: P2b" for what shipped.
 

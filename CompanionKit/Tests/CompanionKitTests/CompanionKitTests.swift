@@ -12,43 +12,57 @@ final class CompanionKitTests: XCTestCase {
         let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
         let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
         let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let invitation = try owner.createInvite(inviteID: "invite-1", validFor: 3_600, now: t,
-                                                nonce: Data(repeating: 7, count: 24))
-        let acceptance = try approver.accept(invitation, acceptanceID: "accept-1", now: t)
-        let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let pairing = try pairV3(owner: owner, approver: approver, inviteID: "invite-1", acceptanceID: "accept-1",
+                                 now: t, nonce: Data(repeating: 7, count: 24))
         let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "session-1", activeSetID: "set-1",
                                         startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(3_600))
         _ = try owner.publishSession(session)
         return (relay, owner, approver, pairing, session)
     }
 
-    func testPairingRequiresSignedMutualConfirmationAndForwardedLinkIsNotAuthority() throws {
+    func testV3PairingNeedsTheTokenAndALeakedInvitationAloneIsNotAuthority() throws {
         let keys = InMemoryDeviceKeyStore()
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: keys)
         let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
         let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let invitation = try owner.createInvite(inviteID: "invite-forward", validFor: 100, now: t,
-                                                nonce: Data(repeating: 2, count: 24))
-        XCTAssertNoThrow(try Invitation.fromShareLink(invitation.shareLink))
+        let issued = try owner.createInvite(inviteID: "invite-forward", validFor: 100, now: t,
+                                            nonce: Data(repeating: 2, count: 24), ownerDisplayName: "Alex")
+        XCTAssertEqual(InviteToken.token(fromShareLink: issued.shareLink), issued.token)
+        XCTAssertEqual(issued.token.count, 22)
         XCTAssertThrowsError(try relay.pairing(id: "not-authorized"))
 
         let attackerKeys = InMemoryDeviceKeyStore()
         let attacker = try DeviceSigner.create(role: .trustedApprover, keyStore: attackerKeys)
         let attackerClient = CompanionClient(signer: attacker, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let acceptance = try attackerClient.accept(invitation, acceptanceID: "forwarded-accept", now: t)
-        // Possession created a pending handshake only. It cannot unlock or
-        // become a pairing until the owner explicitly confirms this identity.
+        // The signed invitation is public to anyone the relay shows it to, but
+        // accepting needs the token. A guess is rejected and consumes nothing.
+        let guessed = InviteToken.generate()
+        XCTAssertThrowsError(try attackerClient.lookupInvite(token: guessed)) { XCTAssertEqual($0 as? CompanionError, .notFound) }
+        XCTAssertThrowsError(try attackerClient.acceptInvite(issued.invitation, token: guessed, acceptanceID: "guess", now: t)) {
+            guard case CompanionError.malformed = $0 else { return XCTFail("expected malformed, got \($0)") }
+        }
+        // A well-formed token the signed hash does not bind is refused locally too.
         XCTAssertThrowsError(try relay.pairing(id: "not-authorized"))
-        let forgedCode = try PairingConfirmation(acceptance: acceptance, owner: ownerSigner.identity,
-                                                verificationCode: "000000", issuedAt: t)
-        XCTAssertEqual(forgedCode.verificationCode, "000000")
-        XCTAssertThrowsError(try owner.confirm(acceptance, verificationCode: "000000", now: t))
-        XCTAssertNoThrow(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t))
+
+        // The real holder of the link joins in one step, with consent active.
+        let invitation = try attackerClient.lookupInvite(token: issued.token)
+        XCTAssertEqual(invitation.payload.ownerDisplayName, "Alex")
+        let pairing = try attackerClient.acceptInvite(invitation, token: issued.token, approverDisplayName: "Sam",
+                                                      acceptanceID: "joined", now: t)
+        XCTAssertEqual(pairing.state, .active)
+        XCTAssertEqual(pairing.ownerDisplayName, "Alex")
+        XCTAssertEqual(pairing.approverDisplayName, "Sam")
+        let consent = try relay.consent(relationshipID: pairing.pairingID)
+        XCTAssertEqual(consent.ownerState, .active)
+        XCTAssertEqual(consent.approverState, .active)
+        XCTAssertEqual(consent.generation, 2)
+        XCTAssertEqual(consent.ownerScopes, [.approveEarlyEnd, .receiveRequests])
+        XCTAssertEqual(consent.approverScopes, [.approveEarlyEnd, .receiveRequests])
+        // Single use: the link no longer resolves.
+        XCTAssertThrowsError(try attackerClient.lookupInvite(token: issued.token)) { XCTAssertEqual($0 as? CompanionError, .notFound) }
     }
 
-    func testInviteIsConsumedAcrossTwoPendingAcceptances() throws {
+    func testInviteIsSingleUseAcrossTwoFriendsHoldingTheSameLink() throws {
         let ownerKeys = InMemoryDeviceKeyStore()
         let firstKeys = InMemoryDeviceKeyStore()
         let secondKeys = InMemoryDeviceKeyStore()
@@ -60,27 +74,111 @@ final class CompanionKitTests: XCTestCase {
         let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { now })
         let first = CompanionClient(signer: firstSigner, transport: relay, now: { now })
         let second = CompanionClient(signer: secondSigner, transport: relay, now: { now })
-        let invitation = try owner.createInvite(inviteID: "one-use", validFor: 3_600, now: t,
-                                                nonce: Data(repeating: 6, count: 24))
-        let firstAcceptance = try first.accept(invitation, acceptanceID: "first-acceptance", now: t)
-        let secondAcceptance = try second.accept(invitation, acceptanceID: "second-acceptance", now: t)
+        let issued = try owner.createInvite(inviteID: "one-use", validFor: 3_600, now: t,
+                                            nonce: Data(repeating: 6, count: 24))
+        let invitation = try first.lookupInvite(token: issued.token)
 
-        XCTAssertNoThrow(try owner.confirm(firstAcceptance, verificationCode: firstAcceptance.verificationCode, now: t))
-        XCTAssertThrowsError(try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)) {
+        XCTAssertNoThrow(try first.acceptInvite(invitation, token: issued.token, acceptanceID: "first-acceptance", now: t))
+        XCTAssertThrowsError(try second.acceptInvite(invitation, token: issued.token, acceptanceID: "second-acceptance", now: t)) {
             XCTAssertEqual($0 as? CompanionError, .replay)
         }
-        // The competing acceptance was discarded atomically with invite use.
-        XCTAssertThrowsError(try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t))
+        XCTAssertThrowsError(try second.lookupInvite(token: issued.token)) { XCTAssertEqual($0 as? CompanionError, .notFound) }
+    }
+
+    func testExpiredInviteCannotBeLookedUpOrAccepted() throws {
+        let (relay, owner, approver, _, _) = try harness()
+        let issued = try owner.createInvite(inviteID: "short-lived", validFor: 100, now: t,
+                                            nonce: Data(repeating: 12, count: 24))
+        let invitation = try approver.lookupInvite(token: issued.token)
+        try relay.advance(to: t.addingTimeInterval(101))
+        XCTAssertThrowsError(try approver.lookupInvite(token: issued.token)) { XCTAssertEqual($0 as? CompanionError, .notFound) }
+        // Even a stale copy of the invitation cannot be accepted after expiry.
+        XCTAssertThrowsError(try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "late",
+                                                       now: t.addingTimeInterval(101))) {
+            XCTAssertEqual($0 as? CompanionError, .expired)
+        }
+    }
+
+    func testSignedInviteFieldsAreCoveredByTheOwnerSignature() throws {
+        let (_, owner, _, _, _) = try harness()
+        let issued = try owner.createInvite(inviteID: "covered", validFor: 600, now: t,
+                                            nonce: Data(repeating: 13, count: 24), ownerDisplayName: "Alex")
+        let payload = issued.invitation.payload
+        let renamed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
+                                        expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
+                                        ownerDisplayName: "Mallory", grantedScopes: payload.grantedScopes)
+        let narrowed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
+                                         expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
+                                         ownerDisplayName: "Alex", grantedScopes: [.approveEarlyEnd])
+        let rehashed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
+                                         expiresAt: payload.expiresAt, nonce: payload.nonce,
+                                         tokenHash: InviteToken.hash(InviteToken.generate()),
+                                         ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
+        for tampered in [renamed, narrowed, rehashed] {
+            let invitation = try Invitation(payload: tampered, signature: issued.invitation.signature)
+            XCTAssertThrowsError(try invitation.validateSignature()) { XCTAssertEqual($0 as? CompanionError, .invalidSignature) }
+        }
+        XCTAssertNoThrow(try issued.invitation.validate(at: t))
+    }
+
+    func testDisplayNameAndScopeValidation() throws {
+        let keys = InMemoryDeviceKeyStore()
+        let signer = try DeviceSigner.create(role: .owner, keyStore: keys)
+        func payload(name: String?, scopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) throws -> InvitePayload {
+            try InvitePayload(inviteID: "names", owner: signer.identity, issuedAt: t, expiresAt: t.addingTimeInterval(60),
+                              nonce: Data(repeating: 1, count: 24), tokenHash: InviteToken.hash(InviteToken.generate()),
+                              ownerDisplayName: name, grantedScopes: scopes)
+        }
+        XCTAssertNoThrow(try payload(name: nil))
+        XCTAssertNoThrow(try payload(name: String(repeating: "A", count: 40)))
+        XCTAssertNoThrow(try payload(name: String(repeating: "\u{1F600}", count: 40)))
+        for bad in [String(repeating: "A", count: 41), String(repeating: "\u{1F600}", count: 41), "", "   ", "line\nbreak", "tab\there"] {
+            XCTAssertThrowsError(try payload(name: bad), "name \(bad.debugDescription) must be rejected")
+        }
+        for scopes in [[CompanionScope](), [.mutualPact], [.approveEarlyEnd, .approveEarlyEnd]] {
+            XCTAssertThrowsError(try payload(name: nil, scopes: scopes))
+        }
+        XCTAssertFalse(InviteToken.isWellFormed("short"))
+        XCTAssertFalse(InviteToken.isWellFormed(String(repeating: "a", count: 21) + "+"))
+        XCTAssertTrue(InviteToken.isWellFormed(InviteToken.generate()))
+        XCTAssertNil(InviteToken.token(fromShareLink: "phone-lockbox-companion://invite/abc"))
+    }
+
+    func testRequestExpiryIsClampedToTheSessionEnd() throws {
+        let (_, owner, approver, pairing, session) = try harness()
+        // validFor deliberately overshoots the session end (ends t+3600).
+        let request = try owner.requestUnlock(requestID: "clamped", pairing: pairing, session: session,
+                                              target: approver.signer.identity.identityID, message: nil, validFor: 3_599 + 600)
+        XCTAssertEqual(request.expiresAt, session.endsAt)
+    }
+
+    func testSameFriendAcceptingASecondInviteGetsADistinctPairing() throws {
+        let (_, owner, approver, firstPairing, _) = try harness()
+        let again = try owner.createInvite(inviteID: "second-invite", validFor: 600, now: t, nonce: Data(repeating: 14, count: 24))
+        let invitation = try approver.lookupInvite(token: again.token)
+        let second = try approver.acceptInvite(invitation, token: again.token, acceptanceID: "dup", now: t)
+        XCTAssertNotEqual(second.pairingID, firstPairing.pairingID)
+    }
+
+    func testRelayAcceptRetainsTheFriendSignedAcceptanceForTheOwnerToVerify() throws {
+        let (relay, owner, approver, pairing, _) = try harness()
+        let inbox = try relay.fetchInbox(makeInboxOperation(identity: owner.signer, now: t))
+        XCTAssertEqual(inbox.pairings?.map { $0.pairingID }, [pairing.pairingID])
+        XCTAssertEqual(inbox.consents?.count, 1)
+        let acceptances = try XCTUnwrap(inbox.acceptances)
+        XCTAssertEqual(acceptances.count, 1)
+        // The owner device can prove the pairing came from the holder of the token for its own invite.
+        XCTAssertEqual(acceptances[0].acceptance.approver, approver.signer.identity)
+        // The approver's own inbox shows the pairing but never the acceptances.
+        let helperInbox = try relay.fetchInbox(makeInboxOperation(identity: approver.signer, now: t))
+        XCTAssertNil(helperInbox.acceptances)
+        XCTAssertEqual(helperInbox.pairings?.map { $0.pairingID }, [pairing.pairingID])
     }
 
     func testSameIdentityPairingsAreExactPerTargetAndRevocationIsRechecked() throws {
         let (relay, owner, approver, firstPairing, session) = try harness()
-        let secondInvite = try owner.createInvite(inviteID: "same-identity-invite", validFor: 3_600, now: t,
-                                                  nonce: Data(repeating: 10, count: 24))
-        let secondAcceptance = try approver.accept(secondInvite, acceptanceID: "same-identity-acceptance", now: t)
-        let secondPairing = try owner.confirm(secondAcceptance, verificationCode: secondAcceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try approver.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let secondPairing = try pairV3(owner: owner, approver: approver, inviteID: "same-identity-invite", acceptanceID: "same-identity-acceptance", now: t,
+                                 nonce: Data(repeating: 10, count: 24))
         XCTAssertNotEqual(firstPairing.pairingID, secondPairing.pairingID)
 
         let request = try owner.requestUnlock(requestID: "exact-target", pairing: secondPairing, session: session,
@@ -104,7 +202,8 @@ final class CompanionKitTests: XCTestCase {
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: keys)
         let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
         let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let invite = try owner.createInvite(inviteID: "forged", validFor: 100, now: t, nonce: Data(repeating: 1, count: 24))
+        let issued = try owner.createInvite(inviteID: "forged", validFor: 100, now: t, nonce: Data(repeating: 1, count: 24))
+        let invite = issued.invitation
         var badBytes = invite.signature
         badBytes[0] ^= 1
         let forged = try Invitation(payload: invite.payload, signature: badBytes)
@@ -114,7 +213,11 @@ final class CompanionKitTests: XCTestCase {
         let approverSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: approverKeys)
         let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
         XCTAssertThrowsError(try approver.createInvite(inviteID: "swap", validFor: 100, now: t))
-        XCTAssertThrowsError(try owner.accept(invite, acceptanceID: "wrong-receiver", now: t))
+        // An owner is not a receiver, and a forged invitation is refused by the friend before anything is sent.
+        XCTAssertThrowsError(try owner.acceptInvite(invite, token: issued.token, acceptanceID: "wrong-receiver", now: t))
+        XCTAssertThrowsError(try approver.acceptInvite(forged, token: issued.token, acceptanceID: "forged-accept", now: t)) {
+            XCTAssertEqual($0 as? CompanionError, .invalidSignature)
+        }
     }
 
     func testAnchoredRestoreRejectsSameRevisionRequestExpiryAndReceiptForks() throws {
@@ -250,12 +353,8 @@ final class CompanionKitTests: XCTestCase {
         let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondStore)
         let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
         let second = CompanionClient(signer: secondSigner, transport: relay, now: { fixedNow })
-        let invite = try owner.createInvite(inviteID: "first-valid-invite", validFor: 3_600, now: t,
-                                            nonce: Data(repeating: 11, count: 24))
-        let acceptance = try second.accept(invite, acceptanceID: "first-valid-accept", now: t)
-        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let secondPairing = try pairV3(owner: owner, approver: second, inviteID: "first-valid-invite", acceptanceID: "first-valid-accept", now: t,
+                                 nonce: Data(repeating: 11, count: 24))
         let request = try owner.requestUnlock(requestID: "first-valid-request",
                                               pairings: [firstPairing, secondPairing], session: session,
                                               targets: [first.signer.identity.identityID, second.signer.identity.identityID],
@@ -284,11 +383,8 @@ final class CompanionKitTests: XCTestCase {
         let secondKeys = InMemoryDeviceKeyStore()
         let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondKeys)
         let second = CompanionClient(signer: secondSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let invite = try owner.createInvite(inviteID: "invite-2", validFor: 3_600, now: t, nonce: Data(repeating: 8, count: 24))
-        let acceptance = try second.accept(invite, acceptanceID: "accept-2", now: t)
-        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let secondPairing = try pairV3(owner: owner, approver: second, inviteID: "invite-2", acceptanceID: "accept-2", now: t,
+                                 nonce: Data(repeating: 8, count: 24))
         let targets = [first.signer.identity.identityID, second.signer.identity.identityID]
         let multi = try owner.requestUnlock(requestID: "multi", pairings: [firstPairing, secondPairing], session: session,
                                             targets: targets, message: nil, validFor: 600)
@@ -310,12 +406,8 @@ final class CompanionKitTests: XCTestCase {
         let secondSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: secondStore)
         let fixedNow = t
         let second = CompanionClient(signer: secondSigner, transport: relay, now: { fixedNow })
-        let invite = try owner.createInvite(inviteID: "collision-invite", validFor: 3_600, now: t,
-                                            nonce: Data(repeating: 9, count: 24))
-        let acceptance = try second.accept(invite, acceptanceID: "collision-acceptance", now: t)
-        let secondPairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try second.acceptScopes(pairing: secondPairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let secondPairing = try pairV3(owner: owner, approver: second, inviteID: "collision-invite", acceptanceID: "collision-acceptance", now: t,
+                                 nonce: Data(repeating: 9, count: 24))
         let secondRequest = try owner.requestUnlock(requestID: "collision-second", pairing: secondPairing, session: session,
                                                     target: second.signer.identity.identityID, message: nil, validFor: 600)
         XCTAssertThrowsError(try second.submitApproval(request: secondRequest, pairing: secondPairing, decision: .approved,
@@ -509,8 +601,9 @@ final class CompanionKitTests: XCTestCase {
         let relay = try InMemoryCompanionRelay(owner: signer.identity, now: t)
         let payload = try InvitePayload(inviteID: "revision-invite", owner: signer.identity,
                                         issuedAt: t, expiresAt: t.addingTimeInterval(600),
-                                        nonce: Data(repeating: 4, count: 24))
-        let inviteSignature = try signer.sign(domain: "\(CompanionCanonical.version).invite",
+                                        nonce: Data(repeating: 4, count: 24),
+                                        tokenHash: InviteToken.hash(InviteToken.generate()))
+        let inviteSignature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3",
                                               fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: inviteSignature)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
@@ -936,18 +1029,14 @@ final class CompanionKitTests: XCTestCase {
         let store = InMemoryDeviceKeyStore()
         let signer = try DeviceSigner.create(role: .trustedApprover, keyStore: store)
         let approver = CompanionClient(signer: signer, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let invitation = try owner.createInvite(inviteID: "invite-\(suffix)", validFor: 3_600, now: t,
-                                                nonce: Data(repeating: 3, count: 24))
-        let acceptance = try approver.accept(invitation, acceptanceID: "accept-\(suffix)", now: t)
-        let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let pairing = try pairV3(owner: owner, approver: approver, inviteID: "invite-\(suffix)", acceptanceID: "accept-\(suffix)", now: t,
+                                 nonce: Data(repeating: 3, count: 24))
         return pairing
     }
 
     // MARK: - Malicious relay: confirm response validation
 
-    func testConfirmRejectsARelayThatSwapsTheApproverKeyInTheResponse() throws {
+    func testAcceptRejectsARelayThatSwapsTheApproverKeyInTheResponse() throws {
         let ownerKeys = InMemoryDeviceKeyStore()
         let approverKeys = InMemoryDeviceKeyStore()
         let attackerKeys = InMemoryDeviceKeyStore()
@@ -956,13 +1045,13 @@ final class CompanionKitTests: XCTestCase {
         let attackerSigner = try DeviceSigner.create(role: .trustedApprover, keyStore: attackerKeys)
         let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
         let maliciousTransport = ApproverSwappingTransport(real: relay, attacker: attackerSigner.identity)
-        let owner = CompanionClient(signer: ownerSigner, transport: maliciousTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let approver = CompanionClient(signer: approverSigner, transport: maliciousTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
 
-        let invitation = try owner.createInvite(inviteID: "invite-swap", validFor: 3_600, now: t,
-                                                nonce: Data(repeating: 3, count: 24))
-        let acceptance = try approver.accept(invitation, acceptanceID: "accept-swap", now: t)
-        XCTAssertThrowsError(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)) { error in
+        let issued = try owner.createInvite(inviteID: "invite-swap", validFor: 3_600, now: t,
+                                            nonce: Data(repeating: 3, count: 24))
+        let invitation = try approver.lookupInvite(token: issued.token)
+        XCTAssertThrowsError(try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "accept-swap", now: t)) { error in
             guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
         }
     }
@@ -977,7 +1066,7 @@ final class CompanionKitTests: XCTestCase {
         XCTAssertEqual(capturing.capturedQuery?.issuedAt, Date(timeIntervalSince1970: 1_700_000_000))
     }
 
-    func testConfirmRejectsARelayThatSubstitutesTheOwner() throws {
+    func testAcceptRejectsARelayThatSubstitutesTheOwner() throws {
         let ownerKeys = InMemoryDeviceKeyStore()
         let approverKeys = InMemoryDeviceKeyStore()
         let attackerOwnerKeys = InMemoryDeviceKeyStore()
@@ -986,13 +1075,13 @@ final class CompanionKitTests: XCTestCase {
         let attackerOwnerSigner = try DeviceSigner.create(role: .owner, keyStore: attackerOwnerKeys)
         let relay = try InMemoryCompanionRelay(owner: ownerSigner.identity, now: t)
         let maliciousTransport = OwnerSwappingTransport(real: relay, attacker: attackerOwnerSigner.identity)
-        let owner = CompanionClient(signer: ownerSigner, transport: maliciousTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        let approver = CompanionClient(signer: approverSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let approver = CompanionClient(signer: approverSigner, transport: maliciousTransport, now: { Date(timeIntervalSince1970: 1_700_000_000) })
 
-        let invitation = try owner.createInvite(inviteID: "invite-owner-swap", validFor: 3_600, now: t,
-                                                nonce: Data(repeating: 3, count: 24))
-        let acceptance = try approver.accept(invitation, acceptanceID: "accept-owner-swap", now: t)
-        XCTAssertThrowsError(try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)) { error in
+        let issued = try owner.createInvite(inviteID: "invite-owner-swap", validFor: 3_600, now: t,
+                                            nonce: Data(repeating: 3, count: 24))
+        let invitation = try approver.lookupInvite(token: issued.token)
+        XCTAssertThrowsError(try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "accept-owner-swap", now: t)) { error in
             guard case CompanionError.malformed = error else { return XCTFail("expected malformed, got \(error)") }
         }
     }
@@ -1147,7 +1236,7 @@ private final class ApproverSwappingTransport: CompanionTransport, @unchecked Se
 
     func submit(_ operation: SignedOperation) throws -> RelayResponse {
         let response = try real.submit(operation)
-        guard operation.kind == "confirm", case let .pairing(pairing) = response.result else { return response }
+        guard operation.kind == "accept", case let .pairing(pairing) = response.result else { return response }
         let swapped = try Pairing(pairingID: pairing.pairingID, owner: pairing.owner, approver: attacker,
                                   epoch: pairing.epoch, createdAt: pairing.createdAt, state: pairing.state)
         return try RelayResponse(operationID: response.operationID, revision: response.revision, result: .pairing(swapped))
@@ -1155,6 +1244,10 @@ private final class ApproverSwappingTransport: CompanionTransport, @unchecked Se
 
     func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
         try real.fetchInbox(operation)
+    }
+
+    func lookupInvite(token: String) throws -> Invitation {
+        try real.lookupInvite(token: token)
     }
 }
 
@@ -1167,7 +1260,7 @@ private final class OwnerSwappingTransport: CompanionTransport, @unchecked Senda
 
     func submit(_ operation: SignedOperation) throws -> RelayResponse {
         let response = try real.submit(operation)
-        guard operation.kind == "confirm", case let .pairing(pairing) = response.result else { return response }
+        guard operation.kind == "accept", case let .pairing(pairing) = response.result else { return response }
         let swapped = try Pairing(pairingID: pairing.pairingID, owner: attacker, approver: pairing.approver,
                                   epoch: pairing.epoch, createdAt: pairing.createdAt, state: pairing.state)
         return try RelayResponse(operationID: response.operationID, revision: response.revision, result: .pairing(swapped))
@@ -1175,6 +1268,10 @@ private final class OwnerSwappingTransport: CompanionTransport, @unchecked Senda
 
     func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse {
         try real.fetchInbox(operation)
+    }
+
+    func lookupInvite(token: String) throws -> Invitation {
+        try real.lookupInvite(token: token)
     }
 }
 

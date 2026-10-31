@@ -385,3 +385,54 @@ export async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClie
     client.release();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Pairing v3: invite token index (migrations/004_invite_token.sql)
+// ---------------------------------------------------------------------------
+
+export class InviteTokenConflictError extends Error {
+  constructor() {
+    super("invite_token_conflict");
+  }
+}
+
+/** Records the token-hash -> (owner, invite) routing row in the invite's own transaction. A hash already claimed by any invite is refused. */
+export async function recordInviteToken(client: pg.PoolClient, tokenHash: Buffer, ownerID: string, inviteID: string, expiresAtSeconds: number): Promise<void> {
+  const inserted = await client.query(
+    `INSERT INTO companion_invite_token (token_hash, owner_id, invite_id, expires_at) VALUES ($1, $2, $3, to_timestamp($4))
+     ON CONFLICT (token_hash) DO NOTHING
+     RETURNING owner_id`,
+    [tokenHash, ownerID, inviteID, expiresAtSeconds]
+  );
+  if ((inserted.rowCount ?? 0) === 1) return;
+  throw new InviteTokenConflictError();
+}
+
+/** Removes an invite's token row (consumed by "accept"). Scoped by owner. */
+export async function deleteInviteToken(client: pg.Pool | pg.PoolClient, ownerID: string, inviteID: string): Promise<void> {
+  await client.query(`DELETE FROM companion_invite_token WHERE owner_id = $1 AND invite_id = $2`, [ownerID, inviteID]);
+}
+
+export interface InviteTokenRow {
+  tokenHash: Buffer;
+  ownerID: string;
+  inviteID: string;
+  expiresAt: number;
+}
+
+/** Looks up a token row by its hash. The hash of an unguessable 128-bit token is itself unguessable, so an index probe leaks nothing about near-miss tokens. */
+export async function findInviteToken(client: pg.Pool | pg.PoolClient, tokenHash: Buffer): Promise<InviteTokenRow | null> {
+  const result = await client.query<{ token_hash: Buffer; owner_id: string; invite_id: string; expires_at: Date }>(
+    `SELECT token_hash, owner_id, invite_id, expires_at FROM companion_invite_token WHERE token_hash = $1`,
+    [tokenHash]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return { tokenHash: row.token_hash, ownerID: row.owner_id, inviteID: row.invite_id, expiresAt: row.expires_at.getTime() / 1000 };
+}
+
+/** Deletes token rows whose invite expired before `cutoffSeconds` (retention). */
+export async function purgeExpiredInviteTokens(client: pg.Pool | pg.PoolClient, cutoffSeconds: number): Promise<number> {
+  const result = await client.query(`DELETE FROM companion_invite_token WHERE expires_at < to_timestamp($1)`, [cutoffSeconds]);
+  return result.rowCount ?? 0;
+}

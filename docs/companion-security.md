@@ -23,7 +23,33 @@ when either checkpoint or state-root verification fails. The old unanchored
 restore constructors are internal test seams only; public restore requires the
 checkpoint overload.
 
-## Pairing acceptance boundary (R5 pairing v2, Slice P2b, 2026-10-02)
+## Pairing v3 token model and accepted risk (R5 pairing v3, Slice P3a, 2026-10-31)
+
+`docs/r5-pairing-v3-plan.md` removed the owner confirm step: creating an invite is the owner's grant of
+`approveEarlyEnd` + `receiveRequests`, and accepting it is the friend's consent. Security properties:
+
+- **Token.** The owner device generates 16 random bytes (22 base64url characters). It is the relay lookup key and the
+  bearer secret. Only its domain-separated SHA-256 (`tokenHash`) is signed into the invite and stored by the relay
+  (ledger and `companion_invite_token`), so a database leak yields no live token. The plaintext appears only at lookup
+  and in the friend's accept body (and is then dead: single use). The owner chooses the token (not the relay) and
+  signs its hash, so the relay cannot swap one invite for another. Comparisons use `timingSafeEqual`.
+- **Lookup.** `POST /v1/invite/lookup` is unauthenticated, rate limited per client IP, and returns only found /
+  not-found (unknown, expired and used are one answer). A wrong token or unknown invite at accept time is a single
+  `unauthorized`.
+- **Coverage.** The owner signature covers token hash, owner name and granted scopes; the friend signature covers the
+  token, friend name and accepted scopes (which must equal the grant). Names are metadata only, never authority.
+- **Atomicity.** Accept verifies both signatures and the token, consumes the invite, creates the pairing and writes
+  consent in one owner-row transaction; any failure leaves the invite usable.
+- **Owner verification.** With no confirm step, the owner device must not take the relay's word for who joined. The
+  relay returns the friend-signed acceptance behind each pairing and `JoinedAcceptanceCheck` proves it answers an
+  invite this device created (token hash, scopes, signer, ID derivation, names).
+- **Accepted risk.** Anyone holding an unexpired, unused link becomes a trusted person without owner approval, and a
+  relay that observes the token in transit could race the friend with its own key. Acceptable because an approver can
+  only approve ending a session the owner explicitly asks *them* about, never start, extend or observe a lock; links
+  are single-use, short-lived (<=7 days, 1 hour by default) and unguessable; the owner sees every person (and the
+  joined notice) and can remove them. R6 status sharing must add an explicit, informed confirmation first.
+
+## Pairing acceptance boundary (superseded by pairing v3 above; R5 pairing v2, Slice P2b, 2026-10-02)
 
 `docs/r5-pairing-v2-plan.md`'s "Owner decision" replaced the owner typing a
 six-digit code read aloud by the friend with a relay-delivered acceptance the

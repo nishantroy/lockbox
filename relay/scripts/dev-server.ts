@@ -8,7 +8,7 @@
 // startup, per that registry's process.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { handleOperations, handleInbox, handleHealth } from "../src/handlers.js";
+import { handleOperations, handleInbox, handleInviteLookup, handleHealth } from "../src/handlers.js";
 import { closePool } from "../src/db.js";
 import { MAX_RAW_BODY_BYTES } from "../src/protocol.js";
 
@@ -23,6 +23,7 @@ type RouteHandler = (request: Request) => Promise<Response>;
 const routes: Record<string, RouteHandler> = {
   "/v1/operations": handleOperations,
   "/v1/inbox": handleInbox,
+  "/v1/invite/lookup": handleInviteLookup,
   "/v1/health": handleHealth
 };
 

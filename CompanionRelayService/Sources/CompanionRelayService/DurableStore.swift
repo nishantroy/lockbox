@@ -41,6 +41,7 @@ public struct DurableOwnerLedger: Codable, Sendable {
     public var revision: Int64
     public var operations: [String: DurableOperationRecord]
     public var invitations: [String: DurableInvitationRecord]
+    /// Pairing v2 leftover: v3 has no pending-acceptance step, so nothing writes this any more.
     public var pendingAcceptances: [String: PairingAcceptance]
     public var pairings: [String: DurablePairingRecord]
     public var pairingEpochs: [String: UInt64]
@@ -427,13 +428,13 @@ public final class InMemoryDurableRelayStore: DurableRelayStore, @unchecked Send
             try ledger.owner.validate()
 
             var operationRevisions = Set<Int64>()
-            let ownerSignedKinds: Set<String> = ["ack", "invite", "confirm", "consent", "session",
+            let ownerSignedKinds: Set<String> = ["ack", "invite", "consent", "session",
                                                    "request", "use", "cancel", "natural_end", "revoke",
                                                    "replace_pairing"]
             let approverSignedKinds: Set<String> = ["accept", "approval"]
             let responseKinds: [String: String] = [
-                "ack": "acknowledgement", "invite": "invitation", "accept": "acceptance",
-                "confirm": "pairing", "consent": "consent", "session": "session",
+                "ack": "acknowledgement", "invite": "invitation", "accept": "pairing",
+                "consent": "consent", "session": "session",
                 "request": "request", "approval": "approval", "use": "verification",
                 "cancel": "acknowledgement", "natural_end": "acknowledgement",
                 "revoke": "acknowledgement", "replace_pairing": "pairing"

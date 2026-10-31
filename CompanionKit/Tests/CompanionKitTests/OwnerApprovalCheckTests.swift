@@ -18,12 +18,8 @@ final class OwnerApprovalCheckTests: XCTestCase {
         let fixedNow = t
         let owner = CompanionClient(signer: ownerSigner, transport: relay, now: { fixedNow })
         let approver = CompanionClient(signer: approverSigner, transport: relay, now: { fixedNow })
-        let invitation = try owner.createInvite(inviteID: "oac-invite", validFor: 3_600, now: t,
-                                                 nonce: Data(repeating: 4, count: 24))
-        let acceptance = try approver.accept(invitation, acceptanceID: "oac-accept", now: t)
-        let pairing = try owner.confirm(acceptance, verificationCode: acceptance.verificationCode, now: t)
-        _ = try owner.grantScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
-        _ = try approver.acceptScopes(pairing: pairing, scopes: [.approveEarlyEnd, .receiveRequests])
+        let pairing = try pairV3(owner: owner, approver: approver, inviteID: "oac-invite", acceptanceID: "oac-accept", now: t,
+                                 nonce: Data(repeating: 4, count: 24))
         let session = try ActiveSession(owner: ownerSigner.identity, sessionID: "oac-session", activeSetID: "oac-set",
                                         startsAt: t.addingTimeInterval(-1), endsAt: t.addingTimeInterval(3_600))
         _ = try owner.publishSession(session)

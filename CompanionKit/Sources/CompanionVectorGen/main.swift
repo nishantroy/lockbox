@@ -183,20 +183,15 @@ out["framing"] = [
     framingVector(domain: "empty.fields", fields: [])
 ]
 
-// MARK: - Verification code vector
+// MARK: - Invite token vector (pairing v3)
 
-let verificationCode = PairingAcceptance.code(
-    invite: try InvitePayload(inviteID: "fixture-invite-code-test", owner: ownerSigner.identity,
-                              issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt, nonce: fixedNonce),
-    approver: approverSigner.identity)
+let fixedInviteToken = b64url(Data((1...16).map { UInt8($0) }))
+assert(InviteToken.isWellFormed(fixedInviteToken))
 
-out["verificationCode"] = [
-    "domain": "\(version).pairing-code",
-    "inviteID": "fixture-invite-code-test",
-    "ownerIdentityID": ownerSigner.identity.identityID,
-    "approverIdentityID": approverSigner.identity.identityID,
-    "nonceBase64url": b64url(fixedNonce),
-    "expectedCode": verificationCode
+out["inviteToken"] = [
+    "domain": "\(version).invite-token",
+    "token": fixedInviteToken,
+    "expectedHashBase64": InviteToken.hash(fixedInviteToken).base64EncodedString()
 ]
 
 // MARK: - Signature checks (generic crypto/domain-separation vectors)
@@ -222,8 +217,10 @@ func addSignatureCheck(label: String, domain: String, fields: [String], signer: 
 
 // Invitation payload signature: valid, wrong-key, cross-domain, tampered-bytes.
 let invitePayload = try InvitePayload(inviteID: "fixture-invite-01", owner: ownerSigner.identity,
-                                      issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt, nonce: fixedNonce)
-let inviteDomain = "\(version).invite"
+                                      issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt, nonce: fixedNonce,
+                                      tokenHash: InviteToken.hash(fixedInviteToken), ownerDisplayName: "Alex",
+                                      grantedScopes: [.approveEarlyEnd, .receiveRequests])
+let inviteDomain = "\(version).invite.v3"
 let inviteFields = invitePayload.signingFields()
 addSignatureCheck(label: "invite-payload-valid", domain: inviteDomain, fields: inviteFields,
                   signer: ownerSigner, expectValid: true)
@@ -264,18 +261,13 @@ do {
 
 // Acceptance payload signature: valid, wrong-key.
 let acceptance = try PairingAcceptance(acceptanceID: "fixture-acceptance-01", invite: invitePayload,
-                                       approver: approverSigner.identity, issuedAt: acceptanceIssuedAt)
-let acceptanceDomain = "\(version).acceptance"
+                                       token: fixedInviteToken, approver: approverSigner.identity,
+                                       approverDisplayName: "Sam", issuedAt: acceptanceIssuedAt)
+let acceptanceDomain = "\(version).acceptance.v3"
 addSignatureCheck(label: "acceptance-valid", domain: acceptanceDomain, fields: acceptance.signingFields(),
                   signer: approverSigner, expectValid: true)
 addSignatureCheck(label: "acceptance-wrong-key", domain: acceptanceDomain, fields: acceptance.signingFields(),
                   signer: approverSigner, signWith: wrongSigner, expectValid: false)
-
-// Confirmation payload signature.
-let confirmation = try PairingConfirmation(acceptance: acceptance, owner: ownerSigner.identity,
-                                           verificationCode: acceptance.verificationCode, issuedAt: confirmationIssuedAt)
-addSignatureCheck(label: "confirmation-valid", domain: "\(version).confirmation",
-                  fields: confirmation.signingFields(), signer: ownerSigner, expectValid: true)
 
 // Approval payload signature.
 let approvalSession = try ActiveSession(owner: ownerSigner.identity, sessionID: "fixture-session-01",
@@ -342,7 +334,9 @@ try addOperation(name: "invite", kind: "invite",
                      "inviteID": invitePayload.inviteID,
                      "issuedAtUnixSeconds": inviteIssuedAt.timeIntervalSince1970,
                      "expiresAtUnixSeconds": inviteExpiresAt.timeIntervalSince1970,
-                     "nonceBase64": invitePayload.nonce.base64EncodedString()
+                     "nonceBase64": invitePayload.nonce.base64EncodedString(),
+                     "ownerDisplayName": invitePayload.ownerDisplayName ?? "",
+                     "tokenHashBase64": invitePayload.tokenHash.base64EncodedString()
                  ])
 
 // accept
@@ -353,16 +347,8 @@ try addOperation(name: "accept", kind: "accept",
                                                        payload: encodeSorted(signedAcceptance), signer: approverSigner),
                  decoded: [
                      "operationID": "op-accept-01", "expectedRevisionInEnvelope": 1, "signerRole": "approver",
-                     "acceptanceID": acceptance.acceptanceID, "verificationCode": acceptance.verificationCode
+                     "acceptanceID": acceptance.acceptanceID, "approverDisplayName": acceptance.approverDisplayName ?? ""
                  ])
-
-// confirm
-let confirmationSignature = try ownerSigner.sign(domain: "\(version).confirmation", fields: confirmation.signingFields())
-let signedConfirmation = SignedConfirmation(confirmation: confirmation, signature: confirmationSignature)
-try addOperation(name: "confirm", kind: "confirm",
-                 operation: try makeEnvelopedOperation(kind: "confirm", operationID: "op-confirm-01", expectedRevision: 2,
-                                                       payload: encodeSorted(signedConfirmation), signer: ownerSigner),
-                 decoded: ["operationID": "op-confirm-01", "expectedRevisionInEnvelope": 2, "signerRole": "owner"])
 
 // consent: ownerGrant, approverAccept, ownerRevoke
 func consentMutation(action: ConsentMutationAction, scopes: [CompanionScope], nonceSeed: Int) throws -> RelationshipConsentMutation {
@@ -370,7 +356,7 @@ func consentMutation(action: ConsentMutationAction, scopes: [CompanionScope], no
                                     owner: ownerSigner.identity, approver: approverSigner.identity, action: action,
                                     scopes: try CompanionScopeSet(scopes),
                                     nonce: Data((0..<24).map { UInt8((nonceSeed + $0) % 256) }),
-                                    issuedAt: confirmationIssuedAt.addingTimeInterval(1))
+                                    issuedAt: acceptanceIssuedAt.addingTimeInterval(1))
 }
 
 let consentGrant = try consentMutation(action: .ownerGrant, scopes: [.approveEarlyEnd, .receiveRequests], nonceSeed: 70)
@@ -572,14 +558,24 @@ out["inboxResponseSample"] = try resultJSON(sampleInboxResponse)
 let sampleHelperInboxResponse = try InboxResponse(ownerIdentityID: nil, revision: 7, requests: [trustedRequest])
 out["helperInboxResponseSample"] = try resultJSON(sampleHelperInboxResponse)
 
-// R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a"): an owner inbox
-// sample that also carries `pendingAcceptances` (contract v1.3, additive) --
-// the relay-stored, still-verifiable `SignedAcceptance` for an outstanding
-// "accept", exactly as an owner fetch of their own ledger would include it.
-let sampleInboxResponseWithPendingAcceptance = try InboxResponse(
+// Pairing v3 (docs/r5-pairing-v3-plan.md, contract v1.4): an owner inbox
+// sample that also carries `pairings` (with display names) and `acceptances`
+// -- the friend-signed acceptance behind each pairing, exactly as an owner
+// fetch of their own ledger would include it.
+let joinedPairing = try Pairing(pairingID: Pairing.derivedID(inviteID: invitePayload.inviteID,
+                                                              approverIdentityID: approverSigner.identity.identityID),
+                                owner: ownerSigner.identity, approver: approverSigner.identity, epoch: 1,
+                                createdAt: acceptanceIssuedAt, state: .active,
+                                ownerDisplayName: "Alex", approverDisplayName: "Sam")
+let sampleInboxResponseWithAcceptances = try InboxResponse(
     ownerIdentityID: ownerSigner.identity.identityID, revision: 7, requests: [trustedRequest],
-    pendingAcceptances: [signedAcceptance])
-out["inboxResponseWithPendingAcceptanceSample"] = try resultJSON(sampleInboxResponseWithPendingAcceptance)
+    pairings: [joinedPairing], acceptances: [signedAcceptance])
+out["inboxResponseWithAcceptancesSample"] = try resultJSON(sampleInboxResponseWithAcceptances)
+out["joinedPairingSample"] = try resultJSON(RelayResult.pairing(joinedPairing))
+
+// `POST /v1/invite/lookup` 200 response body.
+struct VGLookupResponse: Codable { let invitation: Invitation }
+out["inviteLookupResponseSample"] = String(decoding: try encodeSorted(VGLookupResponse(invitation: invitation)), as: UTF8.self)
 
 // MARK: - Tampered full-operation variants (built from the "invite" and "request" ops)
 

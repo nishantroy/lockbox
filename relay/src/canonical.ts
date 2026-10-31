@@ -85,25 +85,26 @@ export function deviceIdentityID(publicKey: Buffer): string {
 }
 
 /**
- * Port of `PairingAcceptance.code(invite:approver:)`: a six-digit numeric
- * verification code derived from the invite/approver identity, not itself a
- * signature. See CompanionKit/Sources/CompanionKit/ProtocolModels.swift.
+ * Pairing v3 (docs/r5-pairing-v3-plan.md): the invite token is a random
+ * 128-bit value, 22 base64url characters. It is both the lookup key and the
+ * bearer secret for an invite. The owner signs only its *hash* into the
+ * invite payload, so the relay (and any database leak) holds nothing that can
+ * be replayed as a live token. Must match `InviteToken.hash(_:)` in
+ * CompanionKit.
  */
-export function pairingVerificationCode(params: {
-  inviteID: string;
-  ownerIdentityID: string;
-  approverIdentityID: string;
-  nonce: Buffer;
-}): string {
-  const bytes = canonicalBytes(`${COMPANION_VERSION}.pairing-code`, [
-    params.inviteID,
-    params.ownerIdentityID,
-    params.approverIdentityID,
-    base64url(params.nonce)
-  ]);
-  const hash = digest(bytes);
-  const number = hash.subarray(0, 4).reduce((acc, byte) => ((acc << 8) | byte) >>> 0, 0) % 1_000_000;
-  return String(number).padStart(6, "0");
+export const INVITE_TOKEN_LENGTH = 22;
+const INVITE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{22}$/;
+
+export function isWellFormedInviteToken(token: unknown): token is string {
+  return typeof token === "string" && INVITE_TOKEN_PATTERN.test(token);
+}
+
+export function inviteTokenHash(token: string): Buffer {
+  return digest(canonicalBytes(`${COMPANION_VERSION}.invite-token`, [token]));
+}
+
+export function generateInviteToken(): string {
+  return base64url(cryptoRandomBytes(16));
 }
 
 export function randomNonce(size = 24): Buffer {

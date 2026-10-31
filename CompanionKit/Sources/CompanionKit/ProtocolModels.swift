@@ -1,7 +1,90 @@
 import Foundation
 import CryptoKit
 
-// MARK: - Invitation and pairing
+// MARK: - Invitation and pairing (pairing v3)
+//
+// Pairing v3 (`docs/r5-pairing-v3-plan.md`): the owner creates an invite
+// keyed by a random 128-bit token; the friend looks it up, taps Accept, and
+// the relay creates the active pairing and both-sided consent in one
+// transaction. There is no owner confirm step and no typed code. The owner's
+// signature covers the token's hash, the owner's display name and the
+// granted scopes; the friend's covers the token itself, the friend's display
+// name and the accepted scopes.
+
+/// The invite bearer token: 16 random bytes, 22 base64url characters. It is
+/// both the relay lookup key and the secret that proves the holder was given
+/// the link. Only its hash is ever signed into an invite or stored by a relay.
+public enum InviteToken {
+    public static let length = 22
+    public static let shareLinkPrefix = "phone-lockbox-companion://i/"
+
+    public static func generate() -> String {
+        var generator = SystemRandomNumberGenerator()
+        return base64URL(Data((0..<16).map { _ in UInt8.random(in: 0...255, using: &generator) }))
+    }
+
+    public static func isWellFormed(_ token: String) -> Bool {
+        token.utf8.count == length && token.utf8.allSatisfy { byte in
+            (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5A)
+                || (byte >= 0x61 && byte <= 0x7A) || byte == 0x2D || byte == 0x5F
+        }
+    }
+
+    /// Domain-separated SHA-256 of the token; must match `inviteTokenHash` in the TS relay.
+    public static func hash(_ token: String) -> Data {
+        CompanionCanonical.digest(CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).invite-token", fields: [token]))
+    }
+
+    /// Constant-time check that `token` hashes to `hash`.
+    public static func matches(_ token: String, hash expected: Data) -> Bool {
+        guard isWellFormed(token) else { return false }
+        let actual = Self.hash(token)
+        guard actual.count == expected.count else { return false }
+        var difference: UInt8 = 0
+        for (a, b) in zip(actual, expected) { difference |= a ^ b }
+        return difference == 0
+    }
+
+    public static func shareLink(token: String) -> String { shareLinkPrefix + token }
+
+    /// Extracts a well-formed token from `phone-lockbox-companion://i/<token>`, or `nil`.
+    public static func token(fromShareLink link: String) -> String? {
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(shareLinkPrefix) else { return nil }
+        let token = String(trimmed.dropFirst(shareLinkPrefix.count))
+        return isWellFormed(token) ? token : nil
+    }
+}
+
+/// Shared validation for the two optional display names and the scope sets
+/// that pairing v3 signs. Mirrors `decodeDisplayName` / `decodeGrantedScopes`
+/// in the TS relay: a name is absent or 1...40 Unicode scalars with no control
+/// characters and at least one non-whitespace scalar; scopes are a non-empty,
+/// duplicate-free set of R5 scopes.
+public enum PairingFields {
+    public static let maxDisplayNameScalars = 40
+
+    public static func validateDisplayName(_ value: String?, name: String) throws {
+        guard let value else { return }
+        let scalars = value.unicodeScalars
+        guard !scalars.isEmpty, scalars.count <= maxDisplayNameScalars,
+              !scalars.contains(where: { $0.properties.generalCategory == .control }),
+              scalars.contains(where: { !$0.properties.isWhitespace }) else {
+            throw CompanionError.malformed("invalid \(name)")
+        }
+    }
+
+    public static func normalizedScopes(_ scopes: [CompanionScope], name: String) throws -> [CompanionScope] {
+        guard !scopes.isEmpty, Set(scopes).count == scopes.count, scopes.allSatisfy(\.isR5) else {
+            throw CompanionError.malformed("invalid \(name)")
+        }
+        return scopes.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    static func scopeField(_ scopes: [CompanionScope]) -> String {
+        scopes.map(\.rawValue).sorted().joined(separator: ",")
+    }
+}
 
 public struct InvitePayload: Codable, Hashable, Sendable {
     public let inviteID: String
@@ -9,31 +92,46 @@ public struct InvitePayload: Codable, Hashable, Sendable {
     public let issuedAt: Date
     public let expiresAt: Date
     public let nonce: Data
+    /// `InviteToken.hash(token)`; the token itself is never signed or sent to the relay in an invite.
+    public let tokenHash: Data
+    /// Owner-chosen name shown to the friend. Optional, at most 40 scalars.
+    public let ownerDisplayName: String?
+    /// The scopes creating this invite grants the friend. Sorted, non-empty, R5 only.
+    public let grantedScopes: [CompanionScope]
 
-    public init(inviteID: String, owner: DeviceIdentity, issuedAt: Date, expiresAt: Date, nonce: Data) throws {
+    public init(inviteID: String, owner: DeviceIdentity, issuedAt: Date, expiresAt: Date, nonce: Data,
+                tokenHash: Data, ownerDisplayName: String? = nil,
+                grantedScopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) throws {
         try requireIdentifier(inviteID, name: "invite ID")
         guard owner.role == .owner, nonce.count >= 16, nonce.count <= 64,
+              tokenHash.count == 32,
               expiresAt > issuedAt,
               expiresAt.timeIntervalSince(issuedAt) <= CompanionLimits.maxInviteLifetime else {
             throw CompanionError.malformed("invalid invitation")
         }
         try requireTimestamp(issuedAt, name: "invite issue time")
         try requireTimestamp(expiresAt, name: "invite expiry")
+        try PairingFields.validateDisplayName(ownerDisplayName, name: "owner display name")
         self.inviteID = inviteID; self.owner = owner; self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.nonce = nonce
+        self.tokenHash = tokenHash; self.ownerDisplayName = ownerDisplayName
+        self.grantedScopes = try PairingFields.normalizedScopes(grantedScopes, name: "granted scopes")
     }
 
     public func signingFields() -> [String] {
-        [inviteID, owner.identityID, base64URL(owner.publicKey), String(milliseconds(issuedAt)), String(milliseconds(expiresAt)), base64URL(nonce)]
+        [inviteID, owner.identityID, base64URL(owner.publicKey), String(milliseconds(issuedAt)), String(milliseconds(expiresAt)),
+         base64URL(nonce), base64URL(tokenHash), ownerDisplayName ?? "", PairingFields.scopeField(grantedScopes)]
     }
 
     public func validate(at now: Date) throws {
         try owner.validate()
-        guard nonce.count >= 16, nonce.count <= 64, expiresAt > issuedAt,
+        guard nonce.count >= 16, nonce.count <= 64, tokenHash.count == 32, expiresAt > issuedAt,
               expiresAt.timeIntervalSince(issuedAt) <= CompanionLimits.maxInviteLifetime else {
             throw CompanionError.malformed("invalid invitation")
         }
         try requireTimestamp(issuedAt, name: "invite issue time")
         try requireTimestamp(expiresAt, name: "invite expiry")
+        try PairingFields.validateDisplayName(ownerDisplayName, name: "owner display name")
+        _ = try PairingFields.normalizedScopes(grantedScopes, name: "granted scopes")
         guard now < expiresAt else { throw CompanionError.expired }
         guard now >= issuedAt.addingTimeInterval(-60) else { throw CompanionError.malformed("invite is from the future") }
     }
@@ -53,7 +151,7 @@ public struct Invitation: Codable, Hashable, Sendable {
         try payload.validate(at: payload.issuedAt)
         guard signature.count == 64,
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: payload.owner.publicKey),
-              key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())) else {
+              key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())) else {
             throw CompanionError.invalidSignature
         }
     }
@@ -63,91 +161,64 @@ public struct Invitation: Codable, Hashable, Sendable {
         try validateSignature()
     }
 
-    public var shareLink: String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let encoded = (try? encoder.encode(self)).map(base64URL) ?? ""
-        return "phone-lockbox-companion://invite/\(encoded)"
-    }
-
-    public static func fromShareLink(_ link: String) throws -> Invitation {
-        let prefix = "phone-lockbox-companion://invite/"
-        guard link.hasPrefix(prefix), let data = dataFromBase64URL(String(link.dropFirst(prefix.count))) else {
-            throw CompanionError.malformed("invalid invite link")
+    /// What a friend does with a looked-up invitation: it must verify under the
+    /// owner key, still be live, and bind the exact token from the link.
+    public func validate(at now: Date, matchingToken token: String) throws {
+        try validate(at: now)
+        guard InviteToken.matches(token, hash: payload.tokenHash) else {
+            throw CompanionError.malformed("invite does not match the link")
         }
-        do {
-            let invitation = try JSONDecoder().decode(Invitation.self, from: data)
-            try invitation.validate(at: invitation.payload.issuedAt)
-            return invitation
-        } catch let error as CompanionError { throw error }
-        catch { throw CompanionError.malformed("invalid invite payload") }
     }
 }
 
+/// Friend-signed acceptance (pairing v3). Carries the invite token as proof of
+/// possession; the relay turns a valid one into an active pairing plus active
+/// both-sided consent atomically.
 public struct PairingAcceptance: Codable, Hashable, Sendable {
     public let acceptanceID: String
     public let inviteID: String
     public let owner: DeviceIdentity
     public let approver: DeviceIdentity
     public let issuedAt: Date
-    public let verificationCode: String
+    public let token: String
+    public let approverDisplayName: String?
+    public let acceptedScopes: [CompanionScope]
 
-    public init(acceptanceID: String, invite: InvitePayload, approver: DeviceIdentity, issuedAt: Date) throws {
+    public init(acceptanceID: String, invite: InvitePayload, token: String, approver: DeviceIdentity,
+                approverDisplayName: String? = nil, issuedAt: Date) throws {
         try requireIdentifier(acceptanceID, name: "acceptance ID")
         try invite.validate(at: issuedAt)
         guard approver.role == .trustedApprover else { throw CompanionError.malformed("receiver is not an approver") }
         try approver.validate()
+        guard InviteToken.matches(token, hash: invite.tokenHash) else {
+            throw CompanionError.malformed("invite does not match the link")
+        }
+        try PairingFields.validateDisplayName(approverDisplayName, name: "approver display name")
         guard issuedAt >= invite.issuedAt.addingTimeInterval(-60), issuedAt < invite.expiresAt else {
             throw CompanionError.expired
         }
         self.acceptanceID = acceptanceID; self.inviteID = invite.inviteID; self.owner = invite.owner
-        self.approver = approver; self.issuedAt = issuedAt
-        self.verificationCode = Self.code(invite: invite, approver: approver)
-    }
-
-    public static func code(invite: InvitePayload, approver: DeviceIdentity) -> String {
-        let digest = SHA256.hash(data: CompanionCanonical.bytes(
-            domain: "\(CompanionCanonical.version).pairing-code",
-            fields: [invite.inviteID, invite.owner.identityID, approver.identityID, base64URL(invite.nonce)]))
-        let number = digest.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) } % 1_000_000
-        return String(format: "%06u", number)
+        self.approver = approver; self.issuedAt = issuedAt; self.token = token
+        self.approverDisplayName = approverDisplayName
+        // Accepting is consenting to exactly what the owner granted.
+        self.acceptedScopes = invite.grantedScopes
     }
 
     public func signingFields() -> [String] {
         [acceptanceID, inviteID, owner.identityID, approver.identityID,
-         base64URL(owner.publicKey), base64URL(approver.publicKey), String(milliseconds(issuedAt)), verificationCode]
+         base64URL(owner.publicKey), base64URL(approver.publicKey), String(milliseconds(issuedAt)),
+         token, approverDisplayName ?? "", PairingFields.scopeField(acceptedScopes)]
     }
 
     public func validate() throws {
         try requireIdentifier(acceptanceID, name: "acceptance ID")
         try requireIdentifier(inviteID, name: "invite ID")
         try owner.validate(); try approver.validate(); try requireTimestamp(issuedAt, name: "acceptance time")
-        guard owner.role == .owner, approver.role == .trustedApprover,
-              verificationCode.count == 6, verificationCode.allSatisfy(\.isNumber) else {
+        guard owner.role == .owner, approver.role == .trustedApprover, InviteToken.isWellFormed(token) else {
             throw CompanionError.malformed("invalid pairing acceptance")
         }
-    }
-}
-
-public struct PairingConfirmation: Codable, Hashable, Sendable {
-    public let acceptanceID: String
-    public let inviteID: String
-    public let owner: DeviceIdentity
-    public let approverIdentityID: String
-    public let verificationCode: String
-    public let issuedAt: Date
-
-    public init(acceptance: PairingAcceptance, owner: DeviceIdentity, verificationCode: String, issuedAt: Date) throws {
-        try requireTimestamp(issuedAt, name: "confirmation time")
-        guard owner == acceptance.owner, verificationCode.count == 6, verificationCode.allSatisfy(\.isNumber) else {
-            throw CompanionError.unauthorized
-        }
-        self.acceptanceID = acceptance.acceptanceID; self.inviteID = acceptance.inviteID; self.owner = owner
-        self.approverIdentityID = acceptance.approver.identityID; self.verificationCode = verificationCode; self.issuedAt = issuedAt
-    }
-
-    public func signingFields() -> [String] {
-        [acceptanceID, inviteID, owner.identityID, approverIdentityID, verificationCode, String(milliseconds(issuedAt))]
+        try PairingFields.validateDisplayName(approverDisplayName, name: "approver display name")
+        _ = try PairingFields.normalizedScopes(acceptedScopes, name: "accepted scopes")
     }
 }
 
@@ -158,18 +229,26 @@ public struct Pairing: Codable, Hashable, Sendable {
     public let owner: DeviceIdentity
     public let approver: DeviceIdentity
     public let epoch: UInt64
+    /// For a pairing created by a v3 accept, the moment the friend joined.
     public let createdAt: Date
     public var state: PairingState
+    /// Pairing v3: names carried from the signed invite / acceptance so each side can show who the other is.
+    public let ownerDisplayName: String?
+    public let approverDisplayName: String?
 
     public init(pairingID: String, owner: DeviceIdentity, approver: DeviceIdentity,
-                epoch: UInt64, createdAt: Date, state: PairingState) throws {
+                epoch: UInt64, createdAt: Date, state: PairingState,
+                ownerDisplayName: String? = nil, approverDisplayName: String? = nil) throws {
         try requireIdentifier(pairingID, name: "pairing ID")
         try owner.validate(); try approver.validate(); try requireTimestamp(createdAt, name: "pairing creation time")
         guard owner.role == .owner, approver.role == .trustedApprover, epoch > 0 else {
             throw CompanionError.malformed("invalid pairing")
         }
+        try PairingFields.validateDisplayName(ownerDisplayName, name: "owner display name")
+        try PairingFields.validateDisplayName(approverDisplayName, name: "approver display name")
         self.pairingID = pairingID; self.owner = owner; self.approver = approver
         self.epoch = epoch; self.createdAt = createdAt; self.state = state
+        self.ownerDisplayName = ownerDisplayName; self.approverDisplayName = approverDisplayName
     }
 
     public func validate() throws {
@@ -177,6 +256,14 @@ public struct Pairing: Codable, Hashable, Sendable {
         try owner.validate(); try approver.validate()
         try requireTimestamp(createdAt, name: "pairing creation time")
         guard owner.role == .owner, approver.role == .trustedApprover, epoch > 0 else { throw CompanionError.malformed("invalid pairing") }
+        try PairingFields.validateDisplayName(ownerDisplayName, name: "owner display name")
+        try PairingFields.validateDisplayName(approverDisplayName, name: "approver display name")
+    }
+
+    /// `pairingID` the relay derives for the pairing an accepted invite creates.
+    public static func derivedID(inviteID: String, approverIdentityID: String) -> String {
+        String(base64URL(Data(SHA256.hash(data: CompanionCanonical.bytes(
+            domain: "\(CompanionCanonical.version).pairing", fields: [inviteID, approverIdentityID])))).prefix(32))
     }
 }
 
@@ -611,18 +698,16 @@ public struct SignedOperation: Codable, Hashable, Sendable {
 }
 
 public struct RelaySnapshot: Codable, Sendable {
-    // Bumped to 4 for R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice
-    // P2a"): `pendingAcceptances` now retains the approver's `SignedAcceptance`
-    // (acceptance + signature) instead of the bare, unsigned
-    // `PairingAcceptance`, so a restored relay can still deliver a verifiable
-    // signature through its inbox. `validateSnapshot` below already requires
-    // an exact `schemaVersion` match (no cross-version decoding is supported
-    // for this reference/test-only snapshot format -- see
-    // docs/companion-security.md), and this type backs only the developer
-    // harness's in-process relay (never a field build's persisted data; see
-    // `PhoneLockbox/Companion/CompanionPrototype.swift`), so the bump carries
-    // no production migration risk.
-    static let currentSchemaVersion: UInt16 = 4
+    // Bumped to 5 for R5 pairing v3 (docs/r5-pairing-v3-plan.md): invites carry
+    // a token hash, display name and granted scopes; accept creates the pairing
+    // directly (retaining the friend-signed acceptance per pairing), so there is
+    // no `pendingAcceptances` any more. `validateSnapshot` requires an exact
+    // `schemaVersion` match (no cross-version decoding is supported for this
+    // reference/test-only snapshot format -- see docs/companion-security.md),
+    // and this type backs only the developer harness's in-process relay (never
+    // a field build's persisted data), so the bump carries no production
+    // migration risk.
+    static let currentSchemaVersion: UInt16 = 5
     let schemaVersion: UInt16
     let owner: DeviceIdentity
     let currentTime: Date
@@ -630,8 +715,8 @@ public struct RelaySnapshot: Codable, Sendable {
     let currentSessionID: String?
     let invitations: [Invitation]
     let usedInviteIDs: Set<String>
-    let pendingAcceptances: [SignedAcceptance]
     let pairings: [Pairing]
+    let joinAcceptances: [SignedAcceptance]
     let sessions: [ActiveSession]
     let requests: [TrustedRequest]
     let approvals: [Approval]
@@ -643,7 +728,7 @@ public struct RelaySnapshot: Codable, Sendable {
 
     init(owner: DeviceIdentity, currentTime: Date, revision: UInt64, currentSessionID: String?,
          invitations: [Invitation], usedInviteIDs: Set<String>,
-         pendingAcceptances: [SignedAcceptance], pairings: [Pairing], sessions: [ActiveSession],
+         pairings: [Pairing], joinAcceptances: [SignedAcceptance], sessions: [ActiveSession],
          requests: [TrustedRequest], approvals: [Approval], usedApprovalIDs: Set<String>,
          usedApprovalNonces: Set<String> = [], usedConsentNonces: Set<String> = [],
          relationshipConsents: [RelationshipConsent] = [],
@@ -652,7 +737,7 @@ public struct RelaySnapshot: Codable, Sendable {
         self.owner = owner; self.currentTime = currentTime; self.revision = revision
         self.currentSessionID = currentSessionID
         self.invitations = invitations; self.usedInviteIDs = usedInviteIDs
-        self.pendingAcceptances = pendingAcceptances; self.pairings = pairings; self.sessions = sessions
+        self.pairings = pairings; self.joinAcceptances = joinAcceptances; self.sessions = sessions
         self.requests = requests; self.approvals = approvals; self.usedApprovalIDs = usedApprovalIDs
         self.usedApprovalNonces = usedApprovalNonces; self.usedConsentNonces = usedConsentNonces
         self.relationshipConsents = relationshipConsents
@@ -661,7 +746,7 @@ public struct RelaySnapshot: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, owner, currentTime, revision, currentSessionID, invitations,
-             usedInviteIDs, pendingAcceptances, pairings, sessions, requests, approvals,
+             usedInviteIDs, pairings, joinAcceptances, sessions, requests, approvals,
              usedApprovalIDs, usedApprovalNonces, usedConsentNonces, relationshipConsents, operationRecords
     }
 
@@ -674,8 +759,8 @@ public struct RelaySnapshot: Codable, Sendable {
         self.currentSessionID = try c.decodeIfPresent(String.self, forKey: .currentSessionID)
         self.invitations = try c.decode([Invitation].self, forKey: .invitations)
         self.usedInviteIDs = try c.decode(Set<String>.self, forKey: .usedInviteIDs)
-        self.pendingAcceptances = try c.decode([SignedAcceptance].self, forKey: .pendingAcceptances)
         self.pairings = try c.decode([Pairing].self, forKey: .pairings)
+        self.joinAcceptances = try c.decode([SignedAcceptance].self, forKey: .joinAcceptances)
         self.sessions = try c.decode([ActiveSession].self, forKey: .sessions)
         self.requests = try c.decode([TrustedRequest].self, forKey: .requests)
         self.approvals = try c.decode([Approval].self, forKey: .approvals)
@@ -701,10 +786,19 @@ public protocol CompanionTransport: Sendable {
     /// Foreground fetch is also authenticated. Notification/APNs delivery is
     /// intentionally outside this package and never authorizes an action.
     func fetchInbox(_ operation: SignedOperation) throws -> InboxResponse
+
+    /// Pairing v3: resolves a link token to the owner-signed invitation. The
+    /// caller must verify the result (`Invitation.validate(at:matchingToken:)`).
+    func lookupInvite(token: String) throws -> Invitation
 }
 
 public extension CompanionTransport {
     func consent(relationshipID: String) throws -> RelationshipConsent {
+        throw CompanionError.notFound
+    }
+
+    /// A transport that cannot look up invites fails closed.
+    func lookupInvite(token: String) throws -> Invitation {
         throw CompanionError.notFound
     }
 }
@@ -721,19 +815,33 @@ public enum RelayResult: Codable, Hashable, Sendable {
     case acknowledgement
 }
 
-/// Shared by both `CompanionClient.confirm` (sync) and
-/// `AsyncCompanionClient.confirm` (async). The moment a pairing is confirmed
-/// is the first time this device trusts a specific approver key for a
-/// specific owner; the relay's response is the only source for that key, so
-/// it must be checked against what this device actually confirmed rather
-/// than stored as-is. A malicious relay answering confirm with a different
-/// owner or a substituted approver key must never be accepted.
-func validateConfirmResponse(_ pairing: Pairing, acceptance: PairingAcceptance, signerIdentity: DeviceIdentity) throws {
-    guard pairing.owner == signerIdentity, pairing.approver == acceptance.approver,
+/// Shared by both `CompanionClient.acceptInvite` (sync) and
+/// `AsyncCompanionClient.acceptInvite` (async). The accept response is the
+/// first time this device learns the owner-side pairing record, so it is
+/// checked against what the friend actually accepted: the owner and scope
+/// grant from the verified invitation, and this device as the approver. A
+/// malicious relay answering with a different owner, a substituted approver key
+/// or altered names must never be accepted.
+func validateAcceptResponse(_ pairing: Pairing, invitation: Invitation, acceptance: PairingAcceptance,
+                            signerIdentity: DeviceIdentity) throws {
+    guard pairing.owner == invitation.payload.owner, pairing.approver == signerIdentity,
+          pairing.approver == acceptance.approver,
+          pairing.pairingID == Pairing.derivedID(inviteID: invitation.payload.inviteID, approverIdentityID: signerIdentity.identityID),
+          pairing.ownerDisplayName == invitation.payload.ownerDisplayName,
+          pairing.approverDisplayName == acceptance.approverDisplayName,
           pairing.state == .active else {
-        throw CompanionError.malformed("relay confirm response does not match the confirmed acceptance")
+        throw CompanionError.malformed("relay accept response does not match the accepted invitation")
     }
     try pairing.validate()
+}
+
+/// What `createInvite` returns: the owner-signed invitation plus the one-time
+/// token, which exists only here (the relay is given only its hash).
+public struct IssuedInvite: Sendable {
+    public let invitation: Invitation
+    public let token: String
+    public var shareLink: String { InviteToken.shareLink(token: token) }
+    public init(invitation: Invitation, token: String) { self.invitation = invitation; self.token = token }
 }
 
 public struct CompanionClient: Sendable {
@@ -768,32 +876,47 @@ public struct CompanionClient: Sendable {
         return try transport.submit(operation).validated(for: operation).result
     }
 
-    public func createInvite(inviteID: String, validFor: TimeInterval, now: Date, nonce: Data? = nil) throws -> Invitation {
+    /// Creates, signs and submits a pairing-v3 invite. The returned `token` is the
+    /// only copy: the relay and the signed payload carry just its hash.
+    public func createInvite(inviteID: String, validFor: TimeInterval, now: Date, nonce: Data? = nil,
+                             token: String? = nil, ownerDisplayName: String? = nil,
+                             grantedScopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) throws -> IssuedInvite {
         guard signer.identity.role == .owner, validFor > 0, validFor <= CompanionLimits.maxInviteLifetime else { throw CompanionError.unauthorized }
+        let token = token ?? InviteToken.generate()
+        guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
         let payload = try InvitePayload(inviteID: inviteID, owner: signer.identity, issuedAt: now,
-                                        expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? Data((0..<24).map { _ in UInt8.random(in: 0...255) }))
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite", fields: payload.signingFields())
+                                        expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? randomNonce(),
+                                        tokenHash: InviteToken.hash(token), ownerDisplayName: ownerDisplayName,
+                                        grantedScopes: grantedScopes)
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: signature)
         _ = try submit("invite", invitation)
+        return IssuedInvite(invitation: invitation, token: token)
+    }
+
+    /// Resolves a link token to its owner-signed invitation and verifies it
+    /// (owner signature, still live, hash binds this exact token).
+    public func lookupInvite(token: String) throws -> Invitation {
+        guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
+        let invitation = try transport.lookupInvite(token: token)
+        try invitation.validate(at: now(), matchingToken: token)
         return invitation
     }
 
-    public func accept(_ invitation: Invitation, acceptanceID: String, now: Date) throws -> PairingAcceptance {
+    /// Accepting is the friend's consent to the granted scopes: one signed
+    /// operation that yields the active pairing (and active consent). The
+    /// response is checked against the invitation before it is returned.
+    public func acceptInvite(_ invitation: Invitation, token: String, approverDisplayName: String? = nil,
+                             acceptanceID: String, now: Date) throws -> Pairing {
         guard signer.identity.role == .trustedApprover else { throw CompanionError.unauthorized }
-        try invitation.validate(at: now)
-        let acceptance = try PairingAcceptance(acceptanceID: acceptanceID, invite: invitation.payload, approver: signer.identity, issuedAt: now)
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).acceptance", fields: acceptance.signingFields())
-        let signed = SignedAcceptance(acceptance: acceptance, signature: signature)
-        _ = try submit("accept", signed)
-        return acceptance
-    }
-
-    public func confirm(_ acceptance: PairingAcceptance, verificationCode: String, now: Date) throws -> Pairing {
-        guard signer.identity == acceptance.owner, signer.identity.role == .owner else { throw CompanionError.unauthorized }
-        let confirmation = try PairingConfirmation(acceptance: acceptance, owner: signer.identity, verificationCode: verificationCode, issuedAt: now)
-        let signature = try signer.sign(domain: "\(CompanionCanonical.version).confirmation", fields: confirmation.signingFields())
-        guard case let .pairing(pairing) = try submit("confirm", SignedConfirmation(confirmation: confirmation, signature: signature)) else { throw CompanionError.malformed("relay response") }
-        try validateConfirmResponse(pairing, acceptance: acceptance, signerIdentity: signer.identity)
+        try invitation.validate(at: now, matchingToken: token)
+        let acceptance = try PairingAcceptance(acceptanceID: acceptanceID, invite: invitation.payload, token: token,
+                                               approver: signer.identity, approverDisplayName: approverDisplayName, issuedAt: now)
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).acceptance.v3", fields: acceptance.signingFields())
+        guard case let .pairing(pairing) = try submit("accept", SignedAcceptance(acceptance: acceptance, signature: signature)) else {
+            throw CompanionError.malformed("relay response")
+        }
+        try validateAcceptResponse(pairing, invitation: invitation, acceptance: acceptance, signerIdentity: signer.identity)
         return pairing
     }
 
@@ -864,7 +987,7 @@ public struct CompanionClient: Sendable {
         let createdAt = now()
         let request = try TrustedRequest(requestID: requestID, owner: signer.identity,
                                          targetBindings: bindings, session: session,
-                                         message: message, createdAt: createdAt, expiresAt: createdAt.addingTimeInterval(validFor))
+                                         message: message, createdAt: createdAt, expiresAt: min(createdAt.addingTimeInterval(validFor), session.endsAt))
         guard case let .request(value) = try submit("request", request) else { throw CompanionError.malformed("relay response") }
         return value
     }
@@ -980,15 +1103,10 @@ public struct SignedAcceptance: Codable, Hashable, Sendable {
         try acceptance.validate()
         guard signature.count == 64,
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: acceptance.approver.publicKey),
-              key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).acceptance", fields: acceptance.signingFields())) else {
+              key.isValidSignature(signature, for: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).acceptance.v3", fields: acceptance.signingFields())) else {
             throw CompanionError.invalidSignature
         }
     }
-}
-public struct SignedConfirmation: Codable, Sendable {
-    public let confirmation: PairingConfirmation
-    public let signature: Data
-    public init(confirmation: PairingConfirmation, signature: Data) { self.confirmation = confirmation; self.signature = signature }
 }
 public struct ApprovalUse: Codable, Sendable {
     public let approval: Approval
@@ -1054,8 +1172,8 @@ public extension RelaySnapshot {
             currentSession,
             try encodedList(invitations),
             try encodedSet(usedInviteIDs),
-            try encodedList(pendingAcceptances),
             try encodedList(pairings),
+            try encodedList(joinAcceptances),
             try encodedList(sessions),
             try encodedList(requests),
             try encodedList(approvals),

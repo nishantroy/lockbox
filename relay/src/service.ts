@@ -31,11 +31,12 @@ import {
   decodeTrustedRequest,
   decodeApproval,
   decodeApprovalVerification,
+  type Invitation,
   type SignedAcceptance,
   MAX_RAW_BODY_BYTES
 } from "./protocol.js";
 import { relayError, RelayError } from "./errors.js";
-import { emptyLedger, normalizePendingAcceptance, type Ledger } from "./ledger.js";
+import { emptyLedger, type Ledger } from "./ledger.js";
 import { authorize, reduce, chargeRateLimit } from "./reducer.js";
 import {
   getPool,
@@ -53,11 +54,16 @@ import {
   GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
   GLOBAL_RATE_LIMIT_MAX,
   AmbiguousOwnerError,
+  InviteTokenConflictError,
+  recordInviteToken,
+  deleteInviteToken,
+  findInviteToken,
   OwnerRowConflictError,
   PairingRoutingConflictError,
   type StoredOperation
 } from "./db.js";
-import { canonicalFramed, digest, COMPANION_VERSION } from "./canonical.js";
+import { canonicalFramed, digest, COMPANION_VERSION, inviteTokenHash, isWellFormedInviteToken } from "./canonical.js";
+import { timingSafeEqual } from "node:crypto";
 
 /** 5-minute freshness window for an inbox query that supplies `issuedAt` (see `decodeInboxQuery`). */
 const INBOX_FRESHNESS_WINDOW_SECONDS = 5 * 60;
@@ -263,6 +269,21 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
         throw error;
       }
     }
+    if (operation.kind === "invite" && reduced.result.kind === "invitation") {
+      // Pairing v3: index the invite by its token hash in the same transaction.
+      const payload = reduced.result.value.payload;
+      try {
+        await recordInviteToken(client, payload.tokenHash, ownerRow.ownerID, payload.inviteID, payload.expiresAt);
+      } catch (error) {
+        if (error instanceof InviteTokenConflictError) throw relayError("replay");
+        throw error;
+      }
+    }
+    if (operation.kind === "accept" && reduced.result.kind === "pairing") {
+      // Pairing v3: the invite is consumed; its token must stop resolving.
+      const consumedInviteID = (JSON.parse(operation.body.toString("utf8")) as { acceptance: { inviteID: string } }).acceptance.inviteID;
+      await deleteInviteToken(client, ownerRow.ownerID, consumedInviteID);
+    }
     if (reduced.result.kind === "verification") {
       // Patch in the committed revision the reducer could not know yet.
       const useID = reduced.result.value.useID;
@@ -365,15 +386,14 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   // `ownerAnchor`, an owner fetch always gets a (possibly empty) array, even
   // before any ledger row exists for them yet.
   let approvals: Approval[] | undefined;
-  // R5 pairing v2 (contract v1.3): same presence rule as `approvals` --
-  // populated only on an owner fetch of their own ledger.
-  let pendingAcceptances: SignedAcceptance[] | undefined;
+  // Pairing v3 (contract v1.4): same presence rule as `approvals`.
+  let acceptances: SignedAcceptance[] | undefined;
   let maxRevision = 0;
   let ownerAnchor: { ownerIdentityID: string; stateRoot: Buffer } | undefined;
 
   if (operation.signer.role === "owner") {
     approvals = [];
-    pendingAcceptances = [];
+    acceptances = [];
     const row = await readOwnerLedger(pool, identityID);
     if (row) {
       maxRevision = row.revision;
@@ -401,26 +421,11 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
           if (effective.status === "approved" || hasRecordedUse) approvals.push(accepted);
         }
       }
-      for (const record of Object.values(row.ledger.pairings)) pairings.push(record.pairing);
-      for (const consent of Object.values(row.ledger.relationshipConsents)) consents.push(consent);
-      // R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a", item 1):
-      // every pending acceptance whose invite still exists, is unconsumed
-      // and has not expired. An entry with no retained signature -- only
-      // possible from a ledger row written before this change (see
-      // `normalizePendingAcceptance`) -- is skipped rather than delivered
-      // unverifiable; the relay must not fabricate a signature, and the
-      // owner device has no use for an acceptance it cannot verify.
-      for (const raw of Object.values(row.ledger.pendingAcceptances)) {
-        const { acceptance, signature } = normalizePendingAcceptance(raw);
-        // P2a review follow-up P2-5: require the full 64-byte signature,
-        // matching the Swift relay's `fetchInbox` filter
-        // (`signed.signature.count == 64`) -- a truncated/corrupt signature
-        // is no more deliverable than a missing one.
-        if (!signature || signature.length !== 64) continue;
-        const invite = row.ledger.invitations[acceptance.inviteID];
-        if (!invite || invite.consumedAt !== null || now >= invite.invitation.payload.expiresAt) continue;
-        pendingAcceptances.push({ acceptance, signature });
+      for (const record of Object.values(row.ledger.pairings)) {
+        pairings.push(record.pairing);
+        if (record.acceptance) acceptances.push(record.acceptance);
       }
+      for (const consent of Object.values(row.ledger.relationshipConsents)) consents.push(consent);
     }
   } else {
     // A pure helper/approver inbox spans every owner they are paired with;
@@ -446,8 +451,8 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
   requests.sort((a, b) => a.createdAt - b.createdAt);
   pairings.sort((a, b) => (a.pairingID < b.pairingID ? -1 : a.pairingID > b.pairingID ? 1 : 0));
   consents.sort((a, b) => (a.relationshipID < b.relationshipID ? -1 : a.relationshipID > b.relationshipID ? 1 : 0));
+  acceptances?.sort((a, b) => (a.acceptance.acceptanceID < b.acceptance.acceptanceID ? -1 : a.acceptance.acceptanceID > b.acceptance.acceptanceID ? 1 : 0));
   approvals?.sort((a, b) => (a.approvalID < b.approvalID ? -1 : a.approvalID > b.approvalID ? 1 : 0));
-  pendingAcceptances?.sort((a, b) => (a.acceptance.acceptanceID < b.acceptance.acceptanceID ? -1 : a.acceptance.acceptanceID > b.acceptance.acceptanceID ? 1 : 0));
   return {
     ownerIdentityID: ownerAnchor?.ownerIdentityID,
     stateRoot: ownerAnchor?.stateRoot,
@@ -456,8 +461,49 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
     pairings,
     consents,
     approvals,
-    pendingAcceptances
+    acceptances
   };
+}
+
+/** Lookups are unauthenticated, so they get their own, tighter budget per client IP than signed operations (GLOBAL_RATE_LIMIT_MAX). */
+export const LOOKUP_RATE_LIMIT_MAX = 20;
+export const LOOKUP_RATE_LIMIT_WINDOW_SECONDS = 60;
+const MAX_LOOKUP_BODY_BYTES = 1_024;
+
+/**
+ * Pairing v3: `POST /v1/invite/lookup {"token": "<22 base64url chars>"}`.
+ * Unauthenticated (the friend has no identity yet) but rate limited per
+ * client IP. Returns the owner-signed invitation while it is unexpired and
+ * unused, and nothing else: an unknown token, an expired invite and a
+ * consumed invite are one indistinguishable `not_found`.
+ *
+ * The token is never stored; the index is keyed by its domain-separated
+ * SHA-256 hash (`inviteTokenHash`), and the hash found is compared again in
+ * constant time against the hash signed inside the owner's invitation.
+ */
+export async function lookupInvite(rawBody: Buffer, now: number = nowSeconds(), clientIP: string | null = null): Promise<Invitation> {
+  if (rawBody.length > MAX_LOOKUP_BODY_BYTES) throw relayError("malformed");
+  const pool = getPool();
+  // Charged before parsing so malformed/guessing traffic is bounded too. With
+  // no resolvable client IP (not expected behind Vercel) all callers share one bucket.
+  const allowed = await chargeGlobalRateLimits(pool, [`lookup-ip:${clientIP ?? "unknown"}`], now, LOOKUP_RATE_LIMIT_WINDOW_SECONDS, LOOKUP_RATE_LIMIT_MAX);
+  if (!allowed) throw relayError("rate_limited");
+  let token: unknown;
+  try {
+    token = (safeJSONParse(rawBody) as { token?: unknown } | null)?.token;
+  } catch (error) {
+    throw error instanceof RelayError ? error : relayError("malformed");
+  }
+  if (!isWellFormedInviteToken(token)) throw relayError("malformed");
+  const tokenHash = inviteTokenHash(token);
+  const row = await findInviteToken(pool, tokenHash);
+  if (!row || row.expiresAt <= now || row.tokenHash.length !== tokenHash.length || !timingSafeEqual(row.tokenHash, tokenHash)) throw relayError("not_found");
+  const ownerRow = await readOwnerLedger(pool, row.ownerID);
+  const record = ownerRow?.ledger.invitations[row.inviteID];
+  if (!record || record.consumedAt !== null || now >= record.invitation.payload.expiresAt) throw relayError("not_found");
+  const signedHash = record.invitation.payload.tokenHash;
+  if (!Buffer.isBuffer(signedHash) || signedHash.length !== tokenHash.length || !timingSafeEqual(signedHash, tokenHash)) throw relayError("not_found");
+  return record.invitation;
 }
 
 /**

@@ -3,7 +3,7 @@
 // with: swift run --package-path CompanionKit CompanionVectorGen <path>.
 //
 // Covers: raw canonical-framing byte layout, Date/Data wire encoding,
-// verification-code derivation, every operation kind's signature (both the
+// invite-token hash derivation, every operation kind's signature (both the
 // enveloped legacy-reference form and the raw form real clients actually
 // send), tampered/cross-domain/wrong-key rejection, and the exact
 // Swift-synthesized `RelayResult`/`RelayResponse`/`InboxResponse` JSON shape.
@@ -15,7 +15,8 @@ import { dirname, join } from "node:path";
 import {
   canonicalBytes,
   deviceIdentityID,
-  pairingVerificationCode,
+  inviteTokenHash,
+  isWellFormedInviteToken,
   secondsToSwiftDate
 } from "../src/canonical.js";
 import { verify as ed25519Verify } from "../src/crypto.js";
@@ -33,7 +34,9 @@ import {
   decodeSignedAcceptance,
   verifySignedAcceptanceSignature,
   encodeSignedAcceptance,
-  decodeSignedConfirmation,
+  decodePairing,
+  encodePairing,
+  encodeInviteLookupResponse,
   decodeConsentMutation,
   decodeActiveSession,
   decodeTrustedRequest,
@@ -79,16 +82,12 @@ describe("identity ID derivation", () => {
   });
 });
 
-describe("pairing verification code derivation", () => {
-  it("matches PairingAcceptance.code(invite:approver:)", () => {
-    const v = vectors.verificationCode;
-    const code = pairingVerificationCode({
-      inviteID: v.inviteID,
-      ownerIdentityID: v.ownerIdentityID,
-      approverIdentityID: v.approverIdentityID,
-      nonce: Buffer.from(v.nonceBase64url.replace(/-/g, "+").replace(/_/g, "/"), "base64")
-    });
-    expect(code).toBe(v.expectedCode);
+describe("invite token hash derivation (pairing v3)", () => {
+  it("matches InviteToken.hash(_:)", () => {
+    const v = vectors.inviteToken;
+    expect(isWellFormedInviteToken(v.token)).toBe(true);
+    expect(v.token).toHaveLength(22);
+    expect(inviteTokenHash(v.token).toString("base64")).toBe(v.expectedHashBase64);
   });
 });
 
@@ -112,14 +111,19 @@ const payloadDecoders: Record<string, (payload: unknown) => void> = {
   invite: (payload) => {
     const invitation = decodeInvitation(payload);
     expect(verifyInvitationSignature(invitation)).toBe(true);
+    // The Swift-signed v3 invite covers the token hash, owner name and granted scopes.
+    expect(invitation.payload.tokenHash.toString("base64")).toBe(inviteTokenHash(vectors.inviteToken.token).toString("base64"));
+    expect(invitation.payload.ownerDisplayName).toBe("Alex");
+    expect(invitation.payload.grantedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
   },
   accept: (payload) => {
     const signed = decodeSignedAcceptance(payload);
     expect(signed.acceptance.acceptanceID.length).toBeGreaterThan(0);
-  },
-  confirm: (payload) => {
-    const signed = decodeSignedConfirmation(payload);
-    expect(signed.confirmation.acceptanceID.length).toBeGreaterThan(0);
+    // The Swift-signed v3 acceptance verifies in TS and carries the token, name and scopes.
+    expect(verifySignedAcceptanceSignature(signed)).toBe(true);
+    expect(signed.acceptance.token).toBe(vectors.inviteToken.token);
+    expect(signed.acceptance.approverDisplayName).toBe("Sam");
+    expect(signed.acceptance.acceptedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
   },
   consent: (payload) => {
     const mutation = decodeConsentMutation(payload);
@@ -246,39 +250,54 @@ describe("InboxResponse wire shape carries approvals (R5 Slice B2a, contract v1.
   });
 });
 
-describe("InboxResponse wire shape carries pendingAcceptances (R5 pairing v2, contract v1.3)", () => {
-  it("an owner inbox sample's pendingAcceptances array decodes and verifies", () => {
-    const parsed = JSON.parse(vectors.inboxResponseWithPendingAcceptanceSample);
-    expect(Array.isArray(parsed.pendingAcceptances)).toBe(true);
-    expect(parsed.pendingAcceptances).toHaveLength(1);
-    const signed = decodeSignedAcceptance(parsed.pendingAcceptances[0]);
+describe("InboxResponse wire shape carries pairings with names and acceptances (pairing v3, contract v1.4)", () => {
+  it("an owner inbox sample's acceptances array decodes and verifies, and its pairing matches", () => {
+    const parsed = JSON.parse(vectors.inboxResponseWithAcceptancesSample);
+    expect(parsed.acceptances).toHaveLength(1);
+    const signed = decodeSignedAcceptance(parsed.acceptances[0]);
     expect(verifySignedAcceptanceSignature(signed)).toBe(true);
     expect(signed.acceptance.acceptanceID).toBe("fixture-acceptance-01");
+    const pairing = decodePairing(parsed.pairings[0]);
+    expect(pairing.ownerDisplayName).toBe("Alex");
+    expect(pairing.approverDisplayName).toBe("Sam");
+    expect(pairing.approver.identityID).toBe(signed.acceptance.approver.identityID);
   });
 
-  it("encodeInboxResponse reproduces the same pendingAcceptances fields and values as the Swift vector", () => {
-    const parsed = JSON.parse(vectors.inboxResponseWithPendingAcceptanceSample);
-    const signed = decodeSignedAcceptance(parsed.pendingAcceptances[0]);
+  it("encodeInboxResponse reproduces the Swift vector's acceptances and pairings field for field", () => {
+    const parsed = JSON.parse(vectors.inboxResponseWithAcceptancesSample);
+    const signed = decodeSignedAcceptance(parsed.acceptances[0]);
+    const pairing = decodePairing(parsed.pairings[0]);
     const request = decodeTrustedRequest(parsed.requests[0]);
     const encoded = encodeInboxResponse({
       ownerIdentityID: parsed.ownerIdentityID,
       stateRoot: undefined,
       revision: parsed.revision,
       requests: [request],
-      pairings: [],
+      pairings: [pairing],
       consents: [],
-      pendingAcceptances: [signed]
-    });
-    const reEncoded = (encoded as any).pendingAcceptances[0];
-    const reDecoded = decodeSignedAcceptance(reEncoded);
-    expect(reDecoded).toEqual(signed);
-    // Also confirm the raw encode matches byte-for-byte field-by-field.
-    expect(reEncoded).toEqual(encodeSignedAcceptance(signed));
+      acceptances: [signed]
+    }) as any;
+    expect(encoded.acceptances[0]).toEqual(parsed.acceptances[0]);
+    expect(decodeSignedAcceptance(encoded.acceptances[0])).toEqual(signed);
+    expect(encoded.pairings[0]).toEqual(parsed.pairings[0]);
   });
 
-  it("a pure helper/approver inbox sample omits the pendingAcceptances key entirely", () => {
+  it("a pure helper/approver inbox sample omits the acceptances key entirely", () => {
     const parsed = JSON.parse(vectors.helperInboxResponseSample);
-    expect(Object.prototype.hasOwnProperty.call(parsed, "pendingAcceptances")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "acceptances")).toBe(false);
+  });
+
+  it("the Swift-encoded pairing result round-trips through TS", () => {
+    const parsed = JSON.parse(vectors.joinedPairingSample);
+    const pairing = decodePairing(parsed.pairing._0);
+    expect(encodePairing(pairing)).toEqual(parsed.pairing._0);
+  });
+
+  it("the Swift-encoded invite lookup response decodes and re-encodes identically", () => {
+    const parsed = JSON.parse(vectors.inviteLookupResponseSample);
+    const invitation = decodeInvitation(parsed.invitation);
+    expect(verifyInvitationSignature(invitation)).toBe(true);
+    expect(encodeInviteLookupResponse(invitation)).toEqual(parsed);
   });
 });
 

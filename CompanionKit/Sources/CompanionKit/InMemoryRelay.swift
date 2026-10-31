@@ -9,7 +9,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     private var owner: DeviceIdentity
     private var invitations: [String: Invitation] = [:]
     private var usedInviteIDs = Set<String>()
-    private var pendingAcceptances: [String: SignedAcceptance] = [:]
+    /// Pairing v3: the friend-signed acceptance that created each pairing, keyed by pairing ID.
+    private var joinAcceptances: [String: SignedAcceptance] = [:]
     private var pairings: [String: Pairing] = [:]
     private var sessions: [String: ActiveSession] = [:]
     private var sessionHistory: [String: ActiveSession] = [:]
@@ -56,7 +57,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         try self.init(owner: snapshot.owner, now: snapshot.currentTime)
         self.invitations = Dictionary(uniqueKeysWithValues: snapshot.invitations.map { ($0.payload.inviteID, $0) })
         self.usedInviteIDs = snapshot.usedInviteIDs
-        self.pendingAcceptances = Dictionary(uniqueKeysWithValues: snapshot.pendingAcceptances.map { ($0.acceptance.acceptanceID, $0) })
+        self.joinAcceptances = Dictionary(uniqueKeysWithValues: snapshot.joinAcceptances.map {
+            (Pairing.derivedID(inviteID: $0.acceptance.inviteID, approverIdentityID: $0.acceptance.approver.identityID), $0)
+        })
         self.pairings = Dictionary(uniqueKeysWithValues: snapshot.pairings.map { ($0.pairingID, $0) })
         self.sessionHistory = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.sessionID, $0) })
         if let currentSessionID = snapshot.currentSessionID,
@@ -106,7 +109,7 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                                          requireRetainedRequestBinding: Bool = false) throws {
         guard snapshot.revision <= UInt64(CompanionLimits.maxSnapshotRecords),
               snapshot.invitations.count <= CompanionLimits.maxSnapshotRecords,
-              snapshot.pendingAcceptances.count <= CompanionLimits.maxSnapshotRecords,
+              snapshot.joinAcceptances.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.pairings.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.sessions.count <= CompanionLimits.maxSnapshotRecords,
               snapshot.requests.count <= CompanionLimits.maxSnapshotRecords,
@@ -181,27 +184,6 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard invitations[inviteID] != nil else { throw CompanionError.malformed("unknown used invite") }
         }
 
-        var acceptances: [String: PairingAcceptance] = [:]
-        for signedAcceptance in snapshot.pendingAcceptances {
-            let acceptance = signedAcceptance.acceptance
-            try acceptance.validate()
-            // The signature is restored and verified here too (not just at
-            // the original "accept" submission), matching every other
-            // retained-and-reverified signed value in this graph
-            // (invitations, pairing replacements, operation records).
-            try signedAcceptance.validateSignature()
-            guard acceptance.owner == snapshot.owner,
-                  !snapshot.usedInviteIDs.contains(acceptance.inviteID),
-                  let invitation = invitations[acceptance.inviteID], invitation.payload.owner == snapshot.owner,
-                  acceptance.issuedAt >= invitation.payload.issuedAt.addingTimeInterval(-60),
-                  acceptance.issuedAt < invitation.payload.expiresAt,
-                  acceptance.verificationCode == PairingAcceptance.code(invite: invitation.payload, approver: acceptance.approver),
-                  acceptances[acceptance.acceptanceID] == nil else {
-                throw CompanionError.malformed("invalid pending acceptance graph")
-            }
-            acceptances[acceptance.acceptanceID] = acceptance
-        }
-
         var pairings: [String: Pairing] = [:]
         for pairing in snapshot.pairings {
             try pairing.validate()
@@ -209,6 +191,24 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                 throw CompanionError.malformed("invalid pairing ownership")
             }
             pairings[pairing.pairingID] = pairing
+        }
+
+        var joinedPairingIDs = Set<String>()
+        for signedAcceptance in snapshot.joinAcceptances {
+            let acceptance = signedAcceptance.acceptance
+            try acceptance.validate()
+            // The friend's signature is re-verified on restore, like every other retained signed value.
+            try signedAcceptance.validateSignature()
+            let pairingID = Pairing.derivedID(inviteID: acceptance.inviteID, approverIdentityID: acceptance.approver.identityID)
+            guard acceptance.owner == snapshot.owner,
+                  snapshot.usedInviteIDs.contains(acceptance.inviteID),
+                  let invitation = invitations[acceptance.inviteID], invitation.payload.owner == snapshot.owner,
+                  InviteToken.matches(acceptance.token, hash: invitation.payload.tokenHash),
+                  acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invitation.payload.grantedScopes,
+                  let pairing = pairings[pairingID], pairing.approver == acceptance.approver,
+                  joinedPairingIDs.insert(pairingID).inserted else {
+                throw CompanionError.malformed("invalid join acceptance graph")
+            }
         }
 
         var sessions: [String: ActiveSession] = [:]
@@ -333,8 +333,8 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
                       currentSessionID: sessions[owner.identityID]?.sessionID,
                       invitations: invitations.values.sorted { $0.payload.inviteID < $1.payload.inviteID },
                       usedInviteIDs: usedInviteIDs,
-                      pendingAcceptances: pendingAcceptances.values.sorted { $0.acceptance.acceptanceID < $1.acceptance.acceptanceID },
                       pairings: pairings.values.sorted { $0.pairingID < $1.pairingID },
+                      joinAcceptances: joinAcceptances.values.sorted { $0.acceptance.acceptanceID < $1.acceptance.acceptanceID },
                       sessions: sessionHistory.values.sorted { $0.sessionID < $1.sessionID },
                       requests: requests.values.sorted { $0.requestID < $1.requestID },
                       approvals: approvals.values.sorted { $0.approvalID < $1.approvalID },
@@ -362,37 +362,33 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
         // identity match on `owner` is that fetch), mirroring the TS relay's
         // `fetchInboxOperation`. `nil` on a helper/approver fetch.
         let approvalsOut: [Approval]?
-        // R5 pairing v2 (docs/r5-pairing-v2-plan.md's "Slice P2a", item 1):
-        // `pendingAcceptances` is populated only on an owner fetch of their
-        // own ledger, mirroring `approvals` above and the TS relay's
-        // `fetchInboxOperation`. It lists every pending acceptance whose
-        // invite still exists, is unconsumed and has not expired; an entry
-        // that somehow lacks a signature (never produced by this relay's own
-        // "accept" case, but a defensive match for the TS relay's
-        // backward-compatibility note about pre-existing unsigned ledger
-        // entries) is skipped rather than surfaced unverifiable.
-        let pendingAcceptancesOut: [SignedAcceptance]?
-        if operation.signer == owner {
+        // Pairing v3: `acceptances` (the friend-signed acceptance behind each
+        // pairing) is populated only on an owner fetch of their own ledger,
+        // mirroring `approvals` above and the TS relay's `fetchInboxOperation`.
+        // Pairings and consents are included for both sides: everything for
+        // the owner, only the viewer's own for an approver.
+        let acceptancesOut: [SignedAcceptance]?
+        let isOwnerFetch = operation.signer == owner
+        if isOwnerFetch {
             approvalsOut = sortedRequests.compactMap { request -> Approval? in
                 guard let accepted = acceptedApproval(forRequestID: request.requestID) else { return nil }
                 let hasRecordedUse = usedApprovalIDs.contains(accepted.approvalID)
                 guard request.status == .approved || hasRecordedUse else { return nil }
                 return accepted
             }.sorted { $0.approvalID < $1.approvalID }
-            pendingAcceptancesOut = pendingAcceptances.values.filter { signed in
-                guard signed.signature.count == 64,
-                      let invitation = invitations[signed.acceptance.inviteID],
-                      !usedInviteIDs.contains(signed.acceptance.inviteID),
-                      currentTime < invitation.payload.expiresAt else { return false }
-                return true
-            }.sorted { $0.acceptance.acceptanceID < $1.acceptance.acceptanceID }
+            acceptancesOut = joinAcceptances.values.sorted { $0.acceptance.acceptanceID < $1.acceptance.acceptanceID }
         } else {
             approvalsOut = nil
-            pendingAcceptancesOut = nil
+            acceptancesOut = nil
         }
+        let visiblePairings = pairings.values.filter { isOwnerFetch || $0.approver.identityID == query.identityID }
+            .sorted { $0.pairingID < $1.pairingID }
+        let visibleIDs = Set(visiblePairings.map(\.pairingID))
+        let visibleConsents = relationshipConsents.values.filter { visibleIDs.contains($0.pairingID) }
+            .sorted { $0.relationshipID < $1.relationshipID }
         return try InboxResponse(ownerIdentityID: query.identityID, revision: revision,
-                                 requests: sortedRequests, approvals: approvalsOut,
-                                 pendingAcceptances: pendingAcceptancesOut)
+                                 requests: sortedRequests, pairings: visiblePairings, consents: visibleConsents,
+                                 approvals: approvalsOut, acceptances: acceptancesOut)
     }
 
     /// The relay-stored approval that caused `requestID` to become approved,
@@ -403,6 +399,19 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
     /// later approval for that request (approve or decline).
     private func acceptedApproval(forRequestID requestID: String) -> Approval? {
         approvals.values.first { $0.requestID == requestID && $0.decision == .approved }
+    }
+
+    /// Pairing v3: the unauthenticated token lookup. Returns the owner-signed
+    /// invitation while it is unexpired and unused; unknown, expired and used
+    /// are one indistinguishable `notFound`. (Rate limiting is the HTTP relay's
+    /// job; this process-local reference relay has no clients to throttle.)
+    public func lookupInvite(token: String) throws -> Invitation {
+        lock.lock(); defer { lock.unlock() }
+        guard InviteToken.isWellFormed(token) else { throw CompanionError.malformed("invalid invite token") }
+        guard let invitation = invitations.values.first(where: { InviteToken.matches(token, hash: $0.payload.tokenHash) }),
+              !usedInviteIDs.contains(invitation.payload.inviteID),
+              currentTime < invitation.payload.expiresAt else { throw CompanionError.notFound }
+        return invitation
     }
 
     public func consent(relationshipID: String) throws -> RelationshipConsent {
@@ -482,46 +491,52 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard operation.signer == owner, invitation.payload.owner == owner else { throw CompanionError.unauthorized }
             try invitation.validate(at: currentTime)
             guard invitations[invitation.payload.inviteID] == nil, !usedInviteIDs.contains(invitation.payload.inviteID) else { throw CompanionError.replay }
+            // A token hash identifies exactly one invite (the lookup key).
+            guard !invitations.values.contains(where: { $0.payload.tokenHash == invitation.payload.tokenHash }) else { throw CompanionError.replay }
             invitations[invitation.payload.inviteID] = invitation
             return .invitation(invitation)
 
         case "accept":
+            // Pairing v3: one friend-signed operation consumes the invite and
+            // creates the active pairing and both-sided consent together.
             let signed = try decode(SignedAcceptance.self, operation.body)
-            guard operation.signer == signed.acceptance.approver else { throw CompanionError.unauthorized }
-            try signed.acceptance.validate()
-            guard signed.acceptance.owner == owner,
-                  let invitation = invitations[signed.acceptance.inviteID],
-                  invitation.payload.owner == signed.acceptance.owner,
-                  !usedInviteIDs.contains(signed.acceptance.inviteID), currentTime < invitation.payload.expiresAt,
-                  signed.acceptance.issuedAt <= currentTime.addingTimeInterval(60) else { throw CompanionError.unauthorized }
-            guard verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance", fields: signed.acceptance.signingFields(), key: signed.acceptance.approver.publicKey) else { throw CompanionError.invalidSignature }
-            guard pendingAcceptances[signed.acceptance.acceptanceID] == nil else { throw CompanionError.replay }
-            pendingAcceptances[signed.acceptance.acceptanceID] = signed
-            return .acceptance(signed.acceptance)
-
-        case "confirm":
-            let signed = try decode(SignedConfirmation.self, operation.body)
-            guard operation.signer == owner, signed.confirmation.owner == owner else { throw CompanionError.unauthorized }
-            try requireTimestamp(signed.confirmation.issuedAt, name: "confirmation time")
-            // The invite is a one-use capability at confirmation time, not at
-            // acceptance time. Check and consume it while holding the relay
-            // lock, and invalidate every competing pending acceptance below.
-            guard !usedInviteIDs.contains(signed.confirmation.inviteID) else { throw CompanionError.replay }
-            guard let acceptance = pendingAcceptances[signed.confirmation.acceptanceID]?.acceptance,
-                  acceptance.inviteID == signed.confirmation.inviteID,
-                  acceptance.approver.identityID == signed.confirmation.approverIdentityID,
-                  let invitation = invitations[acceptance.inviteID], currentTime < invitation.payload.expiresAt,
-                  signed.confirmation.issuedAt <= currentTime.addingTimeInterval(60) else { throw CompanionError.expired }
-            guard verify(signed.signature, domain: "\(CompanionCanonical.version).confirmation", fields: signed.confirmation.signingFields(), key: owner.publicKey) else { throw CompanionError.invalidSignature }
-            guard acceptance.verificationCode == signed.confirmation.verificationCode,
-                  PairingAcceptance.code(invite: invitation.payload, approver: acceptance.approver) == signed.confirmation.verificationCode else { throw CompanionError.wrongVerificationCode }
+            let acceptance = signed.acceptance
+            guard operation.signer == acceptance.approver else { throw CompanionError.unauthorized }
+            try acceptance.validate()
+            guard acceptance.owner == owner else { throw CompanionError.unauthorized }
+            // Unknown invite, wrong token and a bad signature are one indistinguishable failure.
+            guard let invitation = invitations[acceptance.inviteID], invitation.payload.owner == owner,
+                  InviteToken.matches(acceptance.token, hash: invitation.payload.tokenHash),
+                  verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance.v3",
+                         fields: acceptance.signingFields(), key: acceptance.approver.publicKey) else {
+                throw CompanionError.unauthorized
+            }
+            guard !usedInviteIDs.contains(acceptance.inviteID) else { throw CompanionError.replay }
+            guard currentTime < invitation.payload.expiresAt,
+                  acceptance.issuedAt <= currentTime.addingTimeInterval(60),
+                  acceptance.issuedAt >= invitation.payload.issuedAt.addingTimeInterval(-60),
+                  acceptance.issuedAt < invitation.payload.expiresAt else { throw CompanionError.expired }
+            guard acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invitation.payload.grantedScopes else {
+                throw CompanionError.consentRequired
+            }
+            let pairingID = Pairing.derivedID(inviteID: acceptance.inviteID, approverIdentityID: acceptance.approver.identityID)
+            guard pairings[pairingID] == nil else { throw CompanionError.replay }
+            let pairing = try Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver, epoch: 1,
+                                      createdAt: currentTime, state: .active,
+                                      ownerDisplayName: invitation.payload.ownerDisplayName,
+                                      approverDisplayName: acceptance.approverDisplayName)
+            // Equivalent to the owner-grant + approver-accept pair of mutations,
+            // applied atomically: generation 2, both sides active.
+            let consent = try RelationshipConsent(relationshipID: pairingID, pairingID: pairingID, pairEpoch: pairing.epoch,
+                                                  owner: owner, approver: acceptance.approver,
+                                                  ownerScopes: invitation.payload.grantedScopes,
+                                                  approverScopes: acceptance.acceptedScopes,
+                                                  ownerState: .active, approverState: .active,
+                                                  updatedAt: currentTime, generation: 2)
             usedInviteIDs.insert(acceptance.inviteID)
-            // Other receivers may have accepted the same link before the
-            // owner confirmation arrived. None may be confirmed later.
-            pendingAcceptances = pendingAcceptances.filter { $0.value.acceptance.inviteID != acceptance.inviteID }
-            let pairingID = base64URL(Data(SHA256.hash(data: CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).pairing", fields: [acceptance.inviteID, acceptance.approver.identityID])))).prefix(32).description
-            let pairing = try Pairing(pairingID: pairingID, owner: owner, approver: acceptance.approver, epoch: 1, createdAt: currentTime, state: .active)
             pairings[pairingID] = pairing
+            relationshipConsents[pairingID] = consent
+            joinAcceptances[pairingID] = signed
             return .pairing(pairing)
 
         case "consent":
@@ -742,7 +757,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             let activated = try Pairing(pairingID: replacement.replacementPairingID, owner: owner,
                                     approver: replacement.replacement,
                                     epoch: replacement.replacementEpoch,
-                                    createdAt: currentTime, state: .active)
+                                    createdAt: currentTime, state: .active,
+                                    ownerDisplayName: previous.ownerDisplayName,
+                                    approverDisplayName: previous.approverDisplayName)
             // Both writes are protected by the relay lock and happen before
             // the durable receipt is recorded and acknowledged.
             pairings[previous.pairingID] = revoked
