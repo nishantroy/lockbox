@@ -371,3 +371,63 @@ First run of the P3b/P3c app tests: unit 130 tests (1 failure), UI 4 tests (1 fa
 ## Slice P3d: UX review fixes (plan, 2026-10-31)
 
 Input: [UX review 2026-10-31](reviews/2026-10-31-ux-pairing-v3.md). The owner approved fixing everything except P2-5 (the app-wide navigation band, its own slice later) and P3-2 (the Prototype card). One Sonnet builder. It owns `PhoneLockbox/**`, `PhoneLockboxTests/**` and `PhoneLockboxUITests/**`, and `project.yml` only if a new file needs it. No CompanionKit or relay change is expected; if one becomes necessary, the builder stops and reports instead. No simulator runs; the parent runs the suites before push. Gates: Opus code review, which also covers the parent's 20397f9 fixes; then the pre-push suites with new screenshots; then a UX re-check of those screenshots.
+
+### P3d build results
+
+Builder model: Claude Sonnet (`claude-sonnet-5-5`), branch `p3d-ux` from a671813. No simulator was booted; no `xcodebuild test` was run. The new unit and UI tests are therefore compile-checked only (see Validation).
+
+**Items**
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| P1-1 Friend accepted notice | Done | `AcceptedNotice` + `acceptedNotices` on the coordinator; seen IDs persisted under `acceptedSeen.v1`; scrolled to like the joined notice. Pairings that exist when the key is first created are marked seen, so an upgrade shows no notice for old pairings. |
+| P1-2 Waiting for you | Done | `waitingItems(coordinator:)` / `historyItems(coordinator:)`. Friend: pending request, not yet decided. Owner: own approved request while "End lock now" shows (gate on) or is finishing. Waiting rows are removed from the Inbox, and the Inbox card is hidden when it would only be empty. Scrolls into view when a new item arrives. |
+| P1-3 Name in profile | Done | One `displayName` (`displayName.v1`); owner name migrated first, then approver name, old keys removed. Settings "Your name" card. Inline field only when no name is set; Create/Accept saves it. `showsAcceptInviteFirst` is now `pendingInvite == nil && people.isEmpty` (or a link is open). |
+| P2-1 Card order | Done | Incoming, notices, Waiting, Ask to end early (only while locked), people lists, re-invite hint, reset card, [Got an invite link? first on first run], Invite, [Got an invite link?], Inbox, notices. Ask to end early is no longer shown when not locked. |
+| P2-2 Text | Done | Intro folded into the invite card for first run (shown while no one is paired). |
+| P2-3 Create while a link is live | Done | Big Create hidden while a link is live; "Make a new link" plain button. `inviteSomeone.inviteLinkText` is now on the "The link works once, for one hour." line, with the link as its DEBUG accessibility value. |
+| P2-4 "Relay" jargon | Done | All user-facing "relay" copy replaced (see strings). |
+| P2-5 | Deferred by owner | |
+| P2-6 Accept / Not now and Approve / Decline at large text | Done | `AdaptiveButtonRow` (`ViewThatFits` HStack, then VStack). |
+| P2-7 Hint copy | Done | |
+| P3-1 Copied transition | Done | `.contentTransition(.symbolEffect(.replace))`, `.animation(.snappy)`, VoiceOver label "Link copied". |
+| P3-2 | Deferred by owner | |
+| P3-3 PasteButton | Done, with deviation | `PasteButton` labelled for VoiceOver "Paste invite link"; the system draws its own visible title ("Paste"). Compact single row once the user has any person. The old text field and Open button are removed outright: grep showed no UI or unit test used `acceptInvite.pastedInviteField` or `acceptInvite.openButton`, so no DEBUG path was kept. |
+| P3-4 Inbox empty | Done | |
+| P3-5 Corrupt store | Done | Create is hidden (not disabled) while corrupt; the "Reset saved invites first" hint is gone; consequences remain in the dialog. |
+| P3-6 Icon | Done | `exclamationmark.circle` for the failed-invite message. |
+| P3-7 Storage copy | Done | |
+| P3-8 Badges | Done | `CompanionCoordinator.statusBadgeTitle`. |
+| P3-9 Screenshots | Added | `03b-people-bottom-scrolled`, `05a-friend-accepted-notice`; `06-friend-sees-request` now also asserts the Waiting card. |
+
+**New or changed user-facing strings**
+
+- Notice (friend): "You're now a trusted person for ‹Owner›" / "‹Owner› can ask you to approve ending a lock early. You'll see requests here." Dismiss button label "Dismiss".
+- Waiting card heading: "Waiting for you".
+- Name: inline field placeholder "Your name"; footnotes "People you invite will see this name. You can change it in Settings." and "‹Owner› will see this name. You can change it in Settings."; Settings card "Your name", footer "Trusted people see this name on invites and requests.", button "Save name", invalid hint "Use 40 characters or fewer, with no special characters.". Removed: "They'll see this name on your invite.", "Invites are sent as …", "Edit", "Cancel", "‹Owner› will see this name."
+- Errors: "Add your name so they know the invite is from you." / "Add your name so ‹Owner› knows it's you."
+- Invite card first run: title "Set up a trusted person"; body "Send a link to someone you trust. Once they accept, they can approve ending a lock early, only when you ask. Your apps and usage are never shared."; "The link works once, for one hour." (only while a link is live). Otherwise heading "Invite a trusted person". Buttons: "Create invite link", "Create a new invite" (expired), "Make a new link", "Share invite link", "Creating…". Removed: "Invite link ready", "Create an invite to share", the long explanation and the "When they tap Accept…" line, "Reset saved invites first…".
+- Got an invite link?: "Tapping the link opens it here. If it didn't, paste it." plus the system Paste button (VoiceOver "Paste invite link", hint "Opens the invite link on your clipboard").
+- Copy button VoiceOver label while copied: "Link copied" (visible text unchanged, "Copied").
+- Hint: "None of your trusted people can be asked right now. Their status is shown below; you can send a new invite from there."
+- Inbox: "Nothing here yet. Requests appear here automatically."; badges "Waiting", "Approved", "Declined", "Cancelled", "Expired".
+- Corrupt store: "Saved invites on this phone are damaged. Reset them to create new invites."
+- Storage: "Phone Lockbox couldn't use its storage, so nothing was sent. Quit and reopen the app, then try again."
+- Connection and server: "Couldn't connect. Check your internet connection and try again." / "...Check your internet connection, then open the link again." / "Couldn't connect. Pull down to finish." / "Got a response this version can't read. Try again later." / "That didn't go through. Try again." Integrity, rollback, verification, pairing/consent mismatch messages now say "the server".
+
+**Accessibility identifiers**
+
+- Added: `acceptedNotice.text`, `acceptedNotice.dismissButton`, `acceptInvite.pasteButton`, `settings.nameField`, `settings.saveNameButton`.
+- Removed: `inviteSomeone.saveNameButton`, `inviteSomeone.editNameButton`, `inviteSomeone.nameLabel`, `inviteSomeone.resetFirstHint`, `acceptInvite.pastedInviteField`, `acceptInvite.openButton`.
+- Changed meaning: `inviteSomeone.inviteLinkText` (now the "works once" line, same accessibility value); `inviteSomeone.createInviteButton` (also used by "Make a new link" while a link is live); `inviteSomeone.nameField` and `incomingInvite.nameField` appear only while no name is saved. `joinedNotice.*`, `inviteSomeone.copyLinkButton`, `incomingInvite.acceptButton` unchanged. UI test change: the copy button label is now "Link copied".
+
+**Tests added or changed (unit)**: name migration (owner preferred, approver fallback, unusable owner name, old keys removed); one name for invites and acceptances; `showsAcceptInviteFirst` no longer depends on the name; accepted-notice lifecycle (appears after Accept, survives relaunch, dismiss persists, no notice for pre-existing pairings); Waiting/history selection (gate off and on); status badge mapping; error copy mapping (no "relay" in any message; exact new strings). Existing assertions updated for the new copy and `setDisplayName`.
+
+**Validation (all run in this worktree, cache under `.build-cache/phone-lockbox/agent-a86690d859c1fa169`)**
+
+- `swift test --package-path CompanionKit --scratch-path $C/ck`: 161 tests, 0 failures.
+- Root `swift test --scratch-path $C/root`: 177 tests, 0 failures.
+- `xcodebuild build-for-testing` for schemes `PhoneLockbox` and `PhoneLockboxUITests` (generic iOS Simulator, `CODE_SIGNING_ALLOWED=NO`): both succeeded.
+- `xcodebuild build -configuration Release` (generic iOS Simulator): succeeded; the only new debug seam (`setInboxItemsForTesting`) sits inside the existing `#if DEBUG` block.
+- `git diff --check`: clean.
+- NOT run: the app unit suite and the UI suite (no simulators, per the owner rule). The new tests have not been executed.
