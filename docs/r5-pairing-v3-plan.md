@@ -198,7 +198,7 @@ Removed: `Invitation.shareLink`/`fromShareLink`, `AsyncCompanionClient.accept`/`
 
 ## P3b build results (2026-10-31)
 
-Built by a Claude **Sonnet** subagent (model `claude-sonnet-5-5`), branch `p3b-app` from `r5-relay` at `1e3e508`. Not yet independently reviewed (Opus code review and separate UX/design-polish review are the next gates).
+Built by a Claude **Sonnet** subagent (model `claude-sonnet-5-5`), branch `p3b-app` from `r5-relay` at `1e3e508`. Reviewed by Claude Opus (code review, then re-review of `05fc378`: pass with P2s, now in P3c). The UX/design-polish review runs on the pre-push suite screenshots.
 
 ### Files changed
 `PhoneLockbox/Companion/CompanionCoordinator.swift` (rewritten invite/accept/trust/refresh paths), `PhoneLockbox/Companion/IssuedInviteStore.swift` (new), `PhoneLockbox/Companion/CompanionPrototype.swift`, `PhoneLockbox/Views/PeopleView.swift`, `PhoneLockbox/ContentView.swift` (comment only), `PhoneLockboxTests/CompanionPairingV3Tests.swift` (new; replaces deleted `CompanionPairingV2Tests.swift`), `CompanionLocalRelayFlowTests.swift`, `FriendReleaseWiringTests.swift`, `PhoneLockboxUITests/CompanionPairingUITests.swift` (rewritten), regenerated `PhoneLockbox.xcodeproj/project.pbxproj`. `CompanionKit/**`, `relay/**` untouched; `project.yml` untouched (sources are directory globs).
@@ -257,3 +257,38 @@ Follow-ups from this QA (UX/bug batch, not yet built):
 3. Opening an invite link scrolls to partway down the Accept card, cutting off its heading. Scroll to the top of the card.
 4. The owner's phone kept offering an expired invite's link. Show it as expired, with a one-tap new invite.
 5. On a fresh install, the friend first sees owner-setup copy, and "Got an invite link?" is near the bottom.
+
+## Slice P3c: build-22 QA follow-ups (plan, 2026-10-31)
+
+Two Sonnet builders in parallel, in isolated worktrees from `r5-relay` at the commit that adds this section. File ownership does not overlap. Neither boots a simulator or runs `xcodebuild test`.
+
+### P3c-app (builder A)
+Owns `PhoneLockbox/**`, `PhoneLockboxTests/**`, `PhoneLockboxUITests/**`, `CompanionKit/Sources/CompanionKit/TrustMerge.swift` and its tests.
+1. **Copy link.** Drop `.localOnly` (keep the one-hour expiry) so Universal Clipboard works. After a tap, the button shows "Copied" with a checkmark for about 2 s, plus a light haptic and an accessibility announcement.
+2. **Accurate errors.** Local failures (App Group unavailable, identity or Keychain storage) must not show "Couldn't reach the relay". Use a calm message that says what happened and what to do. Only transport errors say the relay is unreachable.
+3. **Opening an invite** scrolls People so the incoming-invite card's heading is visible at the top.
+4. **An expired pending invite** is shown as expired ("This link expired. Create a new one."), with the create action available. It stops fast polling and is no longer offered for share or copy.
+5. **Friend first-run.** When there is an incoming invite, or no owner setup has happened, "Got an invite link?" is easy to find, not below all the owner-setup copy. Keep it to the smallest change, such as moving the card above the owner invite card when nobody has been invited yet.
+6. **P3b re-review P2s:**
+   - P2-1: tell a Keychain decode failure apart from a locked device (`errSecInteractionNotAllowed`). A corrupt item gets a recovery route (clear the invite store and say that pending links stop working), with accurate copy.
+   - P2-2: removing a person while the store is unreadable must not leave their token behind. Queue the deletion, or block removal with a message. Also, `restorePendingInvite` must not restore a consumed invite.
+   - P2-3: call `restorePendingInvite()` when a read succeeds again mid-session.
+   - P2-4: Stop must not clear a consent warning that it set itself.
+   - P2-5: clear or recompute `integrityNotice` while the store is unreadable.
+7. **P3-0 leftovers:** an app-level Ask test that always runs (not only with the local relay), plus tests for the "about to end" and "already ended" messages.
+8. **Remove the confirm step.** Remove `CompanionPendingAcceptance`, `pruneExpiredPendingAcceptances` and the `pendingAcceptances:` parameter of `CompanionTrustMerge.decide`, update its callers, and fix stale `confirm()` comments. Keep the `legacyDefaultsKeys` cleanup, which deletes old data.
+
+### P3c-protocol (builder B)
+Owns `relay/**`, `CompanionKit/Sources/CompanionKit/ProtocolModels.swift` (name rules only), the CompanionKit vector generator, and name/vector tests. Wire format unchanged; no migration.
+1. Fix the stale comment at `relay/src/retention.ts` ~271–272: tombstone, purged at `max(consumedAt, expiresAt) + 30d`.
+2. The per-owner `deleteInviteToken` purge counts toward `summary.purgedInviteTokens`. Test it.
+3. Add blank scalars to both sides at once, with tests and a Swift-signed vector:
+   - U+E0100–E01EF;
+   - U+180B–180D and U+180F;
+   - U+17B4–17B5;
+   - U+206A–206F;
+   - U+1BCA0–1BCA3;
+   - U+FFF9–FFFB.
+4. Fix the stale "confirm" comments in `relay/src/db.ts` and `protocol.ts`. Leave `ledger.ts` `pendingAcceptances?` alone: it reads old ledgers.
+
+Gates: an Opus code review of each, then the pre-push app suites, then the UX review on their screenshots.
