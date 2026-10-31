@@ -164,8 +164,9 @@ export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, 
 
   const purgedOperations = await pool.query(`DELETE FROM companion_operation WHERE committed_at < to_timestamp($1)`, [cutoff]);
   summary.purgedOperationRows = purgedOperations.rowCount ?? 0;
-  // Pairing v3 invite tokens are useless the moment their invite expires, so they are swept at `now`, not at the 30-day cutoff.
-  summary.purgedInviteTokens += await purgeExpiredInviteTokens(pool, nowSeconds);
+  // Pairing v3 token rows (live, expired or consumed tombstones) are kept until 30 days after
+  // expiry, matching the ledger invite purge, so an expired lookup key cannot be re-registered.
+  summary.purgedInviteTokens += await purgeExpiredInviteTokens(pool, cutoff);
   summary.purgedRateLimitRows = await purgeStaleRateLimits(pool, nowSeconds, GLOBAL_RATE_LIMIT_WINDOW_SECONDS);
 
   return summary;

@@ -100,7 +100,7 @@ final class JoinedAcceptanceCheckTests: XCTestCase {
     }
 
     /// The relay stores the lookup key, so it can build and sign an acceptance with its own key that
-    /// the relay will happily accept, but it cannot compute the token proof, so the owner rejects it.
+    /// the relay now rejects (no possession signature) and the owner would reject anyway.
     func testARelayThatKnowsOnlyTheLookupKeyCannotFabricateATrustedPerson() throws {
         let ownerSigner = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
         let relayKey = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
@@ -124,18 +124,24 @@ final class JoinedAcceptanceCheckTests: XCTestCase {
         let operation = try SignedOperation(operationID: operationID, expectedRevision: nil, kind: "accept", signer: relayKey.identity,
                                             body: body, signature: try relayKey.sign(domain: "\(CompanionCanonical.version).operation",
                                                                                      fields: unsigned.signingFields()))
-        // The relay itself cannot tell: it only checks the lookup key it holds.
-        guard case let .pairing(pairing) = try relay.submit(operation).result else { return XCTFail("relay should create the pairing") }
+        // The relay now refuses it outright: it cannot produce the token-derived possession signature.
+        XCTAssertThrowsError(try relay.submit(operation)) { XCTAssertEqual($0 as? CompanionError, .unauthorized) }
 
-        let inbox = try relay.fetchInbox(try inboxOperation(ownerSigner))
-        XCTAssertEqual(inbox.pairings?.map(\.pairingID), [pairing.pairingID])
+        // Even if a hostile relay reported such a pairing anyway, the owner's own check rejects it
+        // (no valid possession signature, and the token proof it guessed does not match).
+        let pairing = try Pairing(pairingID: Pairing.derivedID(inviteID: "fabricated", approverIdentityID: relayKey.identity.identityID),
+                                  owner: ownerSigner.identity, approver: relayKey.identity, epoch: 1, createdAt: t, state: .active,
+                                  ownerDisplayName: "Alex", approverDisplayName: "Your Friend")
         XCTAssertThrowsError(try JoinedAcceptanceCheck.verify(signedAcceptance: envelope, pairing: pairing, issued: issued,
                                                               ownerIdentity: ownerSigner.identity)) {
             XCTAssertEqual($0 as? CompanionError, .unauthorized)
         }
+        let inbox = try InboxResponse(ownerIdentityID: ownerSigner.identity.identityID, revision: 2, requests: [],
+                                      pairings: [pairing], acceptances: [envelope])
         let result = JoinedAcceptanceCheck.verifiedPairings(in: inbox, invites: [issued.invitation.payload.inviteID: issued],
                                                             ownerIdentity: ownerSigner.identity)
         XCTAssertTrue(result.verified.isEmpty)
+        XCTAssertEqual(result.integrityWarnings.count, 1)
     }
 
     func testVerifiedPairingsFiltersAnInboxToOnlyProvenActivePairings() throws {
@@ -157,6 +163,28 @@ final class JoinedAcceptanceCheckTests: XCTestCase {
         let revokedInbox = try InboxResponse(ownerIdentityID: f.ownerIdentity.identityID, revision: 3, requests: [],
                                              pairings: [revoked], acceptances: [f.signed])
         XCTAssertTrue(JoinedAcceptanceCheck.verifiedPairings(in: revokedInbox, invites: invites, ownerIdentity: f.ownerIdentity).verified.isEmpty)
+    }
+
+    func testAnAcceptanceThatMatchesAHeldInviteButFailsVerificationRaisesAnIntegrityWarning() throws {
+        let f = try fixture()
+        var badSignature = f.signed.signature
+        badSignature[0] ^= 1
+        let tampered = SignedAcceptance(acceptance: f.signed.acceptance, signature: badSignature)
+        let inbox = try InboxResponse(ownerIdentityID: f.ownerIdentity.identityID, revision: 3, requests: [],
+                                      pairings: [f.pairing], acceptances: [tampered])
+        let result = JoinedAcceptanceCheck.verifiedPairings(in: inbox, invites: [f.issued.invitation.payload.inviteID: f.issued],
+                                                            ownerIdentity: f.ownerIdentity)
+        XCTAssertTrue(result.verified.isEmpty)
+        XCTAssertEqual(result.integrityWarnings.count, 1)
+        // An acceptance for an invite this device does not hold is simply not ours: no warning.
+        let unrelated = JoinedAcceptanceCheck.verifiedPairings(in: inbox, invites: [:], ownerIdentity: f.ownerIdentity)
+        XCTAssertTrue(unrelated.integrityWarnings.isEmpty)
+    }
+
+    func testIssuedInviteSurvivesACodableRoundTrip() throws {
+        let f = try fixture()
+        let data = try JSONEncoder().encode(f.issued)
+        XCTAssertEqual(try JSONDecoder().decode(IssuedInvite.self, from: data), f.issued)
     }
 
     func testMoreThanOneAcceptanceForASingleUseInviteRejectsEveryPairingAndWarns() throws {

@@ -15,6 +15,9 @@ import { MAX_RAW_BODY_BYTES } from "../src/protocol.js";
 /** Thrown by `toWebRequest` when a request body exceeds the size limit while still streaming in, so the caller can answer 413 without ever buffering the full (oversized) body. */
 class PayloadTooLargeError extends Error {}
 
+// Positive local opt-in required by the rate-limit overrides (src/db.ts `rateLimitMax`); only this script sets it.
+process.env.RELAY_LOCAL_DEV = "1";
+
 const HOST = process.env.RELAY_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.RELAY_PORT ?? "8002");
 

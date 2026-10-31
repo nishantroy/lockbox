@@ -6,7 +6,7 @@
 // DER/PKCS8 wrapping code is needed.
 
 import { createPrivateKey, createPublicKey, sign as nodeSign, verify as nodeVerify, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { base64url, fromBase64url } from "./canonical.js";
+import { base64url, fromBase64url, invitePossessionSeed } from "./canonical.js";
 
 export interface Ed25519KeyPair {
   publicKey: Buffer;
@@ -67,4 +67,15 @@ export function verify(message: Buffer, signature: Buffer, rawPublicKey: Buffer)
   } catch {
     return false;
   }
+}
+
+/**
+ * Pairing v3: the Ed25519 keypair every holder of an invite token can derive.
+ * Its public half is signed into the invite; an acceptance must carry a
+ * signature by the private half, so the RELAY can verify possession of the
+ * token (which it never sees) before consuming the invite.
+ */
+export function invitePossessionKeyPair(token: string): Ed25519KeyPair {
+  const seed = invitePossessionSeed(token);
+  return { privateKeySeed: seed, publicKey: publicKeyFromSeed(seed) };
 }

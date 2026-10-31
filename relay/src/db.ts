@@ -313,8 +313,9 @@ let warnedAboutIgnoredOverride = false;
 /**
  * Local-testing escape hatch: lets the dev server (`npm run dev:test`) raise a
  * rate limit so app integration tests need not sleep between runs. Honoured
- * only when the process is demonstrably not a production deployment: it is
- * IGNORED (the strict default applies) whenever `VERCEL_ENV=production`,
+ * only when the process is demonstrably the local dev server (`RELAY_LOCAL_DEV=1`, set
+ * by scripts/dev-server.ts) and not a production deployment: it is
+ * IGNORED (the strict default applies) otherwise, and whenever `VERCEL_ENV=production`,
  * `NODE_ENV=production` or any `VERCEL` marker is present, or when the value is
  * not a positive integer. Ignoring rather than throwing keeps a misconfigured
  * production deployment safe and serving.
@@ -322,7 +323,9 @@ let warnedAboutIgnoredOverride = false;
 export function rateLimitMax(defaultMax: number, envName: string, env: NodeJS.ProcessEnv = process.env): number {
   const raw = env[envName];
   if (raw === undefined || raw === "") return defaultMax;
-  const production = env.VERCEL_ENV === "production" || env.NODE_ENV === "production" || env.VERCEL !== undefined;
+  // Needs a positive local opt-in that only scripts/dev-server.ts sets (RELAY_LOCAL_DEV=1), in
+  // addition to none of the production markers being present.
+  const production = env.RELAY_LOCAL_DEV !== "1" || env.VERCEL_ENV === "production" || env.NODE_ENV === "production" || env.VERCEL !== undefined;
   const value = Number(raw);
   if (production || !Number.isSafeInteger(value) || value <= 0) {
     if (!warnedAboutIgnoredOverride) {
@@ -468,7 +471,7 @@ export async function findInviteToken(client: pg.Pool | pg.PoolClient, lookupKey
   return { lookupKey: row.lookup_key, ownerID: row.owner_id, inviteID: row.invite_id, expiresAt: row.expires_at.getTime() / 1000, consumed: row.consumed_at !== null };
 }
 
-/** Deletes token rows (live or tombstoned) whose invite expired before `cutoffSeconds` (retention). */
+/** Deletes token rows (live or tombstoned) whose invite expired before `cutoffSeconds`. Retention passes the 30-day cutoff so an expired or consumed lookup key stays registered (cannot be re-registered by another owner) until the ledger invite itself is purged. */
 export async function purgeExpiredInviteTokens(client: pg.Pool | pg.PoolClient, cutoffSeconds: number): Promise<number> {
   const result = await client.query(`DELETE FROM companion_invite_token WHERE expires_at < to_timestamp($1)`, [cutoffSeconds]);
   return result.rowCount ?? 0;

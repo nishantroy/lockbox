@@ -8,14 +8,19 @@ describe("rate limit override (local testing only)", () => {
   });
 
   it("is honoured outside production", () => {
-    expect(rateLimitMax(60, "X", { X: "100000" })).toBe(100000);
-    expect(rateLimitMax(60, "X", { X: "5", NODE_ENV: "development" })).toBe(5);
+    expect(rateLimitMax(60, "X", { X: "100000", RELAY_LOCAL_DEV: "1" })).toBe(100000);
+    expect(rateLimitMax(60, "X", { X: "5", NODE_ENV: "development", RELAY_LOCAL_DEV: "1" })).toBe(5);
+  });
+
+  it("is ignored without the positive local opt-in that only the dev server sets", () => {
+    expect(rateLimitMax(60, "X", { X: "100000" })).toBe(60);
+    expect(rateLimitMax(60, "X", { X: "100000", RELAY_LOCAL_DEV: "0" })).toBe(60);
   });
 
   it("fails closed in production or on Vercel, and on invalid values", () => {
-    expect(rateLimitMax(60, "X", { X: "100000", VERCEL_ENV: "production" })).toBe(60);
-    expect(rateLimitMax(60, "X", { X: "100000", NODE_ENV: "production" })).toBe(60);
-    expect(rateLimitMax(60, "X", { X: "100000", VERCEL: "1", VERCEL_ENV: "preview" })).toBe(60);
-    for (const bad of ["abc", "0", "-3", "1.5"]) expect(rateLimitMax(60, "X", { X: bad })).toBe(60);
+    expect(rateLimitMax(60, "X", { X: "100000", VERCEL_ENV: "production", RELAY_LOCAL_DEV: "1" })).toBe(60);
+    expect(rateLimitMax(60, "X", { X: "100000", NODE_ENV: "production", RELAY_LOCAL_DEV: "1" })).toBe(60);
+    expect(rateLimitMax(60, "X", { X: "100000", VERCEL: "1", VERCEL_ENV: "preview", RELAY_LOCAL_DEV: "1" })).toBe(60);
+    for (const bad of ["abc", "0", "-3", "1.5"]) expect(rateLimitMax(60, "X", { X: bad, RELAY_LOCAL_DEV: "1" })).toBe(60);
   });
 });

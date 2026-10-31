@@ -21,6 +21,10 @@ import CryptoKit
 ///   invite. Only a token holder can recompute it, so a friend can tell the invite was
 ///   issued by that owner for that token, and a relay that knows just the lookup key
 ///   cannot forge or swap an invite.
+/// - possession keypair: an Ed25519 key whose seed is H("invite-possession", token). Its public
+///   half is signed into the invite and the acceptance carries a signature by the private half,
+///   which the RELAY verifies before consuming the invite, so someone who only read the lookup
+///   key from a database or log cannot burn the invite.
 /// - `acceptanceProof` = H("accept-proof", token, approverPublicKey, acceptanceID):
 ///   carried in the acceptance. Only a token holder can compute it, so the owner can
 ///   tell an acceptance came from the link holder and not from the relay.
@@ -57,6 +61,39 @@ public enum InviteToken {
             domain: "\(CompanionCanonical.version).accept-proof", fields: [token, base64URL(approverPublicKey), acceptanceID]))
     }
 
+    static func possessionPrivateKey(_ token: String) -> Curve25519.Signing.PrivateKey? {
+        let seed = CompanionCanonical.digest(CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).invite-possession", fields: [token]))
+        return try? Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+    }
+
+    /// The public half of the token-derived possession key (signed into the invite).
+    public static func possessionPublicKey(_ token: String) -> Data? {
+        possessionPrivateKey(token).map { Data($0.publicKey.rawRepresentation) }
+    }
+
+    /// What the possession key signs: binds the approver key, acceptance ID, invite and lookup key.
+    static func possessionMessage(acceptanceID: String, inviteID: String, ownerIdentityID: String,
+                                  approverPublicKey: Data, lookupKey: Data) -> Data {
+        CompanionCanonical.bytes(domain: "\(CompanionCanonical.version).accept-possession",
+                                 fields: [acceptanceID, inviteID, ownerIdentityID, base64URL(approverPublicKey), base64URL(lookupKey)])
+    }
+
+    static func possessionSignature(token: String, acceptanceID: String, inviteID: String, ownerIdentityID: String,
+                                    approverPublicKey: Data, lookupKey: Data) -> Data? {
+        guard let key = possessionPrivateKey(token) else { return nil }
+        return try? key.signature(for: possessionMessage(acceptanceID: acceptanceID, inviteID: inviteID, ownerIdentityID: ownerIdentityID,
+                                                         approverPublicKey: approverPublicKey, lookupKey: lookupKey))
+    }
+
+    /// Verifies an acceptance's possession signature against the invite's signed possession key (what the relay does).
+    public static func verifyPossession(of acceptance: PairingAcceptance, possessionKey: Data) -> Bool {
+        guard acceptance.possessionSignature.count == 64,
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: possessionKey) else { return false }
+        return key.isValidSignature(acceptance.possessionSignature, for: possessionMessage(
+            acceptanceID: acceptance.acceptanceID, inviteID: acceptance.inviteID, ownerIdentityID: acceptance.owner.identityID,
+            approverPublicKey: acceptance.approver.publicKey, lookupKey: acceptance.lookupKey))
+    }
+
     /// Constant-time equality for equal-length secrets or secret-derived values.
     public static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         guard a.count == b.count else { return false }
@@ -70,6 +107,7 @@ public enum InviteToken {
         isWellFormed(token)
             && constantTimeEqual(inviteHash(token: token, ownerPublicKey: payload.owner.publicKey, inviteID: payload.inviteID), payload.tokenHash)
             && constantTimeEqual(lookupKey(token), payload.lookupKey)
+            && possessionPublicKey(token).map({ constantTimeEqual($0, payload.possessionKey) }) == true
     }
 
     public static func shareLink(token: String) -> String { shareLinkPrefix + token }
@@ -101,10 +139,12 @@ public enum PairingFields {
         }
     }
 
-    /// Whitespace-like scalars (Unicode White_Space plus U+FEFF), spelled out so Swift and TS agree exactly.
+    /// Whitespace-like and invisible-filler scalars (a name made only of these is blank), spelled out so Swift and TS agree exactly.
     static func isBlankScalar(_ cp: UInt32) -> Bool {
         switch cp {
-        case 0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF: return true
+        case 0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF,
+             // Invisible fillers that render as nothing: a name made only of these is blank.
+             0x00AD, 0x115F, 0x1160, 0x200D, 0x2060, 0x2800, 0x3164, 0xE0000...0xE007F: return true
         default: return false
         }
     }
@@ -139,17 +179,19 @@ public struct InvitePayload: Codable, Hashable, Sendable {
     public let tokenHash: Data
     /// `InviteToken.lookupKey(token)`: the relay's only handle on this invite; signed so it cannot be re-pointed.
     public let lookupKey: Data
+    /// Public key of the token-derived possession keypair; the relay verifies an acceptance's possession signature against it.
+    public let possessionKey: Data
     /// Owner-chosen name shown to the friend. Optional, at most 40 scalars.
     public let ownerDisplayName: String?
     /// The scopes creating this invite grants the friend. Sorted, non-empty, R5 only.
     public let grantedScopes: [CompanionScope]
 
     public init(inviteID: String, owner: DeviceIdentity, issuedAt: Date, expiresAt: Date, nonce: Data,
-                tokenHash: Data, lookupKey: Data, ownerDisplayName: String? = nil,
+                tokenHash: Data, lookupKey: Data, possessionKey: Data, ownerDisplayName: String? = nil,
                 grantedScopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) throws {
         try requireIdentifier(inviteID, name: "invite ID")
         guard owner.role == .owner, nonce.count >= 16, nonce.count <= 64,
-              tokenHash.count == 32, lookupKey.count == 32,
+              tokenHash.count == 32, lookupKey.count == 32, possessionKey.count == 32,
               expiresAt > issuedAt,
               expiresAt.timeIntervalSince(issuedAt) <= CompanionLimits.maxInviteLifetime else {
             throw CompanionError.malformed("invalid invitation")
@@ -158,18 +200,18 @@ public struct InvitePayload: Codable, Hashable, Sendable {
         try requireTimestamp(expiresAt, name: "invite expiry")
         try PairingFields.validateDisplayName(ownerDisplayName, name: "owner display name")
         self.inviteID = inviteID; self.owner = owner; self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.nonce = nonce
-        self.tokenHash = tokenHash; self.lookupKey = lookupKey; self.ownerDisplayName = ownerDisplayName
+        self.tokenHash = tokenHash; self.lookupKey = lookupKey; self.possessionKey = possessionKey; self.ownerDisplayName = ownerDisplayName
         self.grantedScopes = try PairingFields.normalizedScopes(grantedScopes, name: "granted scopes")
     }
 
     public func signingFields() -> [String] {
         [inviteID, owner.identityID, base64URL(owner.publicKey), String(milliseconds(issuedAt)), String(milliseconds(expiresAt)),
-         base64URL(nonce), base64URL(tokenHash), base64URL(lookupKey), ownerDisplayName ?? "", PairingFields.scopeField(grantedScopes)]
+         base64URL(nonce), base64URL(tokenHash), base64URL(lookupKey), base64URL(possessionKey), ownerDisplayName ?? "", PairingFields.scopeField(grantedScopes)]
     }
 
     public func validate(at now: Date) throws {
         try owner.validate()
-        guard nonce.count >= 16, nonce.count <= 64, tokenHash.count == 32, lookupKey.count == 32, expiresAt > issuedAt,
+        guard nonce.count >= 16, nonce.count <= 64, tokenHash.count == 32, lookupKey.count == 32, possessionKey.count == 32, expiresAt > issuedAt,
               expiresAt.timeIntervalSince(issuedAt) <= CompanionLimits.maxInviteLifetime else {
             throw CompanionError.malformed("invalid invitation")
         }
@@ -232,6 +274,8 @@ public struct PairingAcceptance: Codable, Hashable, Sendable {
     public let issuedAt: Date
     public let lookupKey: Data
     public let tokenProof: Data
+    /// Signature by the token-derived possession key; verified by the relay before the invite is consumed.
+    public let possessionSignature: Data
     public let approverDisplayName: String?
     public let acceptedScopes: [CompanionScope]
 
@@ -249,6 +293,12 @@ public struct PairingAcceptance: Codable, Hashable, Sendable {
         self.approver = approver; self.issuedAt = issuedAt
         self.lookupKey = InviteToken.lookupKey(token)
         self.tokenProof = InviteToken.acceptanceProof(token: token, approverPublicKey: approver.publicKey, acceptanceID: acceptanceID)
+        guard let possession = InviteToken.possessionSignature(
+            token: token, acceptanceID: acceptanceID, inviteID: invite.inviteID, ownerIdentityID: invite.owner.identityID,
+            approverPublicKey: approver.publicKey, lookupKey: InviteToken.lookupKey(token)) else {
+            throw CompanionError.malformed("invalid invite token")
+        }
+        self.possessionSignature = possession
         self.approverDisplayName = approverDisplayName
         // Accepting is consenting to exactly what the owner granted.
         self.acceptedScopes = invite.grantedScopes
@@ -257,23 +307,24 @@ public struct PairingAcceptance: Codable, Hashable, Sendable {
     /// Memberwise form for decoding-adjacent code and tests that need to build a
     /// (possibly hostile) acceptance without holding the token.
     init(acceptanceID: String, inviteID: String, owner: DeviceIdentity, approver: DeviceIdentity, issuedAt: Date,
-         lookupKey: Data, tokenProof: Data, approverDisplayName: String?, acceptedScopes: [CompanionScope]) {
+         lookupKey: Data, tokenProof: Data, possessionSignature: Data = Data(repeating: 0, count: 64),
+         approverDisplayName: String?, acceptedScopes: [CompanionScope]) {
         self.acceptanceID = acceptanceID; self.inviteID = inviteID; self.owner = owner; self.approver = approver
-        self.issuedAt = issuedAt; self.lookupKey = lookupKey; self.tokenProof = tokenProof
+        self.issuedAt = issuedAt; self.lookupKey = lookupKey; self.tokenProof = tokenProof; self.possessionSignature = possessionSignature
         self.approverDisplayName = approverDisplayName; self.acceptedScopes = acceptedScopes
     }
 
     public func signingFields() -> [String] {
         [acceptanceID, inviteID, owner.identityID, approver.identityID,
          base64URL(owner.publicKey), base64URL(approver.publicKey), String(milliseconds(issuedAt)),
-         base64URL(lookupKey), base64URL(tokenProof), approverDisplayName ?? "", PairingFields.scopeField(acceptedScopes)]
+         base64URL(lookupKey), base64URL(tokenProof), base64URL(possessionSignature), approverDisplayName ?? "", PairingFields.scopeField(acceptedScopes)]
     }
 
     public func validate() throws {
         try requireIdentifier(acceptanceID, name: "acceptance ID")
         try requireIdentifier(inviteID, name: "invite ID")
         try owner.validate(); try approver.validate(); try requireTimestamp(issuedAt, name: "acceptance time")
-        guard owner.role == .owner, approver.role == .trustedApprover, lookupKey.count == 32, tokenProof.count == 32 else {
+        guard owner.role == .owner, approver.role == .trustedApprover, lookupKey.count == 32, tokenProof.count == 32, possessionSignature.count == 64 else {
             throw CompanionError.malformed("invalid pairing acceptance")
         }
         try PairingFields.validateDisplayName(approverDisplayName, name: "approver display name")
@@ -896,8 +947,11 @@ func validateAcceptResponse(_ pairing: Pairing, invitation: Invitation, acceptan
 }
 
 /// What `createInvite` returns: the owner-signed invitation plus the one-time
-/// token, which exists only here (the relay is given only its hash).
-public struct IssuedInvite: Sendable {
+/// token, which exists only here (the relay never receives it). Codable so the
+/// owner app can persist it for as long as the pairing exists: the token is a
+/// secret, so store it in the Keychain (or another protected store), never in
+/// plain defaults, and delete it when the owner removes that person.
+public struct IssuedInvite: Codable, Hashable, Sendable {
     public let invitation: Invitation
     public let token: String
     public var shareLink: String { InviteToken.shareLink(token: token) }
@@ -947,7 +1001,9 @@ public struct CompanionClient: Sendable {
         let payload = try InvitePayload(inviteID: inviteID, owner: signer.identity, issuedAt: now,
                                         expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? randomNonce(),
                                         tokenHash: InviteToken.inviteHash(token: token, ownerPublicKey: signer.identity.publicKey, inviteID: inviteID),
-                                        lookupKey: InviteToken.lookupKey(token), ownerDisplayName: ownerDisplayName,
+                                        lookupKey: InviteToken.lookupKey(token),
+                                        possessionKey: try InviteToken.possessionPublicKey(token) ?? { throw CompanionError.malformed("invalid invite token") }(),
+                                        ownerDisplayName: ownerDisplayName,
                                         grantedScopes: grantedScopes)
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: signature)

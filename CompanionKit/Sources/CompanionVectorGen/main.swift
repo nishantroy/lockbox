@@ -198,6 +198,7 @@ out["inviteToken"] = [
     "ownerPublicKeyBase64": ownerSigner.identity.publicKey.base64EncodedString(),
     "approverPublicKeyBase64": approverSigner.identity.publicKey.base64EncodedString(),
     "lookupKeyBase64": InviteToken.lookupKey(fixedInviteToken).base64EncodedString(),
+    "possessionKeyBase64": InviteToken.possessionPublicKey(fixedInviteToken)!.base64EncodedString(),
     "tokenHashBase64": InviteToken.inviteHash(token: fixedInviteToken, ownerPublicKey: ownerSigner.identity.publicKey,
                                               inviteID: fixedInviteID).base64EncodedString(),
     "proofBase64": InviteToken.acceptanceProof(token: fixedInviteToken, approverPublicKey: approverSigner.identity.publicKey,
@@ -214,7 +215,8 @@ for (label, name) in [("nfd-decomposed", "Jose\u{301}"), ("astral", "\u{1D49C}le
         inviteID: "fixture-name-\(label)", owner: ownerSigner.identity, issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt,
         nonce: fixedNonce,
         tokenHash: InviteToken.inviteHash(token: fixedInviteToken, ownerPublicKey: ownerSigner.identity.publicKey, inviteID: "fixture-name-\(label)"),
-        lookupKey: InviteToken.lookupKey(fixedInviteToken), ownerDisplayName: name)
+        lookupKey: InviteToken.lookupKey(fixedInviteToken), possessionKey: InviteToken.possessionPublicKey(fixedInviteToken)!,
+        ownerDisplayName: name)
     let namedSignature = try ownerSigner.sign(domain: "\(version).invite.v3", fields: namedPayload.signingFields())
     let namedInvitation = try Invitation(payload: namedPayload, signature: namedSignature)
     displayNameInvites.append(["label": label, "name": name,
@@ -248,7 +250,8 @@ let invitePayload = try InvitePayload(inviteID: fixedInviteID, owner: ownerSigne
                                       issuedAt: inviteIssuedAt, expiresAt: inviteExpiresAt, nonce: fixedNonce,
                                       tokenHash: InviteToken.inviteHash(token: fixedInviteToken, ownerPublicKey: ownerSigner.identity.publicKey,
                                                                         inviteID: fixedInviteID),
-                                      lookupKey: InviteToken.lookupKey(fixedInviteToken), ownerDisplayName: "Alex",
+                                      lookupKey: InviteToken.lookupKey(fixedInviteToken),
+                                      possessionKey: InviteToken.possessionPublicKey(fixedInviteToken)!, ownerDisplayName: "Alex",
                                       grantedScopes: [.approveEarlyEnd, .receiveRequests])
 let inviteDomain = "\(version).invite.v3"
 let inviteFields = invitePayload.signingFields()

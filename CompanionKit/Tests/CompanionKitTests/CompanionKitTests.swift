@@ -106,19 +106,23 @@ final class CompanionKitTests: XCTestCase {
         let payload = issued.invitation.payload
         let renamed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                         expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
-                                        lookupKey: payload.lookupKey, ownerDisplayName: "Mallory", grantedScopes: payload.grantedScopes)
+                                        lookupKey: payload.lookupKey, possessionKey: payload.possessionKey, ownerDisplayName: "Mallory", grantedScopes: payload.grantedScopes)
         let narrowed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                          expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
-                                         lookupKey: payload.lookupKey, ownerDisplayName: "Alex", grantedScopes: [.approveEarlyEnd])
+                                         lookupKey: payload.lookupKey, possessionKey: payload.possessionKey, ownerDisplayName: "Alex", grantedScopes: [.approveEarlyEnd])
         let rehashed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                          expiresAt: payload.expiresAt, nonce: payload.nonce,
                                          tokenHash: Data(repeating: 9, count: 32), lookupKey: payload.lookupKey,
-                                         ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
+                                         possessionKey: payload.possessionKey, ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
         let rekeyed = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
                                         expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
                                         lookupKey: InviteToken.lookupKey(InviteToken.generate()),
-                                        ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
-        for tampered in [renamed, narrowed, rehashed, rekeyed] {
+                                        possessionKey: payload.possessionKey, ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
+        let rekeyedPossession = try InvitePayload(inviteID: payload.inviteID, owner: payload.owner, issuedAt: payload.issuedAt,
+                                                  expiresAt: payload.expiresAt, nonce: payload.nonce, tokenHash: payload.tokenHash,
+                                                  lookupKey: payload.lookupKey, possessionKey: InviteToken.possessionPublicKey(InviteToken.generate())!,
+                                                  ownerDisplayName: "Alex", grantedScopes: payload.grantedScopes)
+        for tampered in [renamed, narrowed, rehashed, rekeyed, rekeyedPossession] {
             let invitation = try Invitation(payload: tampered, signature: issued.invitation.signature)
             XCTAssertThrowsError(try invitation.validateSignature()) { XCTAssertEqual($0 as? CompanionError, .invalidSignature) }
         }
@@ -131,7 +135,7 @@ final class CompanionKitTests: XCTestCase {
         func payload(name: String?, scopes: [CompanionScope] = [.approveEarlyEnd, .receiveRequests]) throws -> InvitePayload {
             try InvitePayload(inviteID: "names", owner: signer.identity, issuedAt: t, expiresAt: t.addingTimeInterval(60),
                               nonce: Data(repeating: 1, count: 24), tokenHash: Data(repeating: 1, count: 32),
-                              lookupKey: Data(repeating: 2, count: 32), ownerDisplayName: name, grantedScopes: scopes)
+                              lookupKey: Data(repeating: 2, count: 32), possessionKey: Data(repeating: 3, count: 32), ownerDisplayName: name, grantedScopes: scopes)
         }
         XCTAssertNoThrow(try payload(name: nil))
         XCTAssertNoThrow(try payload(name: String(repeating: "A", count: 40)))
@@ -142,7 +146,8 @@ final class CompanionKitTests: XCTestCase {
         }
         // Bidi controls, invisible marks, FEFF-only/blank and control characters are not.
         let hostile = ["x\u{202E}y", "\u{2066}x", "\u{2069}", "\u{061C}x", "\u{200B}x", "\u{200E}x", "\u{200F}x",
-                       "\u{FEFF}", " \u{FEFF} ", "\u{0085}", "\u{007F}"]
+                       "\u{FEFF}", " \u{FEFF} ", "\u{0085}", "\u{007F}",
+                       "\u{3164}", "\u{2800}", "\u{115F}\u{1160}", "\u{2060}", "\u{00AD}", "\u{E0041}", "\u{200D}", " \u{3164}\u{200D} "]
         for bad in hostile + [String(repeating: "A", count: 41), String(repeating: "\u{1F600}", count: 41), "", "   ", "line\nbreak", "tab\there"] {
             XCTAssertThrowsError(try payload(name: bad), "name \(bad.debugDescription) must be rejected")
         }
@@ -161,6 +166,31 @@ final class CompanionKitTests: XCTestCase {
         let request = try owner.requestUnlock(requestID: "clamped", pairing: pairing, session: session,
                                               target: approver.signer.identity.identityID, message: nil, validFor: 3_599 + 600)
         XCTAssertEqual(request.expiresAt, session.endsAt)
+    }
+
+    func testGarbageProofOfPossessionIsRejectedByTheRelayAndDoesNotConsumeTheInvite() throws {
+        let (relay, owner, approver, _, _) = try harness()
+        let issued = try owner.createInvite(inviteID: "burn-invite", validFor: 600, now: t, nonce: Data(repeating: 31, count: 24))
+        let attacker = try DeviceSigner.create(role: .trustedApprover, keyStore: InMemoryDeviceKeyStore())
+        // Someone who copied the lookup key out of a database signs as themselves with a made-up possession signature.
+        let forged = PairingAcceptance(acceptanceID: "burn", inviteID: "burn-invite", owner: owner.signer.identity,
+                                       approver: attacker.identity, issuedAt: t, lookupKey: issued.invitation.payload.lookupKey,
+                                       tokenProof: Data(repeating: 1, count: 32), possessionSignature: Data(repeating: 9, count: 64),
+                                       approverDisplayName: nil, acceptedScopes: [.approveEarlyEnd, .receiveRequests])
+        let envelope = SignedAcceptance(acceptance: forged, signature: try attacker.sign(
+            domain: "\(CompanionCanonical.version).acceptance.v3", fields: forged.signingFields()))
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let body = try encoder.encode(envelope)
+        let operationID = operationIdentifier(kind: "accept", signer: attacker.identity, body: body)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil, kind: "accept", signer: attacker.identity,
+                                           body: body, signature: Data(repeating: 0, count: 64))
+        let operation = try SignedOperation(operationID: operationID, expectedRevision: nil, kind: "accept", signer: attacker.identity,
+                                            body: body, signature: try attacker.sign(domain: "\(CompanionCanonical.version).operation",
+                                                                                     fields: unsigned.signingFields()))
+        XCTAssertThrowsError(try relay.submit(operation)) { XCTAssertEqual($0 as? CompanionError, .unauthorized) }
+        // Nothing consumed: the real friend can still join.
+        let invitation = try approver.lookupInvite(token: issued.token)
+        XCTAssertNoThrow(try approver.acceptInvite(invitation, token: issued.token, acceptanceID: "real", now: t))
     }
 
     func testAcceptRetriedAfterALostResponseReturnsTheExistingPairing() throws {
@@ -638,7 +668,8 @@ final class CompanionKitTests: XCTestCase {
         let payload = try InvitePayload(inviteID: "revision-invite", owner: signer.identity,
                                         issuedAt: t, expiresAt: t.addingTimeInterval(600),
                                         nonce: Data(repeating: 4, count: 24),
-                                        tokenHash: Data(repeating: 1, count: 32), lookupKey: Data(repeating: 2, count: 32))
+                                        tokenHash: Data(repeating: 1, count: 32), lookupKey: Data(repeating: 2, count: 32),
+                                        possessionKey: Data(repeating: 3, count: 32))
         let inviteSignature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3",
                                               fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: inviteSignature)

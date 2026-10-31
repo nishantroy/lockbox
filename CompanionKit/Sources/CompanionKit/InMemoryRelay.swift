@@ -512,7 +512,9 @@ public final class InMemoryCompanionRelay: CompanionTransport, @unchecked Sendab
             guard let invitation = invitations[acceptance.inviteID], invitation.payload.owner == owner,
                   InviteToken.constantTimeEqual(acceptance.lookupKey, invitation.payload.lookupKey),
                   verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance.v3",
-                         fields: acceptance.signingFields(), key: acceptance.approver.publicKey) else {
+                         fields: acceptance.signingFields(), key: acceptance.approver.publicKey),
+                  // Proof of possession the relay can check; fails before anything is consumed.
+                  InviteToken.verifyPossession(of: acceptance, possessionKey: invitation.payload.possessionKey) else {
                 throw CompanionError.unauthorized
             }
             guard acceptance.issuedAt <= currentTime.addingTimeInterval(CompanionLimits.pairingClockSkew) else {

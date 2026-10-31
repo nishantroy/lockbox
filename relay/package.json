@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx --env-file-if-exists=.env scripts/dev-server.ts",
-    "dev:test": "RELAY_RATE_LIMIT_MAX=100000 RELAY_LOOKUP_RATE_LIMIT_MAX=100000 tsx --env-file-if-exists=.env scripts/dev-server.ts",
+    "dev:test": "RELAY_HOST=127.0.0.1 RELAY_PORT=8002 RELAY_RATE_LIMIT_MAX=100000 RELAY_LOOKUP_RATE_LIMIT_MAX=100000 tsx --env-file-if-exists=.env scripts/dev-server.ts",
     "db:start": "docker compose up -d postgres",
     "db:stop": "docker compose down",
     "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",

@@ -50,7 +50,8 @@ enum DurableProtocolReducer {
                   record.invitation.payload.owner == owner,
                   InviteToken.constantTimeEqual(acceptance.lookupKey, record.invitation.payload.lookupKey),
                   verify(signed.signature, domain: "\(CompanionCanonical.version).acceptance.v3",
-                         fields: acceptance.signingFields(), key: acceptance.approver.publicKey) else {
+                         fields: acceptance.signingFields(), key: acceptance.approver.publicKey),
+                  InviteToken.verifyPossession(of: acceptance, possessionKey: record.invitation.payload.possessionKey) else {
                 throw CompanionError.unauthorized
             }
             let invitePayload = record.invitation.payload

@@ -438,6 +438,7 @@ and consuming an approved request into the lock lifecycle (Slice B2).
 
 The global per-signer/IP limit (60 per 60 s) and the invite-lookup limit (20 per 60 s per IP) make repeated app
 integration runs sleep. `npm run dev:test` starts the dev server on 8002 with `RELAY_RATE_LIMIT_MAX=100000` and
-`RELAY_LOOKUP_RATE_LIMIT_MAX=100000`. Both variables are honoured **only** outside production: they are ignored
-(the strict default applies, with one logged warning) whenever `VERCEL_ENV=production`, `NODE_ENV=production` or any
+`RELAY_LOOKUP_RATE_LIMIT_MAX=100000` (and pins `RELAY_HOST=127.0.0.1 RELAY_PORT=8002`). Both variables are honoured **only**
+when `RELAY_LOCAL_DEV=1`, which only `scripts/dev-server.ts` sets, and never in production: they are ignored
+(the strict default applies, with one logged warning) otherwise, and whenever `VERCEL_ENV=production`, `NODE_ENV=production` or any
 `VERCEL` marker is set, or the value is not a positive integer. Never set them on a deployment.

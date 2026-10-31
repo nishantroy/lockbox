@@ -12,6 +12,7 @@ import {
   verifyInvitationSignature,
   decodeSignedAcceptance,
   verifySignedAcceptanceSignature,
+  verifyAcceptancePossession,
   decodeConsentMutation,
   decodeActiveSession,
   decodeTrustedRequest,
@@ -199,7 +200,7 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
       // Unknown invite, foreign invite, a pre-v3 invite without a lookup key
       // and a wrong lookup key are one indistinguishable failure. The relay
       // never sees the token and cannot verify `tokenProof`; the OWNER device
-      // does (JoinedAcceptanceCheck), so a relay that fabricates an acceptance
+      // does (the possession signature below it CAN verify) (JoinedAcceptanceCheck), so a relay that fabricates an acceptance
       // using the lookup key it stores cannot make the owner trust it.
       if (
         !inviteRecord ||
@@ -207,7 +208,12 @@ function applyKind(kind: string, payload: Buffer, signer: DeviceIdentity, owner:
         !identitiesEqual(invitePayload.owner, owner) ||
         !Buffer.isBuffer(invitePayload.lookupKey) ||
         !bufferEquals(invitePayload.lookupKey, acceptance.lookupKey) ||
-        !verifySignedAcceptanceSignature(signed)
+        !verifySignedAcceptanceSignature(signed) ||
+        // Proof of possession the relay CAN check: only a token holder can sign with the
+        // token-derived key, so someone who merely read the lookup key from the database or
+        // a log cannot burn the invite. Fails before anything is consumed.
+        !Buffer.isBuffer(invitePayload.possessionKey) ||
+        !verifyAcceptancePossession(acceptance, invitePayload.possessionKey)
       ) {
         fail("unauthorized");
       }

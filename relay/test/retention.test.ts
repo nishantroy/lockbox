@@ -176,7 +176,7 @@ describe("retention purge boundaries", () => {
     await patchLedger(owner.identity.identityID, (ledger) => {
       ledger.invitations["stale-invite"] = {
         invitation: {
-          payload: { inviteID: "stale-invite", owner: ledger.owner, issuedAt: now - 60 * DAY, expiresAt: now - 59 * DAY, nonce: Buffer.alloc(16), tokenHash: Buffer.alloc(32), lookupKey: Buffer.alloc(32), grantedScopes: ["approveEarlyEnd", "receiveRequests"] },
+          payload: { inviteID: "stale-invite", owner: ledger.owner, issuedAt: now - 60 * DAY, expiresAt: now - 59 * DAY, nonce: Buffer.alloc(16), tokenHash: Buffer.alloc(32), lookupKey: Buffer.alloc(32), possessionKey: Buffer.alloc(32), grantedScopes: ["approveEarlyEnd", "receiveRequests"] },
           signature: Buffer.alloc(64)
         },
         consumedAt: null

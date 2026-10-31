@@ -109,7 +109,8 @@ private func signedInvite(ownerSigner: DeviceSigner, inviteID: String, nonceByte
     let payload = try InvitePayload(inviteID: inviteID, owner: ownerSigner.identity, issuedAt: fixedTime,
                                     expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: nonceByte, count: 24),
                                     tokenHash: InviteToken.inviteHash(token: testInviteToken, ownerPublicKey: ownerSigner.identity.publicKey, inviteID: inviteID),
-                                    lookupKey: InviteToken.lookupKey(testInviteToken), ownerDisplayName: ownerName)
+                                    lookupKey: InviteToken.lookupKey(testInviteToken),
+                                    possessionKey: InviteToken.possessionPublicKey(testInviteToken)!, ownerDisplayName: ownerName)
     let signature = try ownerSigner.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
     return try Invitation(payload: payload, signature: signature)
 }
@@ -489,7 +490,8 @@ final class HTTPTransportTests: XCTestCase {
         let forgedPayload = try InvitePayload(inviteID: "relay-made", owner: relayOwner.identity, issuedAt: fixedTime,
                                               expiresAt: fixedTime.addingTimeInterval(3_600), nonce: Data(repeating: 4, count: 24),
                                               tokenHash: Data(repeating: 7, count: 32),
-                                              lookupKey: InviteToken.lookupKey(testInviteToken), ownerDisplayName: "Your friend")
+                                              lookupKey: InviteToken.lookupKey(testInviteToken),
+                                              possessionKey: Data(repeating: 5, count: 32), ownerDisplayName: "Your friend")
         let forged = try Invitation(payload: forgedPayload, signature: try relayOwner.sign(
             domain: "\(CompanionCanonical.version).invite.v3", fields: forgedPayload.signingFields()))
         let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())

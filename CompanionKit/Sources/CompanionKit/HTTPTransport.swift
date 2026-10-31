@@ -504,7 +504,9 @@ public struct AsyncCompanionClient: Sendable {
         let payload = try InvitePayload(inviteID: inviteID, owner: signer.identity, issuedAt: now,
                                         expiresAt: now.addingTimeInterval(validFor), nonce: nonce ?? randomNonce(),
                                         tokenHash: InviteToken.inviteHash(token: token, ownerPublicKey: signer.identity.publicKey, inviteID: inviteID),
-                                        lookupKey: InviteToken.lookupKey(token), ownerDisplayName: ownerDisplayName,
+                                        lookupKey: InviteToken.lookupKey(token),
+                                        possessionKey: try InviteToken.possessionPublicKey(token) ?? { throw CompanionError.malformed("invalid invite token") }(),
+                                        ownerDisplayName: ownerDisplayName,
                                         grantedScopes: grantedScopes)
         let signature = try signer.sign(domain: "\(CompanionCanonical.version).invite.v3", fields: payload.signingFields())
         let invitation = try Invitation(payload: payload, signature: signature)

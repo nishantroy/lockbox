@@ -134,3 +134,18 @@ Removed: `Invitation.shareLink`/`fromShareLink`, `AsyncCompanionClient.accept`/`
 **Validation (build output under `/Users/nishantroy/code/.build-cache/phone-lockbox/agent-a444bb184a546cde2/`; relay run against isolated database `p3a_test` on the existing 56330 container, so migration 005 was exercised on top of 004; no server on 8002):**
 - `cd relay && npm test`: 11 files, **182 passed**; `npm run typecheck` clean.
 - `swift test --package-path CompanionKit`: **160 passed**. `swift test --package-path CompanionRelayService`: **19 passed**. Root `swift test`: **177 passed**. `tools/relay-smoke` builds (not run: needs a live relay).
+
+### P3a review follow-up 2 (Opus high re-review of 84c9fb4; fixes 2026-10-31)
+
+1. **Relay-verifiable proof of possession (P2-1c).** `possessionKey` (public half of an Ed25519 keypair seeded by `H("invite-possession", token)`) is signed into the invite; the acceptance carries `possessionSignature` over (acceptanceID, inviteID, owner, approver public key, lookup key), covered by the friend signature. The relay (TS, in-memory, durable) verifies it before consuming the invite, so a reader of the DB or logs holding only the lookup key cannot burn invites (test: garbage, foreign-token and replayed possession signatures are rejected and the invite stays usable). `tokenProof` and the owner-side check remain; the owner check also verifies the possession signature.
+2. `verifiedPairings` adds an integrity warning when an acceptance matches a locally held invite but fails verification (unrelated invites stay silent).
+3. Docs: owner must retain the `IssuedInvite` (incl. token) while the pairing exists and delete it on removal; `IssuedInvite` is now `Codable, Hashable` (store the token in the Keychain).
+4. Rate-limit overrides now need `RELAY_LOCAL_DEV=1`, set only by `scripts/dev-server.ts`, plus no production markers.
+5. `dev:test` pins `RELAY_HOST=127.0.0.1 RELAY_PORT=8002`.
+6. My scratch database `p3a_test` is dropped. Migration 005 notes that databases which ran d4b0ea3 must be recreated.
+7. Token rows (live, expired, consumed) are kept until the 30-day purge (`expires_at < now - 30d`), so an expired lookup key cannot be re-registered.
+8. Owner check bounds `acceptance.issuedAt < invite.expiresAt + 300 s`. Names made only of invisible fillers (U+3164, U+2800, U+115F/1160, U+2060, U+00AD, U+200D, tag characters) are rejected on both sides.
+
+**P3b note:** `InvitePayload`/`PairingAcceptance` gained `possessionKey`/`possessionSignature` (no app change beyond using `createInvite`/`acceptInvite`).
+
+**Validation (build output under `/Users/nishantroy/code/.build-cache/phone-lockbox/agent-a444bb184a546cde2/`):** relay `npm test` 11 files, **185 passed**, `npm run typecheck` clean; CompanionKit **163 passed**; CompanionRelayService **19 passed**; root `swift test` **177 passed**; `tools/relay-smoke` builds (not run).

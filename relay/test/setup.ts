@@ -6,7 +6,7 @@
 
 import { beforeAll, afterAll, afterEach } from "vitest";
 import pg from "pg";
-import { generateEd25519KeyPair, sign } from "../src/crypto.js";
+import { generateEd25519KeyPair, sign, invitePossessionKeyPair } from "../src/crypto.js";
 import { deviceIdentityID, base64url, canonicalBytes, digest, COMPANION_VERSION, secondsToSwiftDate, inviteTokenHash, inviteLookupKey, acceptanceProof, generateInviteToken } from "../src/canonical.js";
 import type { DeviceIdentity, CompanionRole } from "../src/protocol.js";
 import { migrate, closePool, resolveDatabaseURL } from "../src/db.js";
@@ -115,7 +115,7 @@ export interface BuiltInvite {
 export function buildInvite(
   owner: TestIdentity,
   now: number,
-  opts: { inviteID?: string; token?: string; ttl?: number; ownerDisplayName?: string; grantedScopes?: string[]; nonce?: Buffer; tokenHash?: Buffer; lookupKey?: Buffer } = {}
+  opts: { inviteID?: string; token?: string; ttl?: number; ownerDisplayName?: string; grantedScopes?: string[]; nonce?: Buffer; tokenHash?: Buffer; lookupKey?: Buffer; possessionKey?: Buffer } = {}
 ): BuiltInvite {
   const inviteID = opts.inviteID ?? uniqueID("invite");
   const token = opts.token ?? generateInviteToken();
@@ -123,6 +123,7 @@ export function buildInvite(
   const nonce = opts.nonce ?? Buffer.alloc(24, 7);
   const tokenHash = opts.tokenHash ?? inviteTokenHash(token, owner.identity.publicKey, inviteID);
   const lookupKey = opts.lookupKey ?? inviteLookupKey(token);
+  const possessionKey = opts.possessionKey ?? invitePossessionKeyPair(token).publicKey;
   const grantedScopes = [...(opts.grantedScopes ?? ALL_R5_SCOPES)].sort();
   const fields = [
     inviteID,
@@ -133,6 +134,7 @@ export function buildInvite(
     base64url(nonce),
     base64url(tokenHash),
     base64url(lookupKey),
+    base64url(possessionKey),
     opts.ownerDisplayName ?? "",
     grantedScopes.join(",")
   ];
@@ -144,6 +146,7 @@ export function buildInvite(
     nonce: nonce.toString("base64"),
     tokenHash: tokenHash.toString("base64"),
     lookupKey: lookupKey.toString("base64"),
+    possessionKey: possessionKey.toString("base64"),
     grantedScopes
   };
   if (opts.ownerDisplayName !== undefined) payload.ownerDisplayName = opts.ownerDisplayName;
@@ -164,11 +167,20 @@ export function buildAcceptance(params: {
   /** Override for negative tests. */
   lookupKey?: Buffer;
   tokenProof?: Buffer;
+  possessionSignature?: Buffer;
 }): { acceptance: Record<string, unknown>; signature: string } {
   const acceptanceID = params.acceptanceID ?? uniqueID("acceptance");
   const acceptedScopes = [...(params.acceptedScopes ?? ALL_R5_SCOPES)].sort();
   const lookupKey = params.lookupKey ?? inviteLookupKey(params.token);
   const tokenProof = params.tokenProof ?? acceptanceProof(params.token, params.approver.identity.publicKey, acceptanceID);
+  const possessionPair = invitePossessionKeyPair(params.token);
+  const possessionSignature =
+    params.possessionSignature ??
+    sign(
+      canonicalBytes(`${COMPANION_VERSION}.accept-possession`, [acceptanceID, params.inviteID, params.owner.identity.identityID, base64url(params.approver.identity.publicKey), base64url(lookupKey)]),
+      possessionPair.privateKeySeed,
+      possessionPair.publicKey
+    );
   const fields = [
     acceptanceID,
     params.inviteID,
@@ -179,6 +191,7 @@ export function buildAcceptance(params: {
     String(Math.round(params.now * 1000)),
     base64url(lookupKey),
     base64url(tokenProof),
+    base64url(possessionSignature),
     params.approverDisplayName ?? "",
     acceptedScopes.join(",")
   ];
@@ -190,6 +203,7 @@ export function buildAcceptance(params: {
     issuedAt: swiftDate(params.now),
     lookupKey: lookupKey.toString("base64"),
     tokenProof: tokenProof.toString("base64"),
+    possessionSignature: possessionSignature.toString("base64"),
     acceptedScopes
   };
   if (params.approverDisplayName !== undefined) acceptance.approverDisplayName = params.approverDisplayName;

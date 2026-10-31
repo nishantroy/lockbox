@@ -21,7 +21,7 @@ import {
   isWellFormedInviteToken,
   secondsToSwiftDate
 } from "../src/canonical.js";
-import { verify as ed25519Verify } from "../src/crypto.js";
+import { verify as ed25519Verify, invitePossessionKeyPair } from "../src/crypto.js";
 import {
   decodeSignedOperation,
   verifySignedOperationSignature,
@@ -36,6 +36,7 @@ import {
   verifyPairingReplacementSignature,
   decodeSignedAcceptance,
   verifySignedAcceptanceSignature,
+  verifyAcceptancePossession,
   encodeSignedAcceptance,
   decodePairing,
   encodePairing,
@@ -93,6 +94,7 @@ describe("invite token derivations (pairing v3)", () => {
     expect(inviteLookupKey(v.token).toString("base64")).toBe(v.lookupKeyBase64);
     expect(inviteTokenHash(v.token, Buffer.from(v.ownerPublicKeyBase64, "base64"), v.inviteID).toString("base64")).toBe(v.tokenHashBase64);
     expect(acceptanceProof(v.token, Buffer.from(v.approverPublicKeyBase64, "base64"), v.acceptanceID).toString("base64")).toBe(v.proofBase64);
+    expect(invitePossessionKeyPair(v.token).publicKey.toString("base64")).toBe(v.possessionKeyBase64);
   });
 });
 
@@ -120,6 +122,10 @@ describe("signature checks (generic crypto/domain-separation vectors)", () => {
   }
 });
 
+function invitationPossessionKey(): Buffer {
+  return Buffer.from(vectors.inviteToken.possessionKeyBase64, "base64");
+}
+
 const payloadDecoders: Record<string, (payload: unknown) => void> = {
   ack: (payload) => {
     expect(payload).toEqual({});
@@ -130,6 +136,7 @@ const payloadDecoders: Record<string, (payload: unknown) => void> = {
     // The Swift-signed v3 invite covers the token hash, lookup key, owner name and granted scopes.
     expect(invitation.payload.tokenHash.toString("base64")).toBe(vectors.inviteToken.tokenHashBase64);
     expect(invitation.payload.lookupKey.toString("base64")).toBe(vectors.inviteToken.lookupKeyBase64);
+    expect(invitation.payload.possessionKey.toString("base64")).toBe(vectors.inviteToken.possessionKeyBase64);
     expect(invitation.payload.ownerDisplayName).toBe("Alex");
     expect(invitation.payload.grantedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
   },
@@ -140,6 +147,8 @@ const payloadDecoders: Record<string, (payload: unknown) => void> = {
     expect(verifySignedAcceptanceSignature(signed)).toBe(true);
     expect(signed.acceptance.lookupKey.toString("base64")).toBe(vectors.inviteToken.lookupKeyBase64);
     expect(signed.acceptance.tokenProof.toString("base64")).toBe(vectors.inviteToken.proofBase64);
+    // The Swift-made possession signature verifies against the Swift-derived possession key in TS.
+    expect(verifyAcceptancePossession(signed.acceptance, invitationPossessionKey())).toBe(true);
     expect(signed.acceptance.approverDisplayName).toBe("Sam");
     expect(signed.acceptance.acceptedScopes).toEqual(["approveEarlyEnd", "receiveRequests"]);
   },

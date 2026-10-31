@@ -54,8 +54,16 @@ public enum JoinedAcceptanceCheck {
                                             acceptanceID: acceptance.acceptanceID)) else {
             throw CompanionError.unauthorized
         }
+        guard InviteToken.verifyPossession(of: acceptance, possessionKey: invite.payload.possessionKey) else {
+            throw CompanionError.unauthorized
+        }
         guard acceptance.acceptedScopes.sorted(by: { $0.rawValue < $1.rawValue }) == invite.payload.grantedScopes else {
             throw CompanionError.consentRequired
+        }
+        // The relay already refuses a late acceptance; bound it here too (with clock skew) so a
+        // far-future stamp reported by the relay cannot pass.
+        guard acceptance.issuedAt < invite.payload.expiresAt.addingTimeInterval(CompanionLimits.pairingClockSkew) else {
+            throw CompanionError.expired
         }
         try pairing.validate()
         guard pairing.owner == ownerIdentity,
@@ -85,13 +93,29 @@ public enum JoinedAcceptanceCheck {
     ///
     /// Pairings created before v3 or by `replace_pairing` carry no acceptance and
     /// are never returned here; the caller needs another trust source for them.
+    ///
+    /// The owner must keep each `IssuedInvite` (including its token) for as long as the
+    /// pairing it created exists, and delete it when the owner removes that person:
+    /// `verify` needs it on every inbox fetch.
     public static func verifiedPairings(in inbox: InboxResponse, invites: [String: IssuedInvite],
                                         ownerIdentity: DeviceIdentity) -> Result {
         let acceptances = inbox.acceptances ?? []
         var countsByInvite: [String: Int] = [:]
         for signed in acceptances { countsByInvite[signed.acceptance.inviteID, default: 0] += 1 }
         let duplicated = Set(countsByInvite.filter { $0.value > 1 }.keys)
-        let warnings = duplicated.sorted().map { "relay reported more than one acceptance for single-use invite \($0)" }
+        var warnings = duplicated.sorted().map { "relay reported more than one acceptance for single-use invite \($0)" }
+        // An acceptance that matches an invite this device holds but does not verify is a relay
+        // misbehaving (or a bug), never a normal state: surface it instead of silently hiding it.
+        for signed in acceptances where !duplicated.contains(signed.acceptance.inviteID) {
+            guard let issued = invites[signed.acceptance.inviteID] else { continue }
+            let pairing = (inbox.pairings ?? []).first {
+                $0.pairingID == Pairing.derivedID(inviteID: signed.acceptance.inviteID, approverIdentityID: signed.acceptance.approver.identityID)
+            }
+            let valid = pairing.flatMap { try? verify(signedAcceptance: signed, pairing: $0, issued: issued, ownerIdentity: ownerIdentity) }
+            if valid == nil {
+                warnings.append("relay reported an acceptance for invite \(signed.acceptance.inviteID) that failed verification")
+            }
+        }
         let verified = (inbox.pairings ?? []).filter { pairing in
             guard pairing.state == .active else { return false }
             return acceptances.contains { signed in

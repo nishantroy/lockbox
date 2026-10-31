@@ -96,6 +96,9 @@ export function deviceIdentityID(publicKey: Buffer): string {
  *     into the invite. Only a token holder can recompute it, so a friend can
  *     tell the invite was issued by that owner for that token, and a relay
  *     that knows only the lookup key cannot forge or swap an invite.
+ *   - possession keypair = Ed25519 from seed H("invite-possession", token): the
+ *     public key is signed into the invite and the acceptance carries a signature
+ *     by the private key, which the RELAY verifies before consuming the invite.
  *   - proof      = H("accept-proof", token, approverPublicKey, acceptanceID):
  *     carried in the acceptance; only a token holder can compute it, so the
  *     owner can tell the acceptance came from the link holder, not the relay.
@@ -123,6 +126,11 @@ export function inviteTokenHash(token: string, ownerPublicKey: Buffer, inviteID:
 
 export function acceptanceProof(token: string, approverPublicKey: Buffer, acceptanceID: string): Buffer {
   return digest(canonicalBytes(`${COMPANION_VERSION}.accept-proof`, [token, base64url(approverPublicKey), acceptanceID]));
+}
+
+/** Seed of the token-derived possession keypair: H("invite-possession", token). */
+export function invitePossessionSeed(token: string): Buffer {
+  return digest(canonicalBytes(`${COMPANION_VERSION}.invite-possession`, [token]));
 }
 
 export function generateInviteToken(): string {

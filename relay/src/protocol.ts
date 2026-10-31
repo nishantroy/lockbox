@@ -270,7 +270,7 @@ export function consentAuthorizes(c: RelationshipConsent, scope: CompanionScope)
 /** Maximum length of an owner/approver display name, in Unicode scalar values. */
 export const MAX_DISPLAY_NAME_SCALARS = 40;
 
-/** Whitespace-like scalars (Unicode White_Space plus U+FEFF), spelled out so TS and Swift agree exactly. */
+/** Whitespace-like and invisible-filler scalars (a name made only of these is blank), spelled out so TS and Swift agree exactly. */
 function isBlankScalar(cp: number): boolean {
   return (
     (cp >= 0x09 && cp <= 0x0d) ||
@@ -284,7 +284,16 @@ function isBlankScalar(cp: number): boolean {
     cp === 0x202f ||
     cp === 0x205f ||
     cp === 0x3000 ||
-    cp === 0xfeff
+    cp === 0xfeff ||
+    // Invisible fillers that render as nothing: a name made only of these is blank.
+    cp === 0x00ad ||
+    cp === 0x115f ||
+    cp === 0x1160 ||
+    cp === 0x200d ||
+    cp === 0x2060 ||
+    cp === 0x2800 ||
+    cp === 0x3164 ||
+    (cp >= 0xe0000 && cp <= 0xe007f)
   );
 }
 
@@ -342,6 +351,8 @@ export interface InvitePayload {
   tokenHash: Buffer;
   /** `inviteLookupKey(token)`: the relay's only handle on the invite. Signed so the relay cannot re-point a lookup. */
   lookupKey: Buffer;
+  /** Public key of the token-derived possession keypair; the relay verifies an acceptance's possession signature against it. */
+  possessionKey: Buffer;
   ownerDisplayName?: string;
   grantedScopes: Array<(typeof R5_SCOPES)[number]>;
 }
@@ -356,6 +367,7 @@ export function invitePayloadSigningFields(p: InvitePayload): string[] {
     base64url(p.nonce),
     base64url(p.tokenHash),
     base64url(p.lookupKey),
+    base64url(p.possessionKey),
     p.ownerDisplayName ?? "",
     [...p.grantedScopes].sort().join(",")
   ];
@@ -385,11 +397,13 @@ export function decodeInvitation(value: unknown): Invitation {
   if (tokenHash.length !== 32) throw relayError("malformed");
   const lookupKey = decodeData(pv.lookupKey);
   if (lookupKey.length !== 32) throw relayError("malformed");
+  const possessionKey = decodeData(pv.possessionKey);
+  if (possessionKey.length !== 32) throw relayError("malformed");
   const ownerDisplayName = decodeDisplayName(pv.ownerDisplayName);
   const grantedScopes = decodeGrantedScopes(pv.grantedScopes);
   const signature = decodeData(v.signature);
   if (signature.length !== 64) throw relayError("malformed");
-  const payload: InvitePayload = { inviteID, owner, issuedAt, expiresAt, nonce, tokenHash, lookupKey, grantedScopes };
+  const payload: InvitePayload = { inviteID, owner, issuedAt, expiresAt, nonce, tokenHash, lookupKey, possessionKey, grantedScopes };
   if (ownerDisplayName !== undefined) payload.ownerDisplayName = ownerDisplayName;
   return { payload, signature };
 }
@@ -403,6 +417,7 @@ export function encodeInvitation(inv: Invitation): object {
     nonce: encodeData(inv.payload.nonce),
     tokenHash: encodeData(inv.payload.tokenHash),
     lookupKey: encodeData(inv.payload.lookupKey),
+    possessionKey: encodeData(inv.payload.possessionKey),
     grantedScopes: inv.payload.grantedScopes
   };
   if (inv.payload.ownerDisplayName !== undefined) payload.ownerDisplayName = inv.payload.ownerDisplayName;
@@ -430,6 +445,8 @@ export interface PairingAcceptance {
   issuedAt: number;
   lookupKey: Buffer;
   tokenProof: Buffer;
+  /** Signature by the token-derived possession key over `acceptancePossessionFields`; verified by the relay before the invite is consumed. */
+  possessionSignature: Buffer;
   approverDisplayName?: string;
   acceptedScopes: Array<(typeof R5_SCOPES)[number]>;
 }
@@ -445,9 +462,19 @@ export function pairingAcceptanceSigningFields(a: PairingAcceptance): string[] {
     msString(a.issuedAt),
     base64url(a.lookupKey),
     base64url(a.tokenProof),
+    base64url(a.possessionSignature),
     a.approverDisplayName ?? "",
     [...a.acceptedScopes].sort().join(",")
   ];
+}
+
+/** What the token-derived possession key signs: binds the approver key, acceptance ID, invite and lookup key. */
+export function acceptancePossessionFields(a: PairingAcceptance): string[] {
+  return [a.acceptanceID, a.inviteID, a.owner.identityID, base64url(a.approver.publicKey), base64url(a.lookupKey)];
+}
+
+export function verifyAcceptancePossession(a: PairingAcceptance, possessionKey: Buffer): boolean {
+  return ed25519Verify(canonicalBytes(`${COMPANION_VERSION}.accept-possession`, acceptancePossessionFields(a)), a.possessionSignature, possessionKey);
 }
 
 export interface SignedAcceptance {
@@ -465,10 +492,11 @@ export function decodePairingAcceptance(v: Record<string, unknown>): PairingAcce
   const issuedAt = requireTimestampSeconds(v.issuedAt);
   const lookupKey = decodeData(v.lookupKey);
   const tokenProof = decodeData(v.tokenProof);
-  if (lookupKey.length !== 32 || tokenProof.length !== 32) throw relayError("malformed");
+  const possessionSignature = decodeData(v.possessionSignature);
+  if (lookupKey.length !== 32 || tokenProof.length !== 32 || possessionSignature.length !== 64) throw relayError("malformed");
   const approverDisplayName = decodeDisplayName(v.approverDisplayName);
   const acceptedScopes = decodeGrantedScopes(v.acceptedScopes);
-  const acceptance: PairingAcceptance = { acceptanceID, inviteID, owner, approver, issuedAt, lookupKey, tokenProof, acceptedScopes };
+  const acceptance: PairingAcceptance = { acceptanceID, inviteID, owner, approver, issuedAt, lookupKey, tokenProof, possessionSignature, acceptedScopes };
   if (approverDisplayName !== undefined) acceptance.approverDisplayName = approverDisplayName;
   return acceptance;
 }
@@ -497,6 +525,7 @@ export function encodePairingAcceptance(a: PairingAcceptance): object {
     issuedAt: encodeDate(a.issuedAt),
     lookupKey: encodeData(a.lookupKey),
     tokenProof: encodeData(a.tokenProof),
+    possessionSignature: encodeData(a.possessionSignature),
     acceptedScopes: a.acceptedScopes
   };
   if (a.approverDisplayName !== undefined) out.approverDisplayName = a.approverDisplayName;

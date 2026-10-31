@@ -37,10 +37,14 @@ checkpoint overload.
   - `tokenHash = H("invite-token", token, ownerPublicKey, inviteID)`: signed into the invite. The friend recomputes it
     from the token in the link, so an invite not issued by that owner for that token is rejected. A relay that only
     knows the lookup key cannot forge or swap an invitation (it can return one, but it cannot make `tokenHash` match).
+  - a **possession keypair**: Ed25519 with seed `H("invite-possession", token)`. Its public key is signed into the
+    invite; the acceptance carries a signature by the private key over (acceptanceID, inviteID, owner, approver key,
+    lookup key). The relay verifies it before consuming the invite, so a database or log reader who holds only the
+    lookup key cannot burn invites.
   - `tokenProof = H("accept-proof", token, approverPublicKey, acceptanceID)`: carried in the friend's acceptance and
     stored by the relay (ledger pairing record and operation log) but verifiable only by someone holding the token.
-- **Who verifies what.** The relay gates accept on the lookup key and the friend's signature only; it cannot check the
-  proof. The **owner device** verifies it (`JoinedAcceptanceCheck`) against the invite and token it stored, plus the
+- **Who verifies what.** The relay gates accept on the lookup key, the friend's signature and the possession signature;
+  it cannot check `tokenProof`. The **owner device** verifies it (`JoinedAcceptanceCheck`) against the invite and token it stored, plus the
   signer, scopes, pairing ID derivation and names. A relay that stores the lookup key can create a pairing for its own
   key, but the owner will not show or trust it. It can still deny service (consume the invite).
 - **Lookup.** `POST /v1/invite/lookup` is unauthenticated, rate limited per client IP, and returns only found /
@@ -54,11 +58,15 @@ checkpoint overload.
   owner-row transaction; any failure leaves the invite usable. A retry of a lost response under a new operation ID
   returns the same friend's existing pairing instead of an error.
 - **Single use and tombstones.** The token row stays as a consumed tombstone until the invite expires so no other owner
-  can re-register the lookup key. Expired rows (live or tombstoned) are deleted by the daily retention cron, so a row
-  can linger up to about a day past expiry; lookups reject expired invites regardless.
+  can re-register the lookup key. Token rows (live, expired or consumed) are deleted by the daily retention cron 30 days
+  after expiry, together with the ledger invite, so an expired lookup key cannot be re-registered; lookups reject
+  expired and consumed invites regardless.
 - **Where secret-derived material is stored.** Never the token. The relay stores the lookup key, token hash and proof
   (in the owner ledger, the token index and the operation log) for the 30-day retention window, plus the friend-signed
   acceptance with the pairing. None of these lets the relay forge an invite or an owner-trusted acceptance.
+- **Owner storage.** The owner must keep each `IssuedInvite` (invitation plus token, now `Codable`) for as long as the
+  pairing it created exists and delete it when the owner removes that person: `JoinedAcceptanceCheck.verify` needs it on
+  every inbox fetch. The token is a secret; keep it in the Keychain or another protected store, not plain defaults.
 - **Trust sources.** Pairings created before v3 or by `replace_pairing` carry no acceptance, so `verifiedPairings`
   never returns them; the app needs another trust source for those (prototype: re-pair).
 - **Accepted risk.** Anyone holding an unexpired, unused link becomes a trusted person without owner approval. That is
