@@ -11,6 +11,10 @@ struct SettingsView: View {
         LockboxScrollView {
             LockboxPageHeader(title: "Settings")
 
+#if canImport(CompanionKit)
+            SettingsNameCard(companion: companion)
+#endif
+
             LockboxCard {
                 VStack(alignment: .leading, spacing: 13) {
                     LockboxSectionLabel("Bedtime schedule", systemImage: "calendar.badge.clock")
@@ -409,3 +413,53 @@ private struct DeveloperToolsSection: View {
         companion.relayBaseURLString = trimmed
     }
 }
+
+#if canImport(CompanionKit)
+/// The one name trusted people see on invites and requests.
+private struct SettingsNameCard: View {
+    @ObservedObject var companion: CompanionCoordinator
+    @State private var draft = ""
+
+    private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var isValid: Bool { CompanionCoordinator.validatedDisplayName(draft) != nil }
+    private var isChanged: Bool { trimmed != companion.displayName }
+
+    var body: some View {
+        LockboxCard {
+            VStack(alignment: .leading, spacing: 12) {
+                LockboxSectionLabel("Your name", systemImage: "person.crop.circle")
+                TextField("Your name", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .submitLabel(.done)
+                    .onSubmit(save)
+                    .accessibilityLabel("Your name")
+                    .accessibilityIdentifier("settings.nameField")
+                if isChanged {
+                    if isValid {
+                        Button("Save name", action: save)
+                            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                            .accessibilityIdentifier("settings.saveNameButton")
+                    } else if !trimmed.isEmpty {
+                        Text("Use 40 characters or fewer, with no special characters.")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Text("Trusted people see this name on invites and requests.")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+            }
+        }
+        .onAppear { draft = companion.displayName }
+        // The view stays alive in the tab view, so follow a name set elsewhere
+        // unless the user is mid-edit (draft differs from the old value).
+        .onChange(of: companion.displayName) { old, new in
+            if draft == old || draft.isEmpty { draft = new }
+        }
+    }
+
+    private func save() {
+        if companion.setDisplayName(draft) { draft = companion.displayName }
+    }
+}
+#endif
