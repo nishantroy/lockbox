@@ -276,7 +276,7 @@ final class CompanionPairingV3Tests: XCTestCase {
         XCTAssertNil(relaunched.integrityNotice)
 
         // Nothing is written while the store is unreadable...
-        _ = relaunched.setOwnerDisplayName("Owner")
+        _ = relaunched.setDisplayName("Owner")
         relaunched.insertIssuedInviteForTesting(try makeJoin(rig).issued)
         XCTAssertEqual(rig.store.invites.count, 1, "the real item was not overwritten")
         // ...and creating a new invite says so instead of proceeding.
@@ -289,7 +289,7 @@ final class CompanionPairingV3Tests: XCTestCase {
     func testAnInviteIsNotShownWhenItCannotBeSavedSecurely() async throws {
         let rig = try makeOwnerRig()
         let join = try makeJoin(rig)
-        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Owner"))
+        XCTAssertTrue(rig.coordinator.setDisplayName("Owner"))
         rig.coordinator.issueInviteOverride = { _, _ in join.issued }
         rig.store.failSaves = true
         await rig.coordinator.createInvite()
@@ -400,18 +400,18 @@ final class CompanionPairingV3Tests: XCTestCase {
 
     func testOwnerNameIsStoredAndEditable() throws {
         let rig = try makeOwnerRig()
-        XCTAssertEqual(rig.coordinator.ownerDisplayName, "")
-        XCTAssertFalse(rig.coordinator.setOwnerDisplayName("   "))
-        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Nishant"))
-        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Nish"))
+        XCTAssertEqual(rig.coordinator.displayName, "")
+        XCTAssertFalse(rig.coordinator.setDisplayName("   "))
+        XCTAssertTrue(rig.coordinator.setDisplayName("Nishant"))
+        XCTAssertTrue(rig.coordinator.setDisplayName("Nish"))
         let relaunched = CompanionCoordinator(keyStore: rig.keyStore, sharedDefaults: rig.defaults, inviteStore: rig.store)
-        XCTAssertEqual(relaunched.ownerDisplayName, "Nish")
+        XCTAssertEqual(relaunched.displayName, "Nish")
     }
 
     func testCreatingAnInviteWithoutAnOwnerNameAsksForOneAndSendsNothing() async throws {
         let rig = try makeOwnerRig()
         await rig.coordinator.createInvite()
-        XCTAssertEqual(rig.coordinator.lastError, "Add your name first, so the person you invite knows it's from you.")
+        XCTAssertEqual(rig.coordinator.lastError, "Add your name so they know the invite is from you.")
         XCTAssertNil(rig.coordinator.pendingInvite)
     }
 
@@ -452,7 +452,7 @@ final class CompanionPairingV3Tests: XCTestCase {
             (CompanionTransportError.server(.notFound), "This invite was already used or has expired. Ask for a new link."),
             (CompanionError.expired, "This invite has expired. Ask for a new link."),
             (CompanionTransportError.server(.rateLimited), "Too many tries just now. Wait a minute, then open the link again."),
-            (CompanionTransportError.unavailable, "Couldn't reach the relay. Check your connection and open the link again."),
+            (CompanionTransportError.unavailable, "Couldn't connect. Check your internet connection, then open the link again."),
         ]
         for (error, expected) in cases {
             friend.inviteLookupOverride = { _ in throw error }
@@ -503,7 +503,7 @@ final class CompanionPairingV3Tests: XCTestCase {
         XCTAssertTrue(accepted)
         XCTAssertEqual(receivedName, "Sam")
         XCTAssertEqual(friend.helpingPeople.map(\.nickname), ["Owner"], "paired immediately, named after the owner")
-        XCTAssertEqual(friend.approverDisplayName, "Sam", "prefilled next time")
+        XCTAssertEqual(friend.displayName, "Sam", "saved for next time")
         if case .none = friend.incomingInvite {} else { XCTFail("no waiting state after Accept") }
     }
 
@@ -557,8 +557,8 @@ final class CompanionPairingV3Tests: XCTestCase {
             XCTAssertFalse(message.localizedCaseInsensitiveContains("relay"), message)
             XCTAssertFalse(message.localizedCaseInsensitiveContains("reach"), message)
         }
-        XCTAssertTrue(CompanionCoordinator.describe(CompanionTransportError.unavailable).contains("reach the relay"))
-        XCTAssertTrue(CompanionCoordinator.describe(CompanionTransportError.timedOut).contains("reach the relay"))
+        XCTAssertTrue(CompanionCoordinator.describe(CompanionTransportError.unavailable).contains("Couldn't connect"))
+        XCTAssertTrue(CompanionCoordinator.describe(CompanionTransportError.timedOut).contains("Couldn't connect"))
 
         // A Keychain that refuses the new device key: Accept explains it, keeps the prompt, sends nothing.
         let rig = try makeOwnerRig()
@@ -578,7 +578,7 @@ final class CompanionPairingV3Tests: XCTestCase {
     func testAnExpiredPendingInviteIsShownAsExpiredAndStopsFastPolling() async throws {
         let rig = try makeOwnerRig(now: Date().addingTimeInterval(-7_200))   // issued two hours ago, expired an hour ago
         let join = try makeJoin(rig)
-        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Owner"))
+        XCTAssertTrue(rig.coordinator.setDisplayName("Owner"))
         rig.coordinator.issueInviteOverride = { _, _ in join.issued }
         await rig.coordinator.createInvite()
         XCTAssertNotNil(rig.coordinator.pendingInvite)
@@ -606,7 +606,7 @@ final class CompanionPairingV3Tests: XCTestCase {
     func testALinkThatCreatedAPersonStopsBeingOffered() async throws {
         let rig = try makeOwnerRig()
         let join = try makeJoin(rig)
-        XCTAssertTrue(rig.coordinator.setOwnerDisplayName("Owner"))
+        XCTAssertTrue(rig.coordinator.setDisplayName("Owner"))
         rig.coordinator.issueInviteOverride = { _, _ in join.issued }
         await rig.coordinator.createInvite()
         XCTAssertNotNil(rig.coordinator.pendingInvite)
@@ -644,7 +644,7 @@ final class CompanionPairingV3Tests: XCTestCase {
         XCTAssertTrue(corrupt.inviteStoreIsCorrupt)
         XCTAssertNil(corrupt.inviteStoreProblemMessage, "the reset card carries the wording")
         XCTAssertTrue(CompanionCoordinator.inviteStoreCorruptMessage.contains("Reset"))
-        XCTAssertTrue(corrupt.setOwnerDisplayName("Owner"))
+        XCTAssertTrue(corrupt.setDisplayName("Owner"))
         corrupt.issueInviteOverride = { _, _ in XCTFail("must not reach the relay"); throw CompanionError.unauthorized }
         await corrupt.createInvite()
         XCTAssertNil(corrupt.pendingInvite)
@@ -823,8 +823,8 @@ final class CompanionPairingV3Tests: XCTestCase {
     func testGotAnInviteLinkComesFirstOnlyBeforeAnyOwnerSetup() throws {
         let friend = try makeFriend()
         XCTAssertTrue(friend.showsAcceptInviteFirst, "fresh install")
-        XCTAssertTrue(friend.setOwnerDisplayName("Sam"))
-        XCTAssertFalse(friend.showsAcceptInviteFirst, "owner setup has begun")
+        XCTAssertTrue(friend.setDisplayName("Sam"))
+        XCTAssertTrue(friend.showsAcceptInviteFirst, "a saved name does not change the first-run layout")
         let rig = try makeOwnerRig()
         let join = try makeJoin(rig)
         friend.incomingInvite = .ready(IncomingInvite(invitation: join.issued.invitation, token: join.issued.token))
@@ -834,6 +834,111 @@ final class CompanionPairingV3Tests: XCTestCase {
         // An owner with someone already joined keeps the owner layout.
         let (owner, _) = try makeTrustedOwner()
         XCTAssertFalse(owner.coordinator.showsAcceptInviteFirst)
+    }
+
+    // MARK: - P3d
+
+    func testOwnerAndApproverNamesMigrateIntoOneNamePreferringTheOwnerName() throws {
+        let owner = "com.phone-lockbox.companion.ownerDisplayName.v1"
+        let approver = "com.phone-lockbox.companion.approverDisplayName.v1"
+        func coordinator(_ defaults: UserDefaults) -> CompanionCoordinator {
+            CompanionCoordinator(keyStore: InMemoryDeviceKeyStore(), sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        }
+        let both = try XCTUnwrap(UserDefaults(suiteName: "p3d.\(UUID().uuidString)"))
+        both.set("Nishant", forKey: owner); both.set("Sam", forKey: approver)
+        XCTAssertEqual(coordinator(both).displayName, "Nishant")
+        XCTAssertNil(both.string(forKey: owner), "old keys are removed after migration")
+        XCTAssertEqual(coordinator(both).displayName, "Nishant", "stable on the next launch")
+
+        let onlyApprover = try XCTUnwrap(UserDefaults(suiteName: "p3d.\(UUID().uuidString)"))
+        onlyApprover.set("Sam", forKey: approver)
+        XCTAssertEqual(coordinator(onlyApprover).displayName, "Sam")
+
+        let invalidOwner = try XCTUnwrap(UserDefaults(suiteName: "p3d.\(UUID().uuidString)"))
+        invalidOwner.set("  ", forKey: owner); invalidOwner.set("Sam", forKey: approver)
+        XCTAssertEqual(coordinator(invalidOwner).displayName, "Sam", "an unusable owner name falls through")
+
+        XCTAssertEqual(coordinator(try XCTUnwrap(UserDefaults(suiteName: "p3d.\(UUID().uuidString)"))).displayName, "")
+    }
+
+    func testOneNameServesInvitesAndAcceptances() async throws {
+        let rig = try makeOwnerRig()
+        XCTAssertTrue(rig.coordinator.setDisplayName("Nishant"))
+        var invitedAs: String?
+        let (signer, relay, now) = (rig.ownerSigner, rig.relay, rig.now)
+        rig.coordinator.issueInviteOverride = { id, name in
+            invitedAs = name
+            return try CompanionClient(signer: signer, transport: relay, now: { now })
+                .createInvite(inviteID: id, validFor: 3_600, now: now, ownerDisplayName: name)
+        }
+        await rig.coordinator.createInvite()
+        XCTAssertEqual(invitedAs, "Nishant")
+
+        // The same stored name is what the Accept button sends once it is set.
+        let join = try makeJoin(rig)
+        let incoming = IncomingInvite(invitation: join.issued.invitation, token: join.issued.token)
+        let blank = await rig.coordinator.acceptIncomingInvite(incoming, name: " ")
+        XCTAssertFalse(blank)
+        XCTAssertEqual(rig.coordinator.lastError, "Add your name so Owner knows it's you.")
+    }
+
+    func testAcceptedNoticeIsOneTimeDismissableAndPersisted() async throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "p3d.friend.\(UUID().uuidString)"))
+        let keyStore = InMemoryDeviceKeyStore()
+        let friend = CompanionCoordinator(keyStore: keyStore, sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        let identity = try friend.ensureApproverIdentityForTesting()
+        let pairing = try Pairing(pairingID: Pairing.derivedID(inviteID: join.issued.invitation.payload.inviteID,
+                                                              approverIdentityID: identity.identityID),
+                                  owner: rig.ownerSigner.identity, approver: identity, epoch: 1, createdAt: Date(),
+                                  state: .active, ownerDisplayName: "Dana", approverDisplayName: "Sam")
+        friend.acceptInviteOverride = { _, _, _ in pairing }
+        XCTAssertTrue(friend.acceptedNotices.isEmpty)
+        let incoming = IncomingInvite(invitation: join.issued.invitation, token: join.issued.token)
+        let accepted = await friend.acceptIncomingInvite(incoming, name: "Sam")
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(friend.acceptedNotices.map(\.ownerName), ["Dana"])
+
+        // Survives a relaunch until dismissed, then stays gone.
+        let relaunched = CompanionCoordinator(keyStore: keyStore, sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        XCTAssertEqual(relaunched.acceptedNotices.map(\.ownerName), ["Dana"])
+        relaunched.dismissAcceptedNotice(id: try XCTUnwrap(relaunched.acceptedNotices.first).id)
+        XCTAssertTrue(relaunched.acceptedNotices.isEmpty)
+        let again = CompanionCoordinator(keyStore: keyStore, sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        XCTAssertTrue(again.acceptedNotices.isEmpty)
+    }
+
+    func testPairingsMadeBeforeAcceptedNoticesExistedDoNotShowOne() throws {
+        let rig = try makeOwnerRig()
+        let join = try makeJoin(rig)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "p3d.legacy.\(UUID().uuidString)"))
+        let keyStore = InMemoryDeviceKeyStore()
+        let before = CompanionCoordinator(keyStore: keyStore, sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        before.testOnlySeedPerson(join.pairing, nickname: "Owner", role: .iAmApprover, joinVerified: false)
+        defaults.removeObject(forKey: "com.phone-lockbox.companion.acceptedSeen.v1")   // as on an upgrade
+        let upgraded = CompanionCoordinator(keyStore: keyStore, sharedDefaults: defaults, inviteStore: InMemoryIssuedInviteStore())
+        XCTAssertEqual(upgraded.helpingPeople.count, 1)
+        XCTAssertTrue(upgraded.acceptedNotices.isEmpty)
+    }
+
+    func testErrorCopyNeverMentionsTheRelay() {
+        let errors: [Error] = [CompanionTransportError.unavailable, CompanionTransportError.timedOut,
+                               CompanionTransportError.malformedResponse, CompanionTransportError.server(.keyUnavailable),
+                               CompanionError.relayRollback(.regressedRevision(expected: 2, actual: 1)), CompanionError.responseVerificationFailed("x"),
+                               CompanionError.malformed("state root mismatch"), CompanionError.unauthorized]
+        for error in errors {
+            XCTAssertFalse(CompanionCoordinator.describe(error).localizedCaseInsensitiveContains("relay"), "\(error)")
+            XCTAssertFalse(CompanionCoordinator.describeInviteError(error).localizedCaseInsensitiveContains("relay"), "\(error)")
+        }
+        XCTAssertEqual(CompanionCoordinator.describe(CompanionTransportError.unavailable),
+                       "Couldn't connect. Check your internet connection and try again.")
+        XCTAssertEqual(CompanionCoordinator.describe(CompanionTransportError.malformedResponse),
+                       "Got a response this version can't read. Try again later.")
+        XCTAssertEqual(CompanionCoordinator.describe(CompanionError.unauthorized), "That didn't go through. Try again.")
+        XCTAssertEqual(CompanionLocalError.storageUnavailable.message,
+                       "Phone Lockbox couldn't use its storage, so nothing was sent. Quit and reopen the app, then try again.")
+        XCTAssertEqual(CompanionCoordinator.inviteStoreCorruptMessage, "Saved invites on this phone are damaged. Reset them to create new invites.")
     }
 
     #if os(iOS)

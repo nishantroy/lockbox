@@ -15,7 +15,7 @@ enum CompanionLocalError: Error, Equatable {
     var message: String {
         switch self {
         case .storageUnavailable:
-            return "Phone Lockbox can't use its saved-data storage on this device, so nothing was sent. Quit and reopen the app, then try again."
+            return "Phone Lockbox couldn't use its storage, so nothing was sent. Quit and reopen the app, then try again."
         case .identityStorage:
             return "Couldn't save this device's secure key, so nothing was sent. Try again; if your phone is locked, unlock it first."
         }
@@ -146,6 +146,13 @@ struct JoinedNotice: Identifiable, Equatable {
     let name: String
 }
 
+/// Friend side: a one-time "You're now a trusted person for ‹Name›" notice,
+/// kept until dismissed.
+struct AcceptedNotice: Identifiable, Equatable {
+    let id: String   // pairing ID
+    let ownerName: String
+}
+
 /// Drives the People tab. Companion pairing/consent/requests never touch
 /// `FamilyControls` or `ManagedSettings` directly. Coupling to the lock
 /// itself is deliberately narrow: reading
@@ -168,9 +175,14 @@ final class CompanionCoordinator: ObservableObject {
     /// invites). Removed on launch; the invite secret now lives in the Keychain.
     private static let legacyDefaultsKeys = ["com.phone-lockbox.companion.pendingAcceptances.v1",
                                              "com.phone-lockbox.companion.storedInvites.v1"]
+    /// The one stored name (P3d): used on the owner's invites and on the
+    /// friend's acceptances.
+    private static let displayNameDefaultsKey = "com.phone-lockbox.companion.displayName.v1"
+    /// Pre-P3d separate names, migrated into `displayNameDefaultsKey` (owner name first).
     private static let ownerDisplayNameDefaultsKey = "com.phone-lockbox.companion.ownerDisplayName.v1"
     private static let approverDisplayNameDefaultsKey = "com.phone-lockbox.companion.approverDisplayName.v1"
     private static let seenJoinedDefaultsKey = "com.phone-lockbox.companion.joinedSeen.v1"
+    private static let seenAcceptedDefaultsKey = "com.phone-lockbox.companion.acceptedSeen.v1"
     /// Invite links stay valid for an hour.
     static let inviteLifetime: TimeInterval = 3_600
     /// An unused invite is kept this long after it expires (the relay purges
@@ -217,11 +229,12 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var pendingInvite: IssuedInvite?
     /// Friend side: the invite link this device opened (see `IncomingInviteState`).
     @Published var incomingInvite: IncomingInviteState = .none
-    @Published private(set) var ownerDisplayName = ""
-    @Published private(set) var approverDisplayName = ""
+    /// The user's own name, shown to trusted people on invites and requests.
+    @Published private(set) var displayName = ""
     /// Calm notice when the relay reported something the owner device could not verify.
     @Published private(set) var integrityNotice: String?
     @Published private(set) var joinedNotices: [JoinedNotice] = []
+    @Published private(set) var acceptedNotices: [AcceptedNotice] = []
     /// R5 Slice B2a: the relay-stored `Approval` for each request this
     /// device's owner identity has fetched in its own anchored inbox,
     /// keyed by `requestID`. Populated alongside `inboxItems` on every
@@ -264,6 +277,7 @@ final class CompanionCoordinator: ObservableObject {
     private var inviteLookupTask: Task<Void, Never>?
     private let inviteStore: any IssuedInviteStore
     private var seenJoinedPairingIDs: Set<String> = []
+    private var seenAcceptedPairingIDs: Set<String> = []
     /// R5 Slice B2c review, R2-3: the `requestID` the current
     /// `friendReleaseFlight` is actually working on, set only by the call
     /// that *starts* the flight (never by one that joins it).
@@ -335,10 +349,18 @@ final class CompanionCoordinator: ObservableObject {
             loadIdentities()
             loadPeople()
             for key in Self.legacyDefaultsKeys { resolvedDefaults?.removeObject(forKey: key) }
-            ownerDisplayName = resolvedDefaults?.string(forKey: Self.ownerDisplayNameDefaultsKey) ?? ""
-            approverDisplayName = resolvedDefaults?.string(forKey: Self.approverDisplayNameDefaultsKey) ?? ""
+            displayName = Self.migratedDisplayName(in: resolvedDefaults)
             if let data = resolvedDefaults?.data(forKey: Self.seenJoinedDefaultsKey),
                let ids = try? JSONDecoder().decode([String].self, from: data) { seenJoinedPairingIDs = Set(ids) }
+            if let data = resolvedDefaults?.data(forKey: Self.seenAcceptedDefaultsKey),
+               let ids = try? JSONDecoder().decode([String].self, from: data) {
+                seenAcceptedPairingIDs = Set(ids)
+            } else {
+                // First launch with accepted notices: pairings made before
+                // this existed are not "new", so none of them shows a notice.
+                seenAcceptedPairingIDs = Set(people.filter { $0.localRole == .iAmApprover }.map(\.id))
+                saveSeenAcceptedPairingIDs()
+            }
             loadIssuedInvites()
             // Stale secrets from a previous owner identity serve no purpose.
             if ownerIdentity == nil, !inviteStoreFailed, !issuedInvites.isEmpty {
@@ -422,7 +444,7 @@ final class CompanionCoordinator: ObservableObject {
     static let inviteStoreUnavailableMessage =
         "Couldn't read this device's saved invites just now. Your trusted people are unchanged; try again in a moment."
     static let inviteStoreCorruptMessage =
-        "This device's saved invites are damaged and can't be read. Reset them to create invites again. Links not yet used will stop working, and people who joined earlier will need a new invite."
+        "Saved invites on this phone are damaged. Reset them to create new invites."
 
     /// The calm message for the current unreadable state (`nil` while readable
     /// and for `.corrupt`, which has its own card with the reset action).
@@ -516,6 +538,11 @@ final class CompanionCoordinator: ObservableObject {
         }
         if issuedInvites.count != before { saveIssuedInvites() }
         if let pendingInvite, issuedInvites[pendingInvite.invitation.payload.inviteID] == nil { self.pendingInvite = nil }
+    }
+
+    private func saveSeenAcceptedPairingIDs() {
+        guard let sharedDefaults, let data = try? JSONEncoder().encode(seenAcceptedPairingIDs.sorted()) else { return }
+        sharedDefaults.set(data, forKey: Self.seenAcceptedDefaultsKey)
     }
 
     private func saveSeenJoinedPairingIDs() {
@@ -675,9 +702,9 @@ final class CompanionCoordinator: ObservableObject {
         case let local as CompanionLocalError:
             return local.message
         case CompanionTransportError.unavailable, CompanionTransportError.timedOut:
-            return "Couldn't reach the relay. Check your connection and try again."
+            return "Couldn't connect. Check your internet connection and try again."
         case CompanionTransportError.malformedResponse:
-            return "The relay sent back something this prototype couldn't read."
+            return "Got a response this version can't read. Try again later."
         case CompanionTransportError.server(let inner):
             return describeCompanionError(inner)
         case let inner as CompanionError:
@@ -698,14 +725,14 @@ final class CompanionCoordinator: ObservableObject {
         case .malformed(let detail) where detail.localizedCaseInsensitiveContains("state root")
             || detail.localizedCaseInsensitiveContains("owner identity")
             || detail.localizedCaseInsensitiveContains("anchor"):
-            return "The relay's response failed an integrity check (\(detail)). Treating this as untrusted; nothing was changed here."
+            return "The server's response failed an integrity check (\(detail)). Treating this as untrusted; nothing was changed here."
         // R5 Slice B2c: both are integrity-fatal (`AsyncCompanionClient.UseFailureDisposition`)
         // and never retried or abandoned automatically — see `finishFriendRelease`.
         case .relayRollback:
-            return "This device's own record of the relay disagrees with what it just reported. Nothing was changed; this needs attention before trying again."
+            return "This device's own record of the server disagrees with what it just reported. Nothing was changed; this needs attention before trying again."
         case .responseVerificationFailed:
-            return "The relay's response to that action failed a local safety check. Nothing was changed; this needs attention before trying again."
-        default: return "The relay rejected that action (\(error.transportCode))."
+            return "The server's response to that action failed a local safety check. Nothing was changed; this needs attention before trying again."
+        default: return "That didn't go through. Try again."
         }
     }
 
@@ -738,7 +765,8 @@ final class CompanionCoordinator: ObservableObject {
             try? keyStore.deletePrivateKey(for: identity.identityID)
         }
         for key in [ownerIdentityDefaultsKey, approverIdentityDefaultsKey, peopleDefaultsKey,
-                    ownerDisplayNameDefaultsKey, approverDisplayNameDefaultsKey, seenJoinedDefaultsKey,
+                    displayNameDefaultsKey, ownerDisplayNameDefaultsKey, approverDisplayNameDefaultsKey,
+                    seenJoinedDefaultsKey, seenAcceptedDefaultsKey,
                     friendApprovalGateDefaultsKey, useIDsByRequestIDDefaultsKey] + legacyDefaultsKeys {
             sharedDefaults.removeObject(forKey: key)
         }
@@ -764,6 +792,8 @@ final class CompanionCoordinator: ObservableObject {
     }
     /// Re-reads the invite store (as a refresh would) and reports what happened.
     func reloadInviteStoreForTesting() { reloadInviteStore() }
+    /// Seeds the Inbox without a relay round trip.
+    func setInboxItemsForTesting(_ items: [CompanionInboxItem]) { inboxItems = items }
     func restorePendingInviteForTesting() { restorePendingInvite() }
     @discardableResult
     func ensureOwnerIdentityForTesting() throws -> DeviceIdentity { try ensureIdentity(role: .owner) }
@@ -788,29 +818,42 @@ final class CompanionCoordinator: ObservableObject {
         return trimmed
     }
 
-    /// The owner's own name: asked once when creating the first invite and
-    /// editable later. It is signed into each new invite; invites already
-    /// created keep the name they were created with.
-    @discardableResult
-    func setOwnerDisplayName(_ raw: String) -> Bool {
-        guard let name = Self.validatedDisplayName(raw) else { return false }
-        ownerDisplayName = name
-        sharedDefaults?.set(name, forKey: Self.ownerDisplayNameDefaultsKey)
-        return true
+    /// The one stored name. Reads `displayNameDefaultsKey`; when it is not
+    /// set yet, migrates the pre-P3d owner name, then the approver name, and
+    /// removes the old keys.
+    private static func migratedDisplayName(in defaults: UserDefaults?) -> String {
+        guard let defaults else { return "" }
+        defer {
+            defaults.removeObject(forKey: ownerDisplayNameDefaultsKey)
+            defaults.removeObject(forKey: approverDisplayNameDefaultsKey)
+        }
+        if let stored = defaults.string(forKey: displayNameDefaultsKey), let name = validatedDisplayName(stored) { return name }
+        for key in [ownerDisplayNameDefaultsKey, approverDisplayNameDefaultsKey] {
+            if let old = defaults.string(forKey: key), let name = validatedDisplayName(old) {
+                defaults.set(name, forKey: displayNameDefaultsKey)
+                return name
+            }
+        }
+        return ""
     }
 
-    /// The friend's name, remembered so the next Accept prefills it.
-    private func rememberApproverDisplayName(_ name: String) {
-        approverDisplayName = name
-        sharedDefaults?.set(name, forKey: Self.approverDisplayNameDefaultsKey)
+    /// The user's name: asked once (on the first Create or Accept) and
+    /// editable in Settings. It is signed into each new invite and sent with
+    /// each acceptance; invites already created keep the name they had.
+    @discardableResult
+    func setDisplayName(_ raw: String) -> Bool {
+        guard let name = Self.validatedDisplayName(raw) else { return false }
+        displayName = name
+        sharedDefaults?.set(name, forKey: Self.displayNameDefaultsKey)
+        return true
     }
 
     // MARK: - Invite (owner)
 
     func createInvite() async {
         guard isAvailable else { return }
-        guard !ownerDisplayName.isEmpty else {
-            lastError = "Add your name first, so the person you invite knows it's from you."
+        guard !displayName.isEmpty else {
+            lastError = "Add your name so they know the invite is from you."
             return
         }
         retryInviteStoreReadIfNeeded()
@@ -824,16 +867,16 @@ final class CompanionCoordinator: ObservableObject {
             let issued: IssuedInvite
             #if DEBUG
             if let issueInviteOverride {
-                issued = try await issueInviteOverride(UUID().uuidString, ownerDisplayName)
+                issued = try await issueInviteOverride(UUID().uuidString, displayName)
             } else {
                 let client = makeClient(signer: try signer(for: identity))
                 issued = try await client.createInvite(inviteID: UUID().uuidString, validFor: Self.inviteLifetime, now: Date(),
-                                                       ownerDisplayName: ownerDisplayName)
+                                                       ownerDisplayName: displayName)
             }
             #else
             let client = makeClient(signer: try signer(for: identity))
             issued = try await client.createInvite(inviteID: UUID().uuidString, validFor: Self.inviteLifetime, now: Date(),
-                                                   ownerDisplayName: ownerDisplayName)
+                                                   ownerDisplayName: displayName)
             #endif
             // Kept (token included, in the Keychain) for as long as the
             // pairing it creates exists: `JoinedAcceptanceCheck` needs it on
@@ -871,6 +914,26 @@ final class CompanionCoordinator: ObservableObject {
         let updated = newestByPerson.values.sorted { $0.pairing.createdAt < $1.pairing.createdAt }
             .map { JoinedNotice(id: $0.id, name: $0.nickname) }
         if updated != joinedNotices { joinedNotices = updated }
+        recomputeAcceptedNotices()
+    }
+
+    /// Dismisses one friend-side "You're now a trusted person" notice for good.
+    func dismissAcceptedNotice(id: String) {
+        seenAcceptedPairingIDs.insert(id)
+        saveSeenAcceptedPairingIDs()
+        recomputeAcceptedNotices()
+    }
+
+    private func recomputeAcceptedNotices() {
+        var newestByOwner: [String: CompanionPerson] = [:]
+        for person in people where person.localRole == .iAmApprover && person.pairing.state == .active
+            && !person.approverStoppedHelping && !seenAcceptedPairingIDs.contains(person.id) {
+            if let existing = newestByOwner[person.counterpartIdentityID], existing.pairing.createdAt >= person.pairing.createdAt { continue }
+            newestByOwner[person.counterpartIdentityID] = person
+        }
+        let updated = newestByOwner.values.sorted { $0.pairing.createdAt < $1.pairing.createdAt }
+            .map { AcceptedNotice(id: $0.id, ownerName: $0.nickname) }
+        if updated != acceptedNotices { acceptedNotices = updated }
     }
 
     // MARK: - Incoming invite (friend): look up, then Accept
@@ -964,7 +1027,7 @@ final class CompanionCoordinator: ObservableObject {
         case let direct as CompanionError: inner = direct
         case CompanionTransportError.server(let server): inner = server
         case CompanionTransportError.unavailable, CompanionTransportError.timedOut:
-            return "Couldn't reach the relay. Check your connection and open the link again."
+            return "Couldn't connect. Check your internet connection, then open the link again."
         default: break
         }
         switch inner {
@@ -989,7 +1052,7 @@ final class CompanionCoordinator: ObservableObject {
     func acceptIncomingInvite(_ incoming: IncomingInvite, name: String) async -> Bool {
         guard isAvailable else { return false }
         guard let displayName = Self.validatedDisplayName(name) else {
-            lastError = "Enter the name you'd like them to see."
+            lastError = "Add your name so \(incoming.ownerName) knows it's you."
             return false
         }
         do {
@@ -1009,11 +1072,11 @@ final class CompanionCoordinator: ObservableObject {
                                                         acceptanceID: UUID().uuidString, now: Date())
             #endif
             guard pairing.approver == identity, pairing.owner == incoming.invitation.payload.owner else {
-                lastError = "The relay returned a pairing that doesn't match this invite; ignoring it."
+                lastError = "The server returned a pairing that doesn't match this invite; ignoring it."
                 return false
             }
             guard upsertAcceptedPairing(pairing) else { return false }
-            rememberApproverDisplayName(displayName)
+            setDisplayName(displayName)
             incomingInvite = .none
             lastError = nil; needsRepair = false
             return true
@@ -1052,7 +1115,7 @@ final class CompanionCoordinator: ObservableObject {
             case .update(let updated): people[index].pairing = updated
             case .unchanged: break
             case .rejected:
-                lastError = "The relay returned a pairing that conflicts with one already stored; ignoring it."
+                lastError = "The server returned a pairing that conflicts with one already stored; ignoring it."
                 return false
             }
         } else {
@@ -1060,6 +1123,7 @@ final class CompanionCoordinator: ObservableObject {
                                           localRole: .iAmApprover, pairing: pairing, consent: nil))
         }
         savePeople()
+        recomputeJoinedNotices()
         return true
     }
 
@@ -1150,7 +1214,7 @@ final class CompanionCoordinator: ObservableObject {
             savePeople()
             return true
         case .rejected(let reason):
-            lastError = "The relay returned unexpected consent data (\(reason)); ignoring it."
+            lastError = "The server returned unexpected consent data (\(reason)); ignoring it."
             return false
         }
     }
@@ -1620,7 +1684,7 @@ final class CompanionCoordinator: ObservableObject {
         } catch {
             switch AsyncCompanionClient.UseFailureDisposition.classify(error) {
             case .retryable:
-                lastError = "Couldn't reach the relay. Pull to refresh to finish."
+                lastError = "Couldn't connect. Pull down to finish."
             case .definitive:
                 let message = Self.definitiveUseFailureMessage(error)
                 do {
@@ -1634,7 +1698,7 @@ final class CompanionCoordinator: ObservableObject {
                     lastError = "\(message) This device could not clear the pending request locally (\(abandonError.localizedDescription)); use Discard pending friend release in Settings if it stays stuck."
                 }
             case .integrityFatal:
-                lastError = "The relay's response failed an integrity check. Nothing was changed here; this needs attention before trying again."
+                lastError = "The server's response failed an integrity check. Nothing was changed here; this needs attention before trying again."
             }
         }
     }
@@ -1840,18 +1904,48 @@ final class CompanionCoordinator: ObservableObject {
         return Date() >= pendingInvite.invitation.payload.expiresAt
     }
 
-    /// Friend first-run: nobody has been invited and nothing is set up on the
-    /// owner side, or a link was just opened, so "Got an invite link?" goes
+    /// Friend first-run: nobody has been invited and no one is paired, or a link was just opened, so "Got an invite link?" goes
     /// above the owner invite card instead of below all its copy.
     var showsAcceptInviteFirst: Bool {
         if case .none = incomingInvite {} else { return true }
-        return ownerDisplayName.isEmpty && pendingInvite == nil && people.isEmpty
+        return pendingInvite == nil && people.isEmpty
     }
 
     /// True while an unexpired invite has not yet produced a person on this device.
     var hasOutstandingInvite: Bool {
         let now = Date()
         return issuedInvites.values.contains { now < $0.invitation.payload.expiresAt && !inviteHasPerson($0) }
+    }
+
+    /// Items that need the user right now, for the "Waiting for you" card:
+    /// a request addressed to this device that it has not decided yet, or the
+    /// owner's own approved request that still has an "End lock now" action
+    /// (or is finishing). Everything else is history in the Inbox.
+    func waitingItems(coordinator: any FriendReleaseLifecycle) -> [CompanionInboxItem] {
+        inboxItems.filter { isWaitingForUser($0, coordinator: coordinator) }
+    }
+
+    /// The Inbox history: every item that is not in the Waiting card.
+    func historyItems(coordinator: any FriendReleaseLifecycle) -> [CompanionInboxItem] {
+        inboxItems.filter { !isWaitingForUser($0, coordinator: coordinator) }
+    }
+
+    private func isWaitingForUser(_ item: CompanionInboxItem, coordinator: any FriendReleaseLifecycle) -> Bool {
+        if !item.isMine { return item.status == .pending && item.myDecision == .pending }
+        guard item.status == .approved else { return false }
+        return Self.shouldShowFriendReleaseAction(for: item, gateEnabled: friendApprovalCanEndLocksEnabled)
+            || friendReleaseRequestState(for: item, coordinator: coordinator) == .finishing
+    }
+
+    /// Plain-word badge for an Inbox row.
+    static func statusBadgeTitle(_ status: TrustedRequestStatus) -> String {
+        switch status {
+        case .pending: return "Waiting"
+        case .approved: return "Approved"
+        case .declined: return "Declined"
+        case .cancelled: return "Cancelled"
+        case .expired: return "Expired"
+        }
     }
 
     /// True while any request this device can see is still waiting for a decision.
@@ -1921,7 +2015,7 @@ final class CompanionCoordinator: ObservableObject {
         #endif
         inboxItems = items.sorted { $0.request.createdAt > $1.request.createdAt }
         inboxDataNotice = rejectionCount > 0
-            ? "The relay returned unexpected pairing or consent data; \(rejectionCount) item(s) were ignored."
+            ? "The server returned unexpected pairing or consent data; \(rejectionCount) item(s) were ignored."
             : nil
         if let encounteredError {
             fail(encounteredError)
@@ -1933,7 +2027,7 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     static let integrityNoticeText =
-        "Some activity reported by the relay didn't check out, so it was ignored. Nothing was changed. If this keeps showing, remove the person involved and send a new invite."
+        "Some activity reported by the server didn't check out, so it was ignored. Nothing was changed. If this keeps showing, remove the person involved and send a new invite."
 
     /// Folds one inbox response into the local registry. Returns the number
     /// of rejected (untrusted or malformed) entries so the caller can surface

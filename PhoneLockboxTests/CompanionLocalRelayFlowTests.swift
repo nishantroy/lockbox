@@ -43,7 +43,7 @@ final class CompanionLocalRelayFlowTests: XCTestCase {
     /// Accept. Nothing else: the owner just refreshes and the person is there,
     /// already trusted for both scopes.
     private func pairFullyTrusted(owner: CompanionCoordinator, friend: CompanionCoordinator) async throws {
-        XCTAssertTrue(owner.setOwnerDisplayName("Owner"))
+        XCTAssertTrue(owner.setDisplayName("Owner"))
         await owner.createInvite()
         XCTAssertNil(owner.lastError)
         let issued = try XCTUnwrap(owner.pendingInvite)

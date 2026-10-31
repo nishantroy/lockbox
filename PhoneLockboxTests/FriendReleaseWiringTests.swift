@@ -147,6 +147,49 @@ final class FriendReleaseWiringTests: XCTestCase {
                        "a request this device is only helping with must never show the owner-only action")
     }
 
+    // MARK: - P3d: "Waiting for you" selection and status badges
+
+    func testWaitingForYouHoldsOnlyActionableItemsAndHistoryHoldsTheRest() throws {
+        let fixture = try makeFixture()
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        let ownerID = fixture.ownerSigner.identity.identityID
+        let approverID = fixture.approverSigner.identity.identityID
+
+        // Friend side: undecided and pending is waiting; already decided or settled is history.
+        let pendingForMe = CompanionInboxItem(request: fixture.request, viewerIdentityID: approverID)
+        var decided = fixture.request
+        decided.decisions[approverID] = .approved
+        let decidedByMe = CompanionInboxItem(request: decided, viewerIdentityID: approverID)
+        var declined = fixture.request
+        declined.status = .declined
+        let settled = CompanionInboxItem(request: declined, viewerIdentityID: approverID)
+        // Owner side: own pending request is history; own approved request waits only while the gate shows End lock now.
+        let ownPending = CompanionInboxItem(request: fixture.request, viewerIdentityID: ownerID)
+        var approved = fixture.request
+        approved.status = .approved
+        let ownApproved = CompanionInboxItem(request: approved, viewerIdentityID: ownerID)
+
+        companion.setInboxItemsForTesting([pendingForMe, decidedByMe, settled, ownPending, ownApproved])
+        companion.friendApprovalCanEndLocksEnabled = false
+        XCTAssertEqual(companion.waitingItems(coordinator: fake).map(\.id), [pendingForMe.id])
+        XCTAssertEqual(Set(companion.historyItems(coordinator: fake).map(\.id)),
+                       Set([decidedByMe.id, settled.id, ownPending.id, ownApproved.id]))
+
+        companion.friendApprovalCanEndLocksEnabled = true
+        XCTAssertEqual(Set(companion.waitingItems(coordinator: fake).map(\.id)), Set([pendingForMe.id, ownApproved.id]))
+        XCTAssertFalse(companion.historyItems(coordinator: fake).contains { $0.id == ownApproved.id })
+    }
+
+    func testStatusBadgesUsePlainWords() {
+        XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.pending), "Waiting")
+        XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.approved), "Approved")
+        XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.declined), "Declined")
+        XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.cancelled), "Cancelled")
+        XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.expired), "Expired")
+    }
+
     // MARK: - P1-3: selectFriendRelease (pure selection + OwnerApprovalCheck)
 
     private struct Fixture {
@@ -460,7 +503,7 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertEqual(fake.applyCallCount, 0)
         XCTAssertEqual(fake.abandonCallCount, 0)
         XCTAssertNotNil(fake.pendingFriendReleaseIntent, "retryable must keep the intent")
-        XCTAssertEqual(companion.lastError, "Couldn't reach the relay. Pull to refresh to finish.")
+        XCTAssertEqual(companion.lastError, "Couldn't connect. Pull down to finish.")
     }
 
     func testFinishFriendReleaseAbandonsOnADefinitiveUseFailure() async throws {
@@ -502,7 +545,7 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertEqual(fake.applyCallCount, 0)
         XCTAssertEqual(fake.abandonCallCount, 0, "integrityFatal must never abandon")
         XCTAssertNotNil(fake.pendingFriendReleaseIntent, "integrityFatal must keep the intent")
-        XCTAssertEqual(companion.lastError, "The relay's response failed an integrity check. Nothing was changed here; this needs attention before trying again.")
+        XCTAssertEqual(companion.lastError, "The server's response failed an integrity check. Nothing was changed here; this needs attention before trying again.")
     }
 
     func testFinishFriendReleaseApplyNoOpIsTerminalAndNotRetried() async throws {

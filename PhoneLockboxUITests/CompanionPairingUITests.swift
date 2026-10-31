@@ -78,6 +78,10 @@ final class CompanionPairingUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 10), .completed)
         XCTAssertTrue(app.staticTexts["Ari"].exists)
         attachScreenshot(named: "03-owner-notice-dismissed")
+
+        // Bottom of the page (P3-9): the last card must clear the tab bar.
+        for _ in 0..<6 { app.swipeUp() }
+        attachScreenshot(named: "03b-people-bottom-scrolled")
     }
 
     // MARK: - Friend side
@@ -109,6 +113,13 @@ final class CompanionPairingUITests: XCTestCase {
         attachScreenshot(named: "04-friend-invite-prompt")
         accept.tap()
 
+        // The friend gets a one-time confirmation where the invite was.
+        let acceptedNotice = app.staticTexts["acceptedNotice.text"]
+        XCTAssertTrue(acceptedNotice.waitForExistence(timeout: 30), "no confirmation notice after Accept")
+        XCTAssertEqual(acceptedNotice.label, "You're now a trusted person for Dana")
+        XCTAssertTrue(acceptedNotice.isHittable, "the notice must be visible without scrolling")
+        attachScreenshot(named: "05a-friend-accepted-notice")
+
         let paired = app.staticTexts["helping.statusText"]
         XCTAssertTrue(paired.waitForExistence(timeout: 30), "the paired state never appeared after Accept")
         XCTAssertEqual(paired.label, "You're a trusted person for Dana")
@@ -131,6 +142,8 @@ final class CompanionPairingUITests: XCTestCase {
         let askTitle = app.staticTexts["Dana is asking for help"]
         XCTAssertTrue(askTitle.waitForExistence(timeout: 60), "the friend never saw the request with the owner's name")
         XCTAssertTrue(app.buttons["Approve"].exists)
+        XCTAssertTrue(app.staticTexts["Waiting for you"].exists, "the pending request sits in the Waiting for you card")
+        XCTAssertTrue(askTitle.isHittable, "the request must be visible without scrolling")
         attachScreenshot(named: "06-friend-sees-request")
     }
 
@@ -243,7 +256,7 @@ final class CompanionPairingUITests: XCTestCase {
         let copyButton = app.buttons["inviteSomeone.copyLinkButton"]
         XCTAssertTrue(copyButton.waitForExistence(timeout: 10), "Copy link button never appeared")
         copyButton.tap()
-        XCTAssertEqual(copyButton.label, "Copied")
+        XCTAssertEqual(copyButton.label, "Link copied")
         return link
     }
 

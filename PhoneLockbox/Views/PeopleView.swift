@@ -15,6 +15,10 @@ struct PeopleView: View {
     static let incomingInviteScrollID = "people.incomingInviteCard"
     /// Scroll anchor of the newest "‹Name› joined" notice.
     static let joinedNoticeScrollID = "people.joinedNotice"
+    /// Scroll anchor of the friend's "You're now a trusted person" notice.
+    static let acceptedNoticeScrollID = "people.acceptedNotice"
+    /// Scroll anchor of the "Waiting for you" card.
+    static let waitingScrollID = "people.waitingForYou"
 
 #if canImport(CompanionKit)
     private var incomingInviteKey: String {
@@ -46,6 +50,22 @@ struct PeopleView: View {
             withAnimation { proxy.scrollTo(Self.joinedNoticeScrollID, anchor: .top) }
         }
     }
+
+    private func scrollToAcceptedNotice(_ proxy: ScrollViewProxy) {
+        guard !companion.acceptedNotices.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            withAnimation { proxy.scrollTo(Self.acceptedNoticeScrollID, anchor: .top) }
+        }
+    }
+
+    /// A request that needs the user is brought into view the moment it arrives.
+    private func scrollToWaiting(_ proxy: ScrollViewProxy) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            withAnimation { proxy.scrollTo(Self.waitingScrollID, anchor: .top) }
+        }
+    }
 #endif
 
     var body: some View {
@@ -56,6 +76,12 @@ struct PeopleView: View {
                 .onAppear { scrollToIncomingInvite(proxy) }
                 .onChange(of: companion.joinedNotices.map(\.id)) { old, new in
                     if new.contains(where: { !old.contains($0) }) { scrollToJoinedNotice(proxy) }
+                }
+                .onChange(of: companion.acceptedNotices.map(\.id)) { old, new in
+                    if new.contains(where: { !old.contains($0) }) { scrollToAcceptedNotice(proxy) }
+                }
+                .onChange(of: companion.waitingItems(coordinator: coordinator).map(\.id)) { old, new in
+                    if new.contains(where: { !old.contains($0) }) { scrollToWaiting(proxy) }
                 }
         }
 #else
@@ -75,25 +101,32 @@ struct PeopleView: View {
                     IncomingInviteCard(companion: companion)
                         .id(Self.incomingInviteScrollID)
                 }
-                // Owner side: one-time, dismissable, non-blocking.
+                // One-time, dismissable, non-blocking notices.
                 ForEach(Array(companion.joinedNotices.enumerated()), id: \.element.id) { index, notice in
-                    JoinedNoticeCard(notice: notice) { companion.dismissJoinedNotice(id: notice.id) }
-                        .id(index == 0 ? Self.joinedNoticeScrollID : "people.joinedNotice.\(notice.id)")
+                    DismissibleNoticeCard(title: "\(notice.name) joined",
+                                          detail: "They can now approve ending a lock early when you ask.",
+                                          titleIdentifier: "joinedNotice.text",
+                                          dismissIdentifier: "joinedNotice.dismissButton") {
+                        companion.dismissJoinedNotice(id: notice.id)
+                    }
+                    .id(index == 0 ? Self.joinedNoticeScrollID : "people.joinedNotice.\(notice.id)")
                 }
-                if companion.inviteStoreIsCorrupt, companion.ownerIdentity != nil {
-                    InviteStoreResetCard(companion: companion)
+                ForEach(Array(companion.acceptedNotices.enumerated()), id: \.element.id) { index, notice in
+                    DismissibleNoticeCard(title: "You're now a trusted person for \(notice.ownerName)",
+                                          detail: "\(notice.ownerName) can ask you to approve ending a lock early. You'll see requests here.",
+                                          titleIdentifier: "acceptedNotice.text",
+                                          dismissIdentifier: "acceptedNotice.dismissButton") {
+                        companion.dismissAcceptedNotice(id: notice.id)
+                    }
+                    .id(index == 0 ? Self.acceptedNoticeScrollID : "people.acceptedNotice.\(notice.id)")
                 }
-                // First run (nobody invited, no owner setup yet) or a link was
-                // just opened: "Got an invite link?" comes before the owner copy.
-                if companion.showsAcceptInviteFirst {
-                    AcceptInviteCard(companion: companion)
+                // Only what needs the user now; everything else is Inbox history.
+                let waiting = companion.waitingItems(coordinator: coordinator)
+                if !waiting.isEmpty {
+                    WaitingForYouCard(coordinator: coordinator, companion: companion, items: waiting)
+                        .id(Self.waitingScrollID)
                 }
-                IntroCard()
-                InviteSomeoneCard(companion: companion)
-                if !companion.showsAcceptInviteFirst {
-                    AcceptInviteCard(companion: companion)
-                }
-                if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
+                if coordinator.companionActiveSessionIdentity != nil {
                     AskToEndEarlyCard(coordinator: coordinator, companion: companion)
                 }
                 if !companion.trustedPeople.isEmpty || !companion.helpingPeople.isEmpty {
@@ -108,6 +141,18 @@ struct PeopleView: View {
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("people.reinviteHint")
                     }
+                }
+                if companion.inviteStoreIsCorrupt, companion.ownerIdentity != nil {
+                    InviteStoreResetCard(companion: companion)
+                }
+                // First run (nobody invited or paired) or a link was just
+                // opened: "Got an invite link?" comes before the owner invite.
+                if companion.showsAcceptInviteFirst {
+                    AcceptInviteCard(companion: companion)
+                }
+                InviteSomeoneCard(companion: companion)
+                if !companion.showsAcceptInviteFirst {
+                    AcceptInviteCard(companion: companion)
                 }
                 InboxCard(coordinator: coordinator, companion: companion)
                 if let notice = companion.inboxDataNotice {
@@ -231,10 +276,16 @@ private struct CopyLinkButton: View {
                 copied = false
             }
         } label: {
-            Label(copied ? "Copied" : "Copy link", systemImage: copied ? "checkmark" : "doc.on.doc")
+            Label {
+                Text(copied ? "Copied" : "Copy link")
+            } icon: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .contentTransition(.symbolEffect(.replace))
+            }
         }
         .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-        .accessibilityLabel(copied ? "Copied" : "Copy link")
+        .animation(.snappy, value: copied)
+        .accessibilityLabel(copied ? "Link copied" : "Copy link")
         .accessibilityHint("Copies the invite link to the clipboard, so you can paste it into a message")
         .accessibilityIdentifier("inviteSomeone.copyLinkButton")
         .onDisappear { resetTask?.cancel(); copied = false }
@@ -270,26 +321,13 @@ private struct InviteStoreResetCard: View {
     }
 }
 
-private struct IntroCard: View {
-    var body: some View {
-        LockboxCard {
-            VStack(alignment: .leading, spacing: 13) {
-                HStack(spacing: 12) {
-                    LockboxIconBadge(systemImage: "person.2.fill", color: LockboxTheme.accent)
-                    Text("Set up a trusted person")
-                        .font(.title3.weight(.semibold))
-                }
-                Text("Send a link. When they tap Accept, they can approve ending one of your locks early, only when you ask. No account, email or code is needed. This does not use Screen Time, and app selections and usage are never shared.")
-                    .font(.subheadline)
-                    .foregroundStyle(LockboxTheme.secondary)
-            }
-        }
-    }
-}
-
-/// Owner side: "‹Name› joined", shown once and dismissable.
-private struct JoinedNoticeCard: View {
-    let notice: JoinedNotice
+/// A one-time, dismissable notice ("‹Name› joined" for the owner, "You're now
+/// a trusted person" for the friend).
+private struct DismissibleNoticeCard: View {
+    let title: String
+    let detail: String
+    let titleIdentifier: String
+    let dismissIdentifier: String
     let onDismiss: () -> Void
 
     var body: some View {
@@ -297,10 +335,10 @@ private struct JoinedNoticeCard: View {
             HStack(alignment: .top, spacing: 12) {
                 LockboxIconBadge(systemImage: "person.fill.checkmark", color: LockboxTheme.focus)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("\(notice.name) joined")
+                    Text(title)
                         .font(.subheadline.weight(.semibold))
-                        .accessibilityIdentifier("joinedNotice.text")
-                    Text("They can now approve ending a lock early when you ask.")
+                        .accessibilityIdentifier(titleIdentifier)
+                    Text(detail)
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
@@ -313,8 +351,40 @@ private struct JoinedNoticeCard: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(LockboxTheme.secondary)
                 .accessibilityLabel("Dismiss")
-                .accessibilityIdentifier("joinedNotice.dismissButton")
+                .accessibilityIdentifier(dismissIdentifier)
             }
+        }
+    }
+}
+
+/// The user's name, asked for once inside whichever card is in use.
+private struct InlineNameField: View {
+    @Binding var text: String
+    let footnote: String
+    let identifier: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Your name", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .submitLabel(.done)
+                .accessibilityLabel("Your name")
+                .accessibilityIdentifier(identifier)
+            Text(footnote)
+                .font(.footnote)
+                .foregroundStyle(LockboxTheme.secondary)
+        }
+    }
+}
+
+/// Two buttons side by side, stacking at accessibility text sizes.
+private struct AdaptiveButtonRow<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) { content }
+            VStack(spacing: 10) { content }
         }
     }
 }
@@ -326,6 +396,9 @@ private struct IncomingInviteCard: View {
     @ObservedObject var companion: CompanionCoordinator
     @State private var name = ""
     @State private var isAccepting = false
+
+    /// No name saved yet: ask once, inline. Otherwise Accept uses the saved name.
+    private var needsName: Bool { companion.displayName.isEmpty }
 
     var body: some View {
         LockboxCard {
@@ -341,7 +414,7 @@ private struct IncomingInviteCard: View {
                 .accessibilityIdentifier("incomingInvite.loading")
             case .failed(let message):
                 VStack(alignment: .leading, spacing: 13) {
-                    Label(message, systemImage: "link.badge.plus")
+                    Label(message, systemImage: "exclamationmark.circle")
                         .font(.subheadline)
                         .accessibilityIdentifier("incomingInvite.message")
                     Button("OK") { companion.dismissIncomingInvite() }
@@ -359,22 +432,23 @@ private struct IncomingInviteCard: View {
                     Text("Accepting lets you approve ending one of their locks early, only when they ask. You can stop at any time.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
-                    TextField("Your name", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("incomingInvite.nameField")
-                    Text("\(incoming.ownerName) will see this name.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
-                    HStack(spacing: 10) {
+                    if needsName {
+                        InlineNameField(text: $name,
+                                        footnote: "\(incoming.ownerName) will see this name. You can change it in Settings.",
+                                        identifier: "incomingInvite.nameField")
+                    }
+                    AdaptiveButtonRow {
                         Button(isAccepting ? "Accepting…" : "Accept") {
                             isAccepting = true
+                            let chosen = needsName ? name : companion.displayName
                             Task {
-                                await companion.acceptIncomingInvite(incoming, name: name)
+                                await companion.acceptIncomingInvite(incoming, name: chosen)
                                 isAccepting = false
                             }
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                        .disabled(isAccepting || CompanionCoordinator.validatedDisplayName(name) == nil)
+                        .disabled(isAccepting || (needsName && CompanionCoordinator.validatedDisplayName(name) == nil))
+                        .accessibilityHint(needsName ? "Enter your name first" : "Becomes a trusted person for \(incoming.ownerName)")
                         .accessibilityIdentifier("incomingInvite.acceptButton")
 
                         Button("Not now") { companion.dismissIncomingInvite() }
@@ -383,7 +457,6 @@ private struct IncomingInviteCard: View {
                             .accessibilityIdentifier("incomingInvite.notNowButton")
                     }
                 }
-                .onAppear { if name.isEmpty { name = companion.approverDisplayName } }
             }
         }
         // Deliberately no identifier on the card itself: it can propagate
@@ -395,9 +468,9 @@ private struct InviteSomeoneCard: View {
     @ObservedObject var companion: CompanionCoordinator
     @State private var isCreating = false
     @State private var nameDraft = ""
-    @State private var isEditingName = false
 
-    private var needsName: Bool { companion.ownerDisplayName.isEmpty }
+    private var needsName: Bool { companion.displayName.isEmpty }
+    private var isFirstRun: Bool { companion.trustedPeople.isEmpty }
 
     /// The raw link (a bearer secret) is exposed to accessibility only in
     /// DEBUG builds, where UI tests read it; release builds expose a non-secret value.
@@ -412,46 +485,24 @@ private struct InviteSomeoneCard: View {
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
-                LockboxSectionLabel("Invite a trusted person", systemImage: "person.badge.plus")
-                Text("Create a link and share it however you'd normally reach them (Messages, AirDrop). It works once, for one hour. Having the link never unlocks anything by itself.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-
-                if needsName || isEditingName {
-                    TextField("Your name", text: $nameDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("inviteSomeone.nameField")
-                    Text("They'll see this name on your invite.")
-                        .font(.footnote)
+                if isFirstRun {
+                    HStack(spacing: 12) {
+                        LockboxIconBadge(systemImage: "person.2.fill", color: LockboxTheme.accent)
+                        Text("Set up a trusted person")
+                            .font(.title3.weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    Text("Send a link to someone you trust. Once they accept, they can approve ending a lock early, only when you ask. Your apps and usage are never shared.")
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
-                    if isEditingName {
-                        HStack(spacing: 10) {
-                            Button("Save name") {
-                                if companion.setOwnerDisplayName(nameDraft) { isEditingName = false }
-                            }
-                            .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                            .disabled(CompanionCoordinator.validatedDisplayName(nameDraft) == nil)
-                            .accessibilityIdentifier("inviteSomeone.saveNameButton")
-                            Button("Cancel") { isEditingName = false }
-                                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                        }
-                    }
                 } else {
-                    HStack {
-                        Text("Invites are sent as \(companion.ownerDisplayName)")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
-                            .accessibilityIdentifier("inviteSomeone.nameLabel")
-                        Spacer()
-                        Button("Edit") {
-                            nameDraft = companion.ownerDisplayName
-                            isEditingName = true
-                        }
-                        .font(.footnote.weight(.semibold))
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier("inviteSomeone.editNameButton")
-                        .accessibilityHint("Changes the name shown on new invites")
-                    }
+                    LockboxSectionLabel("Invite a trusted person", systemImage: "person.badge.plus")
+                }
+
+                if needsName && !companion.inviteStoreIsCorrupt {
+                    InlineNameField(text: $nameDraft,
+                                    footnote: "People you invite will see this name. You can change it in Settings.",
+                                    identifier: "inviteSomeone.nameField")
                 }
 
                 if let issued = companion.pendingInvite {
@@ -473,46 +524,16 @@ private struct InviteSomeoneCard: View {
         }
     }
 
+    private func create() {
+        if needsName, !companion.setDisplayName(nameDraft) { return }
+        isCreating = true
+        Task { await companion.createInvite(); isCreating = false }
+    }
+
     @ViewBuilder
     private func inviteActions(issued: IssuedInvite?, expired: Bool) -> some View {
         VStack(alignment: .leading, spacing: 13) {
-            Button {
-                if needsName, !companion.setOwnerDisplayName(nameDraft) { return }
-                isCreating = true
-                Task { await companion.createInvite(); isCreating = false }
-            } label: {
-                Label(isCreating ? "Creating…" : (expired ? "Create a new invite" : "Create an invite to share"),
-                      systemImage: "link.badge.plus")
-            }
-            .buttonStyle(LockboxActionButtonStyle(emphasis: expired ? .primary : .secondary))
-            .disabled(isCreating || isEditingName || companion.inviteStoreIsCorrupt || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
-            .accessibilityHint("Creates a one-use invitation link")
-            .accessibilityIdentifier("inviteSomeone.createInviteButton")
-
-            if companion.inviteStoreIsCorrupt {
-                Text("Reset saved invites first (see above), then create an invite.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-                    .accessibilityIdentifier("inviteSomeone.resetFirstHint")
-            }
-
-            if let issued, expired {
-                Label("This link expired. Create a new one.", systemImage: "clock.badge.exclamationmark")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-                    .accessibilityIdentifier("inviteSomeone.expiredNotice")
-                    .accessibilityHint("The old link no longer works")
-                    .id(issued.invitation.payload.inviteID)
-            } else if let issued {
-                // The visible text is a short line; the full link stays
-                // reachable under the same identifier via the
-                // accessibility *value* so UI tests can read it exactly.
-                Text("Invite link ready")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(LockboxTheme.secondary)
-                    .accessibilityIdentifier("inviteSomeone.inviteLinkText")
-                    .accessibilityLabel("Invite link ready")
-                    .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
+            if let issued, !expired {
                 ShareLink(item: issued.shareLink) {
                     Label("Share invite link", systemImage: "square.and.arrow.up")
                 }
@@ -522,40 +543,108 @@ private struct InviteSomeoneCard: View {
                 CopyLinkButton(link: issued.shareLink, expiresAt: issued.invitation.payload.expiresAt)
                     .id(issued.invitation.payload.inviteID)
                 #endif
-                Text("When they tap Accept, they appear under your trusted people. There's nothing for you to confirm.")
+                // The full link stays reachable under this identifier via the
+                // accessibility *value* so UI tests can read it exactly.
+                Text("The link works once, for one hour.")
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
+                    .accessibilityIdentifier("inviteSomeone.inviteLinkText")
+                    .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
+                Button(isCreating ? "Creating…" : "Make a new link") { create() }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LockboxTheme.accent)
+                    .frame(minHeight: 44)
+                    .disabled(isCreating)
+                    .accessibilityHint("Creates another one-use invitation link")
+                    .accessibilityIdentifier("inviteSomeone.createInviteButton")
+            } else if !companion.inviteStoreIsCorrupt {
+                if let issued, expired {
+                    Label("This link expired. Create a new one.", systemImage: "clock.badge.exclamationmark")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                        .accessibilityIdentifier("inviteSomeone.expiredNotice")
+                        .accessibilityHint("The old link no longer works")
+                        .id(issued.invitation.payload.inviteID)
+                }
+                Button {
+                    create()
+                } label: {
+                    Label(isCreating ? "Creating…" : (expired ? "Create a new invite" : "Create invite link"),
+                          systemImage: "link.badge.plus")
+                }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                .disabled(isCreating || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
+                .accessibilityHint(needsName ? "Enter your name first, then creates a one-use invitation link"
+                                             : "Creates a one-use invitation link")
+                .accessibilityIdentifier("inviteSomeone.createInviteButton")
             }
         }
     }
 }
 
-/// Manual fallback for a link that didn't open the app when tapped.
+/// Fallback for a link that didn't open the app when tapped. `PasteButton`
+/// reads the clipboard only on the user's tap, with no system prompt.
 private struct AcceptInviteCard: View {
     @ObservedObject var companion: CompanionCoordinator
-    @State private var pastedInvite = ""
+
+    private var hasPeople: Bool { !companion.trustedPeople.isEmpty || !companion.helpingPeople.isEmpty }
+
+    private var pasteButton: some View {
+        PasteButton(payloadType: String.self) { strings in
+            guard let text = strings.first else { return }
+            Task { @MainActor in _ = companion.openInviteLink(text) }
+        }
+        .labelStyle(.titleAndIcon)
+        .accessibilityLabel("Paste invite link")
+        .accessibilityHint("Opens the invite link on your clipboard")
+        .accessibilityIdentifier("acceptInvite.pasteButton")
+    }
+
+    var body: some View {
+        LockboxCard {
+            if hasPeople {
+                // Compact once the user is set up: a single row.
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        Label("Got an invite link?", systemImage: "hand.raised")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        pasteButton
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Got an invite link?", systemImage: "hand.raised")
+                            .font(.subheadline.weight(.semibold))
+                        pasteButton
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 13) {
+                    LockboxSectionLabel("Got an invite link?", systemImage: "hand.raised")
+                    Text("Tapping the link opens it here. If it didn't, paste it.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                    pasteButton
+                }
+            }
+        }
+    }
+}
+
+/// Requests that need the user right now. History stays in the Inbox.
+private struct WaitingForYouCard: View {
+    @ObservedObject var coordinator: ScreenTimeCoordinator
+    @ObservedObject var companion: CompanionCoordinator
+    let items: [CompanionInboxItem]
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
-                LockboxSectionLabel("Got an invite link?", systemImage: "hand.raised")
-                Text("Tapping the link opens it here. If that didn't work, paste it below.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-                TextField("Paste invite link", text: $pastedInvite, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .accessibilityIdentifier("acceptInvite.pastedInviteField")
-                Button("Open invite") {
-                    companion.openInviteLink(pastedInvite)
-                    pastedInvite = ""
+                LockboxSectionLabel("Waiting for you", systemImage: "bell.badge")
+                ForEach(items) { item in
+                    InboxRow(coordinator: coordinator, companion: companion, item: item)
+                    if item.id != items.last?.id { Divider().overlay(LockboxTheme.border) }
                 }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                .disabled(InviteToken.token(fromShareLink: pastedInvite) == nil)
-                .accessibilityIdentifier("acceptInvite.openButton")
             }
         }
     }
@@ -699,7 +788,7 @@ private struct AskToEndEarlyCard: View {
                 LockboxSectionLabel("Ask to end early", systemImage: "arrow.uturn.backward.circle")
                 if let session = coordinator.companionActiveSessionIdentity {
                     if trusted.isEmpty && !companion.trustedPeople.isEmpty {
-                        Text("Nobody can be asked right now. Check Your trusted people below.")
+                        Text("None of your trusted people can be asked right now. Their status is shown below; you can send a new invite from there.")
                             .font(.footnote)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityIdentifier("askToEnd.noneAvailableHint")
@@ -781,6 +870,14 @@ private struct InboxCard: View {
     @ObservedObject var companion: CompanionCoordinator
 
     var body: some View {
+        // When everything in the Inbox is already in "Waiting for you", the
+        // empty history card would only repeat itself.
+        if !(companion.historyItems(coordinator: coordinator).isEmpty && !companion.waitingItems(coordinator: coordinator).isEmpty) {
+            card
+        }
+    }
+
+    private var card: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
                 HStack {
@@ -796,14 +893,15 @@ private struct InboxCard: View {
                             .accessibilityIdentifier("inboxCard.refreshingIndicator")
                     }
                 }
-                if companion.inboxItems.isEmpty {
-                    Text("Nothing here yet. Pull to refresh, or check again after asking or being asked for help.")
+                let history = companion.historyItems(coordinator: coordinator)
+                if history.isEmpty {
+                    Text("Nothing here yet. Requests appear here automatically.")
                         .font(.footnote)
                         .foregroundStyle(LockboxTheme.secondary)
                 } else {
-                    ForEach(companion.inboxItems) { item in
+                    ForEach(history) { item in
                         InboxRow(coordinator: coordinator, companion: companion, item: item)
-                        if item.id != companion.inboxItems.last?.id { Divider().overlay(LockboxTheme.border) }
+                        if item.id != history.last?.id { Divider().overlay(LockboxTheme.border) }
                     }
                 }
             }
@@ -823,13 +921,13 @@ private struct InboxRow: View {
                 Text(item.isMine ? "Your request" : title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                LockboxStatusBadge(title: item.status.rawValue.capitalized, color: color(for: item.status))
+                LockboxStatusBadge(title: CompanionCoordinator.statusBadgeTitle(item.status), color: color(for: item.status))
             }
             Text("Created \(item.request.createdAt.formatted(date: .abbreviated, time: .shortened))")
                 .font(.footnote)
                 .foregroundStyle(LockboxTheme.secondary)
             if !item.isMine, item.status == .pending, item.myDecision == .pending {
-                HStack(spacing: 10) {
+                AdaptiveButtonRow {
                     Button("Approve") { respond(.approved) }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                     Button("Decline", role: .destructive) { respond(.declined) }
