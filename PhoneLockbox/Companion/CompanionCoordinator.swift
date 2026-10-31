@@ -1540,8 +1540,20 @@ final class CompanionCoordinator: ObservableObject {
     /// cancellation neither aborts the request nor raises a banner, and a
     /// `.task` + pull-to-refresh overlap joins the in-flight fetch instead of
     /// racing it.
+    #if DEBUG
+    /// Test-only (same style as `useApprovalOverride`): awaited inside every
+    /// refresh pass after the relay responses arrive and before they are
+    /// applied.
+    var inboxFetchGateForTesting: (@MainActor () async -> Void)?
+    /// Test-only: number of `refreshInbox()` calls so far.
+    private(set) var refreshCallCountForTesting = 0
+    #endif
+
     func refreshInbox() async {
         guard isAvailable else { return }
+        #if DEBUG
+        refreshCallCountForTesting += 1
+        #endif
         if let flight = refreshFlight {
             // Arriving mid-flight: the in-flight fetch may predate whatever
             // the caller just changed, so demand one more pass and wait for
@@ -1635,6 +1647,11 @@ final class CompanionCoordinator: ObservableObject {
                 newPendingOwnerAcceptances, ownerIdentity: capturedOwnerIdentity, now: Date()
             )
         }
+        #if DEBUG
+        // Responses are in hand but not yet applied: lets a test hold a
+        // fetch whose data is about to go stale.
+        if let inboxFetchGateForTesting { await inboxFetchGateForTesting() }
+        #endif
         inboxItems = items.sorted { $0.request.createdAt > $1.request.createdAt }
         inboxDataNotice = rejectionCount > 0
             ? "The relay returned unexpected pairing or consent data; \(rejectionCount) item(s) were ignored."

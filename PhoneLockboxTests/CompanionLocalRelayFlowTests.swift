@@ -164,7 +164,17 @@ final class CompanionLocalRelayFlowTests: XCTestCase {
         try await requireRelay()
         let owner = try makeDevice("owner"), friend = try makeDevice("friend")
         try await pairFullyTrusted(owner: owner, friend: friend)
-        let early = Task { await owner.refreshInbox() } // flight starts before the request exists
+        // Hold the first pass's already-fetched (soon stale) response until a
+        // second refresh call -- the one `requestEarlyEnd` makes after its
+        // request is created -- has arrived.
+        var passes = 0
+        let baseline = owner.refreshCallCountForTesting
+        owner.inboxFetchGateForTesting = { [unowned owner] in
+            passes += 1
+            guard passes == 1 else { return }
+            while owner.refreshCallCountForTesting < baseline + 2 { await Task.yield() }
+        }
+        let early = Task { await owner.refreshInbox() }
         await Task.yield()
         await owner.requestEarlyEnd(sessionID: UUID().uuidString, activeSetID: UUID().uuidString,
                                     start: Date().addingTimeInterval(-300), end: Date().addingTimeInterval(3_600),
