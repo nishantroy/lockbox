@@ -3,29 +3,23 @@ import Foundation
 /// Pure, side-effect-free trust rules for folding an untrusted relay inbox
 /// snapshot (`InboxResponse.pairings`/`consents`, relay contract v1.1) into a
 /// device's local cache. The inbox is a hint, not an authority: a relay can
-/// lie, so nothing here can promote a pairing this device did not itself
-/// create (as owner, via `confirm`) or accept (as helper, bound to an owner
-/// identity from an invitation this device actually accepted).
+/// lie, so nothing here can add a pairing at all. Since pairing v3 a pairing
+/// reaches a device only from its own `acceptInvite` response (friend) or from
+/// `JoinedAcceptanceCheck` against an invite it issued (owner); this merge
+/// only ever *advances* a pairing that is already stored.
 ///
 /// This type has no knowledge of `UserDefaults`, `Keychain`, or any app-level
 /// registry shape — it only compares `Pairing`/`RelationshipConsent` values —
 /// so it can be exercised directly by tests without any app scaffolding.
 ///
-/// Known gap, deferred to B2 by design: this merge never learns a
+/// Known gap, deferred by design: this merge never learns a
 /// `replace_pairing`/`PairingReplacement` outcome (a re-paired identity gets
-/// a brand-new `pairingID`, which would currently need its own pending
-/// acceptance/invite flow to be trusted, same as any other unrelated new
-/// pairing). Key-rotation-aware pairing replacement is out of scope for B1.
+/// a brand-new `pairingID`, which needs its own invite to be trusted, same as
+/// any other unrelated new pairing).
 public enum CompanionTrustDecision: Equatable, Sendable {
     /// The incoming pairing is identical to what is already stored; nothing
     /// to persist.
     case unchanged
-    /// No local record existed for this pairing ID, and it is trusted enough
-    /// to create one. `consumedAcceptanceID` names the specific pending
-    /// acceptance record that justified this — the caller must remove that
-    /// exact record so it cannot be reused to justify a second, different
-    /// pairing.
-    case add(pairing: Pairing, consumedAcceptanceID: String)
     /// A local record exists and the incoming pairing is a permitted
     /// advance of it (epoch non-decreasing, `.active` → `.revoked` only).
     case update(Pairing)
@@ -39,44 +33,7 @@ public enum CompanionConsentDecision: Equatable, Sendable {
     case rejected(String)
 }
 
-/// A specific accept-invitation attempt this device made, kept only until
-/// the resulting pairing is confirmed and observed (or it goes stale). This
-/// is the helper-role trust anchor: a first-seen pairing from the inbox is
-/// added only if it matches one of these records, and the record is then
-/// consumed (removed) so it cannot justify a second, different pairing —
-/// binding trust to "an invitation this exact device accepted and is still
-/// waiting on," not merely "any owner this device has ever interacted with."
-public struct CompanionPendingAcceptance: Codable, Hashable, Sendable {
-    public let ownerIdentity: DeviceIdentity
-    public let acceptanceID: String
-    public let approverIdentity: DeviceIdentity
-    public let createdAt: Date
-
-    public init(ownerIdentity: DeviceIdentity, acceptanceID: String, approverIdentity: DeviceIdentity, createdAt: Date) throws {
-        try requireIdentifier(acceptanceID, name: "acceptance ID")
-        guard ownerIdentity.role == .owner, approverIdentity.role == .trustedApprover else {
-            throw CompanionError.malformed("invalid pending acceptance record")
-        }
-        try ownerIdentity.validate(); try approverIdentity.validate()
-        try requireTimestamp(createdAt, name: "pending acceptance time")
-        self.ownerIdentity = ownerIdentity
-        self.acceptanceID = acceptanceID
-        self.approverIdentity = approverIdentity
-        self.createdAt = createdAt
-    }
-}
-
 public enum CompanionTrustMerge {
-    /// Drops pending-acceptance records older than `maxLifetime` (default:
-    /// an invitation's own maximum lifetime, `CompanionLimits.maxInviteLifetime`).
-    /// An acceptance that never resulted in an observed pairing within that
-    /// window is treated as abandoned rather than kept as a standing,
-    /// indefinitely reusable trust anchor.
-    public static func pruneExpiredPendingAcceptances(_ records: [CompanionPendingAcceptance], now: Date,
-                                                      maxLifetime: TimeInterval = CompanionLimits.maxInviteLifetime) -> [CompanionPendingAcceptance] {
-        records.filter { now.timeIntervalSince($0.createdAt) <= maxLifetime }
-    }
-
     /// Neither `Pairing` nor `PairingConfirmation` carries a signature field
     /// in this protocol version (`Pairing` is a plain relay-produced record;
     /// `PairingConfirmation` is the *owner's own* signed operation, which
@@ -94,12 +51,7 @@ public enum CompanionTrustMerge {
     ///   - viewerIdentityID: The local identity that fetched this inbox.
     ///   - existingPairing: This device's own stored copy for the same
     ///     `pairingID`, if any.
-    ///   - pendingAcceptances: This device's own unconsumed accept attempts.
-    ///     Consulted only the first time a pairing ID is seen while this
-    ///     identity is the **approver** — an owner never learns a new
-    ///     pairing from the inbox at all, only from its own `confirm()`.
-    public static func decide(pairing: Pairing, viewerIdentityID: String, existingPairing: Pairing?,
-                              pendingAcceptances: [CompanionPendingAcceptance]) -> CompanionTrustDecision {
+    public static func decide(pairing: Pairing, viewerIdentityID: String, existingPairing: Pairing?) -> CompanionTrustDecision {
         guard (try? pairing.validate()) != nil else {
             return .rejected("pairing failed structural validation")
         }
@@ -126,18 +78,10 @@ public enum CompanionTrustMerge {
             return .update(pairing)
         }
 
-        // No local record yet: the owner role never materializes a new
-        // pairing from the inbox, only from a `confirm()` this device made.
-        guard isApprover else {
-            return .rejected("owner role does not add pairings from the relay")
-        }
-        guard pairing.state == .active else {
-            return .rejected("a revoked pairing that was never locally known is not added")
-        }
-        guard let match = pendingAcceptances.first(where: { $0.ownerIdentity == pairing.owner && $0.approverIdentity == pairing.approver }) else {
-            return .rejected("pairing does not match a pending accepted invitation")
-        }
-        return .add(pairing: pairing, consumedAcceptanceID: match.acceptanceID)
+        // No local record yet: a pairing is never created from the inbox. The
+        // friend stores the response to its own `acceptInvite`; the owner adds
+        // a person only through `JoinedAcceptanceCheck`.
+        return .rejected("a pairing is never added from the relay inbox")
     }
 
     /// Decides whether an incoming `consent` may replace `existingConsent`

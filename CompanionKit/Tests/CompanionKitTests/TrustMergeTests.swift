@@ -22,12 +22,6 @@ final class TrustMergeTests: XCTestCase {
                                 updatedAt: t, generation: generation)
     }
 
-    private func pending(owner: DeviceIdentity, approver: DeviceIdentity, acceptanceID: String = "accept-1",
-                         createdAt: Date? = nil) throws -> CompanionPendingAcceptance {
-        try CompanionPendingAcceptance(ownerIdentity: owner, acceptanceID: acceptanceID,
-                                       approverIdentity: approver, createdAt: createdAt ?? t)
-    }
-
     // MARK: - Owner role never adds
 
     func testOwnerRoleNeverAddsANewPairingFromTheInbox() throws {
@@ -35,7 +29,7 @@ final class TrustMergeTests: XCTestCase {
         let attacker = try identity(2, role: .trustedApprover)
         let malicious = try pairing(owner: owner, approver: attacker)
         let decision = CompanionTrustMerge.decide(pairing: malicious, viewerIdentityID: owner.identityID,
-                                                  existingPairing: nil, pendingAcceptances: [])
+                                                  existingPairing: nil)
         guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
     }
 
@@ -45,7 +39,7 @@ final class TrustMergeTests: XCTestCase {
         let existing = try pairing(owner: owner, approver: approver, epoch: 1)
         let advanced = try pairing(owner: owner, approver: approver, epoch: 2)
         let decision = CompanionTrustMerge.decide(pairing: advanced, viewerIdentityID: owner.identityID,
-                                                  existingPairing: existing, pendingAcceptances: [])
+                                                  existingPairing: existing)
         guard case .update(let value) = decision else { return XCTFail("expected update, got \(decision)") }
         XCTAssertEqual(value.epoch, 2)
     }
@@ -59,7 +53,7 @@ final class TrustMergeTests: XCTestCase {
         let existing = try pairing(owner: owner, approver: realApprover)
         let swapped = try pairing(owner: owner, approver: attacker)
         let decision = CompanionTrustMerge.decide(pairing: swapped, viewerIdentityID: owner.identityID,
-                                                  existingPairing: existing, pendingAcceptances: [])
+                                                  existingPairing: existing)
         guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
     }
 
@@ -71,8 +65,7 @@ final class TrustMergeTests: XCTestCase {
         let swapped = try pairing(owner: attackerOwner, approver: approver)
         // Viewed from the approver's identity, since the owner field changed.
         let decision = CompanionTrustMerge.decide(pairing: swapped, viewerIdentityID: approver.identityID,
-                                                  existingPairing: existing,
-                                                  pendingAcceptances: [try pending(owner: owner, approver: approver)])
+                                                  existingPairing: existing)
         guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
     }
 
@@ -84,7 +77,7 @@ final class TrustMergeTests: XCTestCase {
         let existing = try pairing(owner: owner, approver: approver, epoch: 3)
         let lower = try pairing(owner: owner, approver: approver, epoch: 2)
         let decision = CompanionTrustMerge.decide(pairing: lower, viewerIdentityID: owner.identityID,
-                                                  existingPairing: existing, pendingAcceptances: [])
+                                                  existingPairing: existing)
         guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
     }
 
@@ -95,12 +88,12 @@ final class TrustMergeTests: XCTestCase {
         let revoked = try pairing(owner: owner, approver: approver, state: .revoked)
 
         let toRevoked = CompanionTrustMerge.decide(pairing: revoked, viewerIdentityID: owner.identityID,
-                                                   existingPairing: active, pendingAcceptances: [])
+                                                   existingPairing: active)
         guard case .update(let value) = toRevoked else { return XCTFail("expected update to revoked, got \(toRevoked)") }
         XCTAssertEqual(value.state, .revoked)
 
         let backToActive = CompanionTrustMerge.decide(pairing: active, viewerIdentityID: owner.identityID,
-                                                       existingPairing: revoked, pendingAcceptances: [])
+                                                       existingPairing: revoked)
         guard case .rejected = backToActive else { return XCTFail("expected rejection, got \(backToActive)") }
     }
 
@@ -109,50 +102,31 @@ final class TrustMergeTests: XCTestCase {
         let approver = try identity(2, role: .trustedApprover)
         let existing = try pairing(owner: owner, approver: approver)
         let decision = CompanionTrustMerge.decide(pairing: existing, viewerIdentityID: owner.identityID,
-                                                  existingPairing: existing, pendingAcceptances: [])
+                                                  existingPairing: existing)
         XCTAssertEqual(decision, .unchanged)
     }
 
-    // MARK: - Helper role first-seen binding
+    // MARK: - Nothing is added from the inbox (no pending acceptances since pairing v3)
 
-    func testHelperRoleAddsAFirstSeenPairingOnlyWhenBoundToAPendingAcceptance() throws {
+    func testNoRoleAddsAFirstSeenPairingFromTheInbox() throws {
         let owner = try identity(1, role: .owner)
         let approver = try identity(2, role: .trustedApprover)
         let newPairing = try pairing(owner: owner, approver: approver)
-
-        let rejected = CompanionTrustMerge.decide(pairing: newPairing, viewerIdentityID: approver.identityID,
-                                                  existingPairing: nil, pendingAcceptances: [])
-        guard case .rejected = rejected else { return XCTFail("expected rejection, got \(rejected)") }
-
-        let record = try pending(owner: owner, approver: approver, acceptanceID: "accept-xyz")
-        let accepted = CompanionTrustMerge.decide(pairing: newPairing, viewerIdentityID: approver.identityID,
-                                                  existingPairing: nil, pendingAcceptances: [record])
-        guard case .add(let value, let consumedAcceptanceID) = accepted else { return XCTFail("expected add, got \(accepted)") }
-        XCTAssertEqual(value.pairingID, newPairing.pairingID)
-        XCTAssertEqual(consumedAcceptanceID, "accept-xyz")
+        for viewer in [owner, approver] {
+            let decision = CompanionTrustMerge.decide(pairing: newPairing, viewerIdentityID: viewer.identityID,
+                                                      existingPairing: nil)
+            guard case .rejected = decision else { return XCTFail("expected rejection for \(viewer.role), got \(decision)") }
+        }
     }
 
-    func testHelperRoleAttackerAddedPairingWithFakeOwnerIsRejected() throws {
-        // A malicious relay tries to insert a pairing claiming an owner this
-        // device never actually accepted an invite from.
-        let realOwner = try identity(1, role: .owner)
-        let fakeOwner = try identity(5, role: .owner)
-        let approver = try identity(2, role: .trustedApprover)
-        let malicious = try pairing(owner: fakeOwner, approver: approver)
-        let decision = CompanionTrustMerge.decide(pairing: malicious, viewerIdentityID: approver.identityID,
-                                                  existingPairing: nil,
-                                                  pendingAcceptances: [try pending(owner: realOwner, approver: approver)])
-        guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
-    }
-
-    func testHelperRoleNeverAddsAFirstSeenRevokedPairing() throws {
+    func testFriendStillAdvancesAPairingItAlreadyStored() throws {
         let owner = try identity(1, role: .owner)
         let approver = try identity(2, role: .trustedApprover)
-        let revoked = try pairing(owner: owner, approver: approver, state: .revoked)
-        let decision = CompanionTrustMerge.decide(pairing: revoked, viewerIdentityID: approver.identityID,
-                                                  existingPairing: nil,
-                                                  pendingAcceptances: [try pending(owner: owner, approver: approver)])
-        guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
+        let stored = try pairing(owner: owner, approver: approver, epoch: 1)
+        let revoked = try pairing(owner: owner, approver: approver, epoch: 2, state: .revoked)
+        let decision = CompanionTrustMerge.decide(pairing: revoked, viewerIdentityID: approver.identityID, existingPairing: stored)
+        guard case .update(let value) = decision else { return XCTFail("expected update, got \(decision)") }
+        XCTAssertEqual(value.state, .revoked)
     }
 
     func testPairingNotNamingTheViewerIsRejected() throws {
@@ -161,34 +135,8 @@ final class TrustMergeTests: XCTestCase {
         let stranger = try identity(6, role: .trustedApprover)
         let unrelated = try pairing(owner: owner, approver: approver)
         let decision = CompanionTrustMerge.decide(pairing: unrelated, viewerIdentityID: stranger.identityID,
-                                                  existingPairing: nil,
-                                                  pendingAcceptances: [try pending(owner: owner, approver: approver)])
+                                                  existingPairing: nil)
         guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
-    }
-
-    func testHelperRolePendingAcceptanceMustMatchTheSpecificApproverToo() throws {
-        // This device accepted an invite from `owner` using a *different*
-        // local approver identity than the one now fetching the inbox (an
-        // unrealistic but defensive case): the record must not authorize a
-        // pairing for the wrong approver identity.
-        let owner = try identity(1, role: .owner)
-        let otherApprover = try identity(7, role: .trustedApprover)
-        let viewer = try identity(2, role: .trustedApprover)
-        let newPairing = try pairing(owner: owner, approver: viewer)
-        let record = try pending(owner: owner, approver: otherApprover)
-        let decision = CompanionTrustMerge.decide(pairing: newPairing, viewerIdentityID: viewer.identityID,
-                                                  existingPairing: nil, pendingAcceptances: [record])
-        guard case .rejected = decision else { return XCTFail("expected rejection, got \(decision)") }
-    }
-
-    func testPruneExpiredPendingAcceptancesDropsOnlyStaleRecords() throws {
-        let owner = try identity(1, role: .owner)
-        let approver = try identity(2, role: .trustedApprover)
-        let fresh = try pending(owner: owner, approver: approver, acceptanceID: "fresh", createdAt: t)
-        let stale = try pending(owner: owner, approver: approver, acceptanceID: "stale",
-                                createdAt: t.addingTimeInterval(-CompanionLimits.maxInviteLifetime - 1))
-        let pruned = CompanionTrustMerge.pruneExpiredPendingAcceptances([fresh, stale], now: t)
-        XCTAssertEqual(pruned.map(\.acceptanceID), ["fresh"])
     }
 
     // MARK: - Consent validation

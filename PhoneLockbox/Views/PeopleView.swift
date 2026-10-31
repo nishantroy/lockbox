@@ -11,7 +11,43 @@ struct PeopleView: View {
     @ObservedObject var companion: CompanionCoordinator
     @Environment(\.scenePhase) private var scenePhase
 
+    /// Scroll anchor of the incoming-invite card (heading visible at the top).
+    static let incomingInviteScrollID = "people.incomingInviteCard"
+
+#if canImport(CompanionKit)
+    private var incomingInviteKey: String {
+        switch companion.incomingInvite {
+        case .none: return "none"
+        case .loading: return "loading"
+        case .ready: return "ready"
+        case .failed: return "failed"
+        }
+    }
+
+    /// Opening an invite link brings its card to the top of the page so its
+    /// heading is never cut off. A short wait lets the card finish laying out.
+    private func scrollToIncomingInvite(_ proxy: ScrollViewProxy) {
+        guard incomingInviteKey != "none" else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            withAnimation { proxy.scrollTo(Self.incomingInviteScrollID, anchor: .top) }
+        }
+    }
+#endif
+
     var body: some View {
+#if canImport(CompanionKit)
+        ScrollViewReader { proxy in
+            page
+                .onChange(of: incomingInviteKey) { _, _ in scrollToIncomingInvite(proxy) }
+                .onAppear { scrollToIncomingInvite(proxy) }
+        }
+#else
+        page
+#endif
+    }
+
+    private var page: some View {
         LockboxScrollView {
             LockboxPageHeader(title: "People")
             PrototypeLabelCard()
@@ -21,14 +57,25 @@ struct PeopleView: View {
                 // Friend side: the opened invite link, in front of the user.
                 if case .none = companion.incomingInvite {} else {
                     IncomingInviteCard(companion: companion)
+                        .id(Self.incomingInviteScrollID)
                 }
                 // Owner side: one-time, dismissable, non-blocking.
                 ForEach(companion.joinedNotices) { notice in
                     JoinedNoticeCard(notice: notice) { companion.dismissJoinedNotice(id: notice.id) }
                 }
+                if companion.inviteStoreIsCorrupt {
+                    InviteStoreResetCard(companion: companion)
+                }
+                // First run (nobody invited, no owner setup yet) or a link was
+                // just opened: "Got an invite link?" comes before the owner copy.
+                if companion.showsAcceptInviteFirst {
+                    AcceptInviteCard(companion: companion)
+                }
                 IntroCard()
                 InviteSomeoneCard(companion: companion)
-                AcceptInviteCard(companion: companion)
+                if !companion.showsAcceptInviteFirst {
+                    AcceptInviteCard(companion: companion)
+                }
                 if coordinator.companionActiveSessionIdentity != nil || !companion.trustedApprovers.isEmpty {
                     AskToEndEarlyCard(coordinator: coordinator, companion: companion)
                 }
@@ -134,14 +181,76 @@ private struct PrototypeLabelCard: View {
 /// Backs the "Copy link" button next to the invite `ShareLink`: a visible,
 /// explicit alternative to the share sheet for a link that didn't open when
 /// tapped in Messages.
-@MainActor private func copyCompanionTextToPasteboard(_ text: String) {
-    // Local to this device (no Universal Clipboard) and gone after an hour,
-    // the invite's own lifetime.
-    UIPasteboard.general.setItems([["public.utf8-plain-text": text]],
-                                  options: [.localOnly: true,
-                                            .expirationDate: Date().addingTimeInterval(CompanionCoordinator.inviteLifetime)])
+@MainActor enum CompanionPasteboard {
+    /// Not `.localOnly`, so Universal Clipboard can paste the link on the owner's
+    /// Mac (build-22 QA). It still disappears after an hour, the invite's own lifetime.
+    static func options(now: Date = Date()) -> [UIPasteboard.OptionsKey: Any] {
+        [.expirationDate: now.addingTimeInterval(CompanionCoordinator.inviteLifetime)]
+    }
+
+    @MainActor static func copy(_ text: String) {
+        UIPasteboard.general.setItems([["public.utf8-plain-text": text]], options: options())
+    }
+}
+
+/// "Copy link" that visibly answers: for about two seconds it reads "Copied"
+/// with a checkmark, with a light haptic and a VoiceOver announcement.
+private struct CopyLinkButton: View {
+    let link: String
+    @State private var copied = false
+    @State private var resetTask: Task<Void, Never>?
+
+    var body: some View {
+        Button {
+            CompanionPasteboard.copy(link)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            UIAccessibility.post(notification: .announcement, argument: "Invite link copied")
+            copied = true
+            resetTask?.cancel()
+            resetTask = Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                copied = false
+            }
+        } label: {
+            Label(copied ? "Copied" : "Copy link", systemImage: copied ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+        .accessibilityLabel(copied ? "Copied" : "Copy link")
+        .accessibilityHint("Copies the invite link to the clipboard, so you can paste it into a message")
+        .accessibilityIdentifier("inviteSomeone.copyLinkButton")
+        .onDisappear { resetTask?.cancel() }
+    }
 }
 #endif
+
+/// Owner side: the saved-invites item is damaged. Says so plainly and offers
+/// the one recovery route, a confirmed reset.
+private struct InviteStoreResetCard: View {
+    @ObservedObject var companion: CompanionCoordinator
+    @State private var showingConfirmation = false
+
+    var body: some View {
+        LockboxCard {
+            VStack(alignment: .leading, spacing: 13) {
+                Label(CompanionCoordinator.inviteStoreCorruptMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("people.inviteStoreCorruptMessage")
+                Button("Reset saved invites", role: .destructive) { showingConfirmation = true }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
+                    .accessibilityHint("Clears the damaged saved invites on this device")
+                    .accessibilityIdentifier("people.inviteStoreResetButton")
+            }
+            .confirmationDialog("Reset saved invites?", isPresented: $showingConfirmation, titleVisibility: .visible) {
+                Button("Reset", role: .destructive) { companion.resetUnreadableInviteStore() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Links not yet used will stop working, and people who joined earlier will need a new invite.")
+            }
+        }
+    }
+}
 
 private struct IntroCard: View {
     var body: some View {
@@ -327,46 +436,63 @@ private struct InviteSomeoneCard: View {
                     }
                 }
 
-                Button {
-                    if needsName, !companion.setOwnerDisplayName(nameDraft) { return }
-                    isCreating = true
-                    Task { await companion.createInvite(); isCreating = false }
-                } label: {
-                    Label(isCreating ? "Creating…" : "Create an invite to share", systemImage: "link.badge.plus")
-                }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                .disabled(isCreating || isEditingName || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
-                .accessibilityHint("Creates a one-use invitation link")
-                .accessibilityIdentifier("inviteSomeone.createInviteButton")
-
                 if let issued = companion.pendingInvite {
-                    // The visible text is a short line; the full link stays
-                    // reachable under the same identifier via the
-                    // accessibility *value* so UI tests can read it exactly.
-                    Text("Invite link ready")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(LockboxTheme.secondary)
-                        .accessibilityIdentifier("inviteSomeone.inviteLinkText")
-                        .accessibilityLabel("Invite link ready")
-                        .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
-                    ShareLink(item: issued.shareLink) {
-                        Label("Share invite link", systemImage: "square.and.arrow.up")
+                    // The link stops being offered the moment it expires, even
+                    // if nothing else on screen changes.
+                    TimelineView(.explicit([issued.invitation.payload.expiresAt])) { _ in
+                        inviteActions(issued: issued, expired: Date() >= issued.invitation.payload.expiresAt)
                     }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                    #if os(iOS)
-                    Button {
-                        copyCompanionTextToPasteboard(issued.shareLink)
-                    } label: {
-                        Label("Copy link", systemImage: "doc.on.doc")
-                    }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                    .accessibilityHint("Copies the invite link to the clipboard")
-                    .accessibilityIdentifier("inviteSomeone.copyLinkButton")
-                    #endif
-                    Text("When they tap Accept, they appear under your trusted people. There's nothing for you to confirm.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
+                } else {
+                    inviteActions(issued: nil, expired: false)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func inviteActions(issued: IssuedInvite?, expired: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Button {
+                if needsName, !companion.setOwnerDisplayName(nameDraft) { return }
+                isCreating = true
+                Task { await companion.createInvite(); isCreating = false }
+            } label: {
+                Label(isCreating ? "Creating…" : (expired ? "Create a new invite" : "Create an invite to share"),
+                      systemImage: "link.badge.plus")
+            }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: expired ? .primary : .secondary))
+            .disabled(isCreating || isEditingName || (needsName && CompanionCoordinator.validatedDisplayName(nameDraft) == nil))
+            .accessibilityHint("Creates a one-use invitation link")
+            .accessibilityIdentifier("inviteSomeone.createInviteButton")
+
+            if let issued, expired {
+                Label("This link expired. Create a new one.", systemImage: "clock.badge.exclamationmark")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+                    .accessibilityIdentifier("inviteSomeone.expiredNotice")
+                    .accessibilityHint("The old link no longer works")
+                    .id(issued.invitation.payload.inviteID)
+            } else if let issued {
+                // The visible text is a short line; the full link stays
+                // reachable under the same identifier via the
+                // accessibility *value* so UI tests can read it exactly.
+                Text("Invite link ready")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(LockboxTheme.secondary)
+                    .accessibilityIdentifier("inviteSomeone.inviteLinkText")
+                    .accessibilityLabel("Invite link ready")
+                    .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
+                ShareLink(item: issued.shareLink) {
+                    Label("Share invite link", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                .accessibilityIdentifier("inviteSomeone.shareLinkButton")
+                #if os(iOS)
+                CopyLinkButton(link: issued.shareLink)
+                #endif
+                Text("When they tap Accept, they appear under your trusted people. There's nothing for you to confirm.")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
             }
         }
     }

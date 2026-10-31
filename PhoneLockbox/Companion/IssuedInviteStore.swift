@@ -17,13 +17,20 @@ protocol IssuedInviteStore: AnyObject {
     func removeAll()
 }
 
-/// A read must tell "nothing stored yet" from "could not read" (for example the
-/// Keychain is locked, or the item no longer decodes). On `.failed` the app
-/// keeps its previously verified people as they are and never writes over the item.
+/// A read must tell "nothing stored yet" from "could not read". On any
+/// non-success case the app keeps its previously verified people as they are
+/// and never writes over the item. The cases differ in what the owner can do:
+/// - `.locked`: the Keychain is locked (`errSecInteractionNotAllowed`); it
+///   comes back after the phone is unlocked, nothing is lost.
+/// - `.failed`: another Keychain error; usually transient.
+/// - `.corrupt`: the item is there and readable but no longer decodes. It will
+///   never read again, so the owner is offered an explicit reset.
 enum IssuedInviteLoad {
     case found([String: IssuedInvite])
     case notFound
+    case locked
     case failed
+    case corrupt
 }
 
 /// Keychain-backed store: one generic-password item holding the JSON map,
@@ -49,9 +56,11 @@ final class KeychainIssuedInviteStore: IssuedInviteStore {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return .notFound }
-        // Anything else (errSecInteractionNotAllowed while locked, decode failure, ...) is an error, not "empty".
-        guard status == errSecSuccess, let data = result as? Data,
-              let decoded = try? JSONDecoder().decode([String: IssuedInvite].self, from: data) else { return .failed }
+        // Anything else is an error, not "empty".
+        if status == errSecInteractionNotAllowed { return .locked }
+        guard status == errSecSuccess else { return .failed }
+        guard let data = result as? Data,
+              let decoded = try? JSONDecoder().decode([String: IssuedInvite].self, from: data) else { return .corrupt }
         return .found(decoded)
     }
 
@@ -81,9 +90,11 @@ final class InMemoryIssuedInviteStore: IssuedInviteStore {
     var invites: [String: IssuedInvite] = [:]
     /// Test hooks: simulate a locked/broken Keychain.
     var failLoads = false
+    /// What a failing load reports (default: a locked Keychain).
+    var failureKind: IssuedInviteLoad = .locked
     var failSaves = false
     func load() -> IssuedInviteLoad {
-        if failLoads { return .failed }
+        if failLoads { return failureKind }
         return invites.isEmpty ? .notFound : .found(invites)
     }
     @discardableResult
