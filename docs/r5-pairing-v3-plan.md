@@ -431,3 +431,15 @@ Builder model: Claude Sonnet (`claude-sonnet-5-5`), branch `p3d-ux` from a671813
 - `xcodebuild build -configuration Release` (generic iOS Simulator): succeeded; the only new debug seam (`setInboxItemsForTesting`) sits inside the existing `#if DEBUG` block.
 - `git diff --check`: clean.
 - NOT run: the app unit suite and the UI suite (no simulators, per the owner rule). The new tests have not been executed.
+
+### P3d review follow-up
+
+Builder: Claude Sonnet (`claude-sonnet-5-5`). Fixes after the Opus review of 3dea6ff and the first pre-push UI run:
+
+- **P1-1 Waiting card kept settled requests.** For the owner's own approved request, `isWaitingForUser` now switches on `friendReleaseRequestState`: `.finishing` waits; `.eligible` waits only with the gate on; `.usedToEnd` and `.alreadyEnded` go to Inbox history. A new unit test covers the last two with the gate on. New `hasLoadedInbox` on the coordinator; `PeopleView` scrolls to Waiting only for IDs that appear after the first inbox load of the launch.
+- **P2-1 Settings name draft** follows `companion.displayName` via `onChange` unless the user is mid-edit (draft differs from the old value).
+- **P2-2** While an opened link is on screen, the invite card's inline name field and the "Got an invite link?" card are hidden, so only the incoming card asks.
+- **P2-3** The Waiting, accepted and joined scroll-tos are skipped while an incoming-invite card is open.
+- **P2-4** An invalid paste cancels `inviteLookupTask`; the paste card is hidden while a link is open, so unrelated clipboard text cannot replace a live invite.
+- **UI tests:** `waitUntilHittable` (predicate) replaces direct `isHittable` asserts after scrolls; a `focus(_:)` helper waits for the field to be hittable, taps, waits for the keyboard and retries the tap once; `setUp` activates the app if it is not in the foreground after launch. The "People tab never stayed selected" failure was most likely the App Switcher left behind by the first failure. The new scroll code only runs with an open link or a new waiting item, so it should not affect tab selection.
+- **Validation run:** CompanionKit `swift test` 161 tests, 0 failures; root `swift test` 177 tests, 0 failures; `build-for-testing` for both schemes and the Release build succeeded. App unit and UI suites not run (no simulator).

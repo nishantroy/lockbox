@@ -182,6 +182,26 @@ final class FriendReleaseWiringTests: XCTestCase {
         XCTAssertFalse(companion.historyItems(coordinator: fake).contains { $0.id == ownApproved.id })
     }
 
+    func testUsedAndAlreadyEndedApprovedRequestsGoToHistoryEvenWithTheGateOn() throws {
+        let fixture = try makeFixture()
+        let (companion, cleanup) = try makeCompanion()
+        defer { cleanup() }
+        let fake = FakeFriendReleaseLifecycle()
+        var approved = fixture.request
+        approved.status = .approved
+        let item = CompanionInboxItem(request: approved, viewerIdentityID: fixture.ownerSigner.identity.identityID)
+        companion.setInboxItemsForTesting([item])
+        companion.friendApprovalCanEndLocksEnabled = true
+
+        XCTAssertEqual(companion.waitingItems(coordinator: fake).count, 1, "eligible: End lock now is offered")
+        fake.sessionStatesByID[approved.sessionID] = .usedToEnd
+        XCTAssertTrue(companion.waitingItems(coordinator: fake).isEmpty)
+        XCTAssertEqual(companion.historyItems(coordinator: fake).count, 1)
+        fake.sessionStatesByID[approved.sessionID] = .alreadyEnded
+        XCTAssertTrue(companion.waitingItems(coordinator: fake).isEmpty)
+        XCTAssertEqual(companion.historyItems(coordinator: fake).count, 1)
+    }
+
     func testStatusBadgesUsePlainWords() {
         XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.pending), "Waiting")
         XCTAssertEqual(CompanionCoordinator.statusBadgeTitle(.approved), "Approved")

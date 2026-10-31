@@ -10,6 +10,8 @@ struct PeopleView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
     @Environment(\.scenePhase) private var scenePhase
+    /// True once the first inbox load of this launch has been absorbed.
+    @State private var loadedBefore = false
 
     /// Scroll anchor of the incoming-invite card (heading visible at the top).
     static let incomingInviteScrollID = "people.incomingInviteCard"
@@ -21,6 +23,11 @@ struct PeopleView: View {
     static let waitingScrollID = "people.waitingForYou"
 
 #if canImport(CompanionKit)
+    private var incomingLinkIsOpen: Bool {
+        if case .none = companion.incomingInvite { return false }
+        return true
+    }
+
     private var incomingInviteKey: String {
         switch companion.incomingInvite {
         case .none: return "none"
@@ -44,7 +51,7 @@ struct PeopleView: View {
     /// scrolled down at the invite card when the friend accepts (pre-push UI
     /// run, 2026-10-31: the notice appeared off-screen above).
     private func scrollToJoinedNotice(_ proxy: ScrollViewProxy) {
-        guard !companion.joinedNotices.isEmpty else { return }
+        guard !companion.joinedNotices.isEmpty, incomingInviteKey == "none" else { return }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 150_000_000)
             withAnimation { proxy.scrollTo(Self.joinedNoticeScrollID, anchor: .top) }
@@ -52,7 +59,7 @@ struct PeopleView: View {
     }
 
     private func scrollToAcceptedNotice(_ proxy: ScrollViewProxy) {
-        guard !companion.acceptedNotices.isEmpty else { return }
+        guard !companion.acceptedNotices.isEmpty, incomingInviteKey == "none" else { return }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 150_000_000)
             withAnimation { proxy.scrollTo(Self.acceptedNoticeScrollID, anchor: .top) }
@@ -61,6 +68,8 @@ struct PeopleView: View {
 
     /// A request that needs the user is brought into view the moment it arrives.
     private func scrollToWaiting(_ proxy: ScrollViewProxy) {
+        // The incoming-invite card stays at the top while it is open.
+        guard incomingInviteKey == "none" else { return }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 150_000_000)
             withAnimation { proxy.scrollTo(Self.waitingScrollID, anchor: .top) }
@@ -73,7 +82,7 @@ struct PeopleView: View {
         ScrollViewReader { proxy in
             page
                 .onChange(of: incomingInviteKey) { _, _ in scrollToIncomingInvite(proxy) }
-                .onAppear { scrollToIncomingInvite(proxy) }
+                .onAppear { loadedBefore = companion.hasLoadedInbox; scrollToIncomingInvite(proxy) }
                 .onChange(of: companion.joinedNotices.map(\.id)) { old, new in
                     if new.contains(where: { !old.contains($0) }) { scrollToJoinedNotice(proxy) }
                 }
@@ -81,7 +90,14 @@ struct PeopleView: View {
                     if new.contains(where: { !old.contains($0) }) { scrollToAcceptedNotice(proxy) }
                 }
                 .onChange(of: companion.waitingItems(coordinator: coordinator).map(\.id)) { old, new in
+                    // Items already waiting at launch (the first inbox load)
+                    // are not new: only ones that appear after it scroll.
+                    guard loadedBefore else { return }
                     if new.contains(where: { !old.contains($0) }) { scrollToWaiting(proxy) }
+                }
+                .onChange(of: companion.hasLoadedInbox) { _, loaded in
+                    // Set after the waiting-ids change of the same update has run.
+                    Task { @MainActor in loadedBefore = loaded }
                 }
         }
 #else
@@ -147,11 +163,14 @@ struct PeopleView: View {
                 }
                 // First run (nobody invited or paired) or a link was just
                 // opened: "Got an invite link?" comes before the owner invite.
-                if companion.showsAcceptInviteFirst {
+                // While an opened link is on screen only its own card asks for
+                // a name, and an unrelated paste can't replace it.
+                let linkOpen = incomingLinkIsOpen
+                if companion.showsAcceptInviteFirst, !linkOpen {
                     AcceptInviteCard(companion: companion)
                 }
-                InviteSomeoneCard(companion: companion)
-                if !companion.showsAcceptInviteFirst {
+                InviteSomeoneCard(companion: companion, hidesNameField: linkOpen)
+                if !companion.showsAcceptInviteFirst, !linkOpen {
                     AcceptInviteCard(companion: companion)
                 }
                 InboxCard(coordinator: coordinator, companion: companion)
@@ -466,6 +485,7 @@ private struct IncomingInviteCard: View {
 
 private struct InviteSomeoneCard: View {
     @ObservedObject var companion: CompanionCoordinator
+    var hidesNameField = false
     @State private var isCreating = false
     @State private var nameDraft = ""
 
@@ -499,7 +519,7 @@ private struct InviteSomeoneCard: View {
                     LockboxSectionLabel("Invite a trusted person", systemImage: "person.badge.plus")
                 }
 
-                if needsName && !companion.inviteStoreIsCorrupt {
+                if needsName && !companion.inviteStoreIsCorrupt && !hidesNameField {
                     InlineNameField(text: $nameDraft,
                                     footnote: "People you invite will see this name. You can change it in Settings.",
                                     identifier: "inviteSomeone.nameField")

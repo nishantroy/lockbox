@@ -419,7 +419,6 @@ private struct DeveloperToolsSection: View {
 private struct SettingsNameCard: View {
     @ObservedObject var companion: CompanionCoordinator
     @State private var draft = ""
-    @State private var didLoad = false
 
     private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var isValid: Bool { CompanionCoordinator.validatedDisplayName(draft) != nil }
@@ -451,8 +450,11 @@ private struct SettingsNameCard: View {
                     .foregroundStyle(LockboxTheme.secondary)
             }
         }
-        .onAppear {
-            if !didLoad { draft = companion.displayName; didLoad = true }
+        .onAppear { draft = companion.displayName }
+        // The view stays alive in the tab view, so follow a name set elsewhere
+        // unless the user is mid-edit (draft differs from the old value).
+        .onChange(of: companion.displayName) { old, new in
+            if draft == old || draft.isEmpty { draft = new }
         }
     }
 

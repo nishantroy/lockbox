@@ -213,6 +213,9 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var approverIdentity: DeviceIdentity?
     @Published private(set) var people: [CompanionPerson] = []
     @Published private(set) var inboxItems: [CompanionInboxItem] = []
+    /// True once an inbox load has completed in this launch. Items already
+    /// waiting at that point are not "new" (no scroll-to on launch).
+    @Published private(set) var hasLoadedInbox = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastError: String?
     /// A non-blocking notice that the relay sent pairing/consent data this
@@ -959,6 +962,7 @@ final class CompanionCoordinator: ObservableObject {
     func openInviteLink(_ link: String) -> Task<Void, Never>? {
         guard isAvailable else { incomingInvite = .failed(Self.appGroupUnavailableMessage); return nil }
         guard let token = InviteToken.token(fromShareLink: link) else {
+            inviteLookupTask?.cancel()
             incomingInvite = .failed(Self.invalidInviteLinkMessage)
             return nil
         }
@@ -1933,8 +1937,11 @@ final class CompanionCoordinator: ObservableObject {
     private func isWaitingForUser(_ item: CompanionInboxItem, coordinator: any FriendReleaseLifecycle) -> Bool {
         if !item.isMine { return item.status == .pending && item.myDecision == .pending }
         guard item.status == .approved else { return false }
-        return Self.shouldShowFriendReleaseAction(for: item, gateEnabled: friendApprovalCanEndLocksEnabled)
-            || friendReleaseRequestState(for: item, coordinator: coordinator) == .finishing
+        switch friendReleaseRequestState(for: item, coordinator: coordinator) {
+        case .finishing: return true
+        case .eligible: return Self.shouldShowFriendReleaseAction(for: item, gateEnabled: friendApprovalCanEndLocksEnabled)
+        case .usedToEnd, .alreadyEnded: return false
+        }
     }
 
     /// Plain-word badge for an Inbox row.
@@ -2014,6 +2021,7 @@ final class CompanionCoordinator: ObservableObject {
         if let inboxFetchGateForTesting { await inboxFetchGateForTesting() }
         #endif
         inboxItems = items.sorted { $0.request.createdAt > $1.request.createdAt }
+        hasLoadedInbox = true
         inboxDataNotice = rejectionCount > 0
             ? "The server returned unexpected pairing or consent data; \(rejectionCount) item(s) were ignored."
             : nil

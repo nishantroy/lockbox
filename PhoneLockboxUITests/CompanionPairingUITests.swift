@@ -29,6 +29,8 @@ final class CompanionPairingUITests: XCTestCase {
             "-resetCompanionStateForUITests",
         ]
         app.launch()
+        // A previous test can leave the simulator in the App Switcher.
+        if !app.wait(for: .runningForeground, timeout: 15) { app.activate() }
         self.app = app
     }
 
@@ -62,7 +64,7 @@ final class CompanionPairingUITests: XCTestCase {
         let joinedText = app.staticTexts["joinedNotice.text"]
         XCTAssertTrue(joinedText.waitForExistence(timeout: 40), "the 'Ari joined' notice never appeared without a manual refresh")
         XCTAssertEqual(joinedText.label, "Ari joined")
-        XCTAssertTrue(joinedText.isHittable, "the notice must be visible without scrolling")
+        XCTAssertTrue(waitUntilHittable(joinedText), "the notice must be visible without scrolling")
         XCTAssertTrue(app.staticTexts["Ari"].waitForExistence(timeout: 5), "Ari is listed under trusted people immediately")
         XCTAssertTrue(app.staticTexts["Ari can approve ending one exact lock early when you ask."].waitForExistence(timeout: 10),
                       "both scopes are active from the single Accept")
@@ -102,13 +104,13 @@ final class CompanionPairingUITests: XCTestCase {
         XCTAssertEqual(title.label, "Dana invited you to be a trusted person")
         XCTAssertTrue(app.tabBars.buttons["People"].isSelected, "opening the link should land on People")
         let accept = app.buttons["incomingInvite.acceptButton"]
-        XCTAssertTrue(accept.isHittable, "Accept must be visible without scrolling")
+        XCTAssertTrue(waitUntilHittable(accept), "Accept must be visible without scrolling")
 
         // Opening the link never accepts by itself, and Accept needs a name.
         XCTAssertFalse(accept.isEnabled, "Accept stays off until the friend's name is entered")
         let nameField = app.textFields["incomingInvite.nameField"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 5))
-        nameField.tap()
+        XCTAssertTrue(focus(nameField), "the name field never took keyboard focus")
         nameField.typeText("Sam")
         attachScreenshot(named: "04-friend-invite-prompt")
         accept.tap()
@@ -117,7 +119,7 @@ final class CompanionPairingUITests: XCTestCase {
         let acceptedNotice = app.staticTexts["acceptedNotice.text"]
         XCTAssertTrue(acceptedNotice.waitForExistence(timeout: 30), "no confirmation notice after Accept")
         XCTAssertEqual(acceptedNotice.label, "You're now a trusted person for Dana")
-        XCTAssertTrue(acceptedNotice.isHittable, "the notice must be visible without scrolling")
+        XCTAssertTrue(waitUntilHittable(acceptedNotice), "the notice must be visible without scrolling")
         attachScreenshot(named: "05a-friend-accepted-notice")
 
         let paired = app.staticTexts["helping.statusText"]
@@ -143,7 +145,7 @@ final class CompanionPairingUITests: XCTestCase {
         XCTAssertTrue(askTitle.waitForExistence(timeout: 60), "the friend never saw the request with the owner's name")
         XCTAssertTrue(app.buttons["Approve"].exists)
         XCTAssertTrue(app.staticTexts["Waiting for you"].exists, "the pending request sits in the Waiting for you card")
-        XCTAssertTrue(askTitle.isHittable, "the request must be visible without scrolling")
+        XCTAssertTrue(waitUntilHittable(askTitle), "the request must be visible without scrolling")
         attachScreenshot(named: "06-friend-sees-request")
     }
 
@@ -182,6 +184,23 @@ final class CompanionPairingUITests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Waits for the field to be hittable, taps it, and waits for the keyboard;
+    /// retries the tap once if no keyboard appeared.
+    private func focus(_ field: XCUIElement) -> Bool {
+        guard waitUntilHittable(field) else { return false }
+        for _ in 0..<2 {
+            field.tap()
+            if app.keyboards.element.waitForExistence(timeout: 5) { return true }
+        }
+        return false
+    }
+
+    /// Waits for `isHittable`: a delayed scroll-to animation may still be running.
+    private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
 
     private struct ScriptedDevice {
         let signer: DeviceSigner
@@ -230,7 +249,7 @@ final class CompanionPairingUITests: XCTestCase {
         guard nameField.waitForExistence(timeout: 30) else {
             throw CompanionUITestError(description: "owner name field never appeared")
         }
-        nameField.tap()
+        guard focus(nameField) else { throw CompanionUITestError(description: "owner name field never took keyboard focus") }
         // "\n" submits the field. The return key has no "Return" label on
         // current keyboards, and a tap that only dismisses the keyboard never
         // reaches the button underneath (pre-push run, 2026-10-31).
