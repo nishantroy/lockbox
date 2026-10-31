@@ -15,7 +15,7 @@
 - `Shared/SafetyAssistant.swift` and `PhoneLockbox/Views/SafetyAssistantView.swift`: local privacy-minimal safety review.
 - `CoreTests`, `RuntimeTests` and `PhoneLockboxTests`: pure core/runtime and iOS integration tests.
 
-Current deployment target: iOS 17, Swift 6. Build 21 (from `r5-relay`, 2026-10-02) is the latest QA candidate: pairing v2. Invite links open the app, the relay delivers the friend's acceptance, and the owner confirms with one tap. Coming back to the app no longer resets the tab. R5 friend-approval release is developer-gated. The companion relay defaults to `https://relay.example.com`. Both devices must run build 21 or later to pair.
+Current deployment target: iOS 17, Swift 6. Build 22 (from `r5-relay` at 12bc414, 2026-10-31) is the latest QA candidate: pairing v3 — a ~50-character invite link, the friend taps Accept and is paired (no owner confirm, no permission switches), real names, a one-time "‹Name› joined" notice, People auto-refresh, and a checkmark list for Ask to end early. The production relay runs v3; builds ≤21 can no longer pair. R5 friend-approval release stays developer-gated. App unit/UI suites for this build were not run (compile-only; they run before the next push).
 
 Development signing uses the paid team already specified in `project.yml`. App Group: `group.com.phone-lockbox`. App bundle: `com.phone-lockbox.app`; three extension identifiers are specified in YAML. Do not change identifiers casually—this can invalidate the device test baseline and storage/provisioning assumptions.
 
