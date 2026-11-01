@@ -166,6 +166,18 @@ await step("GET /v1/health") {
     guard try await transport.health() else { throw SmokeError.unexpected("health check returned false") }
 }
 
+// MARK: - 1b. Push-token registration (APNs wake-up, slice P4)
+
+// A syntactically valid but fake device token: APNs rejects it with
+// BadDeviceToken, so on a relay with APNs configured the "Ask now" step below
+// also exercises the real sender and its pruning. Push never affects results.
+let fakePushToken = String(repeating: "0f", count: 32)
+
+await step("owner and helper register a push token") {
+    try await ownerClient.registerPushToken(token: fakePushToken, environment: .sandbox)
+    try await helperClient.registerPushToken(token: fakePushToken, environment: .sandbox)
+}
+
 // MARK: - 2. Pairing v3: owner invites, friend looks the token up and accepts, done
 
 await step("owner creates an invite (token + display name + granted scopes)") {
@@ -421,6 +433,13 @@ await step("use after the session is superseded is rejected as .definitive") {
     guard AsyncCompanionClient.UseFailureDisposition.classify(caught) == .definitive else {
         throw SmokeError.unexpected("expected .definitive, classify(_:) returned something else for: \(caught)")
     }
+}
+
+// MARK: - 9b. Push-token unregistration
+
+await step("owner and helper unregister their push tokens") {
+    try await ownerClient.registerPushToken(token: nil, environment: .sandbox)
+    try await helperClient.registerPushToken(token: nil, environment: .sandbox)
 }
 
 // MARK: - 10. Owner revokes; helper sees the pairing revoked
