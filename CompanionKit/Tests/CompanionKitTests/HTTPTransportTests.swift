@@ -1157,6 +1157,8 @@ final class HTTPTransportTests: XCTestCase {
 }
 
 
+private func pushHex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
 final class PushTokenRegistrationTests: XCTestCase {
     func testEncodingUsesSortedKeysAndOmitsNilToken() throws {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
@@ -1170,8 +1172,8 @@ final class PushTokenRegistrationTests: XCTestCase {
     }
 
     func testHexFormattingAndValidation() throws {
-        XCTAssertEqual(PushTokenRegistration.hex(Data([0x00, 0xAB, 0x0F, 0xFF])), "00ab0fff")
-        let good = PushTokenRegistration.hex(Data(repeating: 0xA5, count: 32))
+        XCTAssertEqual(pushHex(Data([0x00, 0xAB, 0x0F, 0xFF])), "00ab0fff")
+        let good = pushHex(Data(repeating: 0xA5, count: 32))
         XCTAssertNoThrow(try PushTokenRegistration.validate(token: good))
         XCTAssertThrowsError(try PushTokenRegistration.validate(token: "abcd"))
         XCTAssertThrowsError(try PushTokenRegistration.validate(token: String(repeating: "A", count: 64)))
@@ -1182,7 +1184,7 @@ final class PushTokenRegistrationTests: XCTestCase {
         let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
         let now = fixedTime
         let client = AsyncCompanionClient(signer: signer, transport: transport, now: { now })
-        let token = PushTokenRegistration.hex(Data(repeating: 0x3C, count: 32))
+        let token = pushHex(Data(repeating: 0x3C, count: 32))
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.url?.path, "/v1/push-token")
             XCTAssertEqual(request.httpMethod, "POST")

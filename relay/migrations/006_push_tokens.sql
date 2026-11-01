@@ -1,7 +1,7 @@
 -- APNs wake-up notifications (docs/r5-apns-plan.md). A device token is a
 -- delivery address only: never state, never a credential. Rows are keyed by
 -- the registering identity (an owner or approver identity). At most 5 rows
--- per identity are kept (enforced on insert in db.ts); retention deletes rows
+-- per identity are kept (enforced on insert in push-store.ts); retention deletes rows
 -- not refreshed for 90 days.
 
 CREATE TABLE IF NOT EXISTS companion_push_token (

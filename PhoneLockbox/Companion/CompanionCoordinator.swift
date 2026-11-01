@@ -402,7 +402,9 @@ final class CompanionCoordinator: ObservableObject {
                 [self?.ownerIdentity, self?.approverIdentity].compactMap { $0?.identityID }
             },
             send: { [weak self] identityID, token, environment in
-                try await self?.sendPushToken(identityID: identityID, token: token, environment: environment)
+                // Throw (never return) so the registrar does not record an unsent token as sent.
+                guard let self else { throw CompanionError.malformed("push registration unavailable") }
+                try await self.sendPushToken(identityID: identityID, token: token, environment: environment)
             })
         #if os(iOS)
         if systemPushEnabled {
@@ -419,7 +421,9 @@ final class CompanionCoordinator: ObservableObject {
     /// by the registrar (retried on the next launch or foreground).
     private func sendPushToken(identityID: String, token: String, environment: String) async throws {
         guard let identity = [ownerIdentity, approverIdentity].compactMap({ $0 }).first(where: { $0.identityID == identityID }),
-              let env = PushEnvironment(rawValue: environment) else { return }
+              let env = PushEnvironment(rawValue: environment) else {
+            throw CompanionError.malformed("push registration identity unavailable")
+        }
         let client = makeClient(signer: try signer(for: identity))
         try await client.registerPushToken(token: token, environment: env)
     }
@@ -446,6 +450,22 @@ final class CompanionCoordinator: ObservableObject {
         if notificationPermission == .allowed { PushPermissionSystem.registerForRemoteNotifications() }
         // A newly created identity registers with the token we already hold.
         await push?.sync()
+        #endif
+    }
+
+    /// Fourth prompt moment: People appeared on a device that was paired
+    /// before push existed and helps someone. Once per launch; the system
+    /// prompt itself is never repeated once decided.
+    private var peopleAppearPromptChecked = false
+
+    func peopleTabAppeared() async {
+        #if os(iOS)
+        guard systemPushEnabled, !peopleAppearPromptChecked else { return }
+        let permission = await PushPermissionSystem.current()
+        notificationPermission = permission
+        guard PushPromptPolicy.shouldPromptOnPeopleAppear(permission: permission, helpingCount: helpingPeople.count) else { return }
+        peopleAppearPromptChecked = true
+        await notificationMomentReached()
         #endif
     }
 

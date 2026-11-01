@@ -18,6 +18,8 @@ export interface PushTokenRow {
 /** Inserts or refreshes `(identity, token)`, then deletes the oldest rows beyond the per-identity cap. */
 export async function upsertPushToken(pool: pg.Pool, identityID: string, token: string, environment: PushEnvironment, nowSeconds: number): Promise<void> {
   await withTransaction(pool, async (client) => {
+    // Serialize per identity so the cap holds under concurrent registrations.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [identityID]);
     await client.query(
       `INSERT INTO companion_push_token (identity_id, token, environment, updated_at) VALUES ($1, $2, $3, $4)
        ON CONFLICT (identity_id, token) DO UPDATE SET environment = EXCLUDED.environment, updated_at = EXCLUDED.updated_at`,
