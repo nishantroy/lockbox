@@ -46,6 +46,7 @@ import { computeStateRoot } from "./service.js";
 import { digest } from "./canonical.js";
 import { randomUUID } from "node:crypto";
 import { relayError } from "./errors.js";
+import { purgeStalePushTokens } from "./push-store.js";
 
 export interface RetentionSummary {
   purgedRequests: number;
@@ -62,6 +63,8 @@ export interface RetentionSummary {
   purgedRateLimitSignerEntries: number;
   purgedOperationRows: number;
   purgedRateLimitRows: number;
+  /** APNs device tokens not refreshed for 90 days. */
+  purgedPushTokens: number;
   ownersTouched: number;
   ownersScanned: number;
   ownersRemaining: number;
@@ -82,6 +85,7 @@ function empty(): RetentionSummary {
     purgedRateLimitSignerEntries: 0,
     purgedOperationRows: 0,
     purgedRateLimitRows: 0,
+    purgedPushTokens: 0,
     ownersTouched: 0,
     ownersScanned: 0,
     ownersRemaining: 0
@@ -168,6 +172,7 @@ export async function purgeExpiredRecords(pool: pg.Pool, retentionDays: number, 
   // expiry, matching the ledger invite purge, so an expired lookup key cannot be re-registered.
   summary.purgedInviteTokens += await purgeExpiredInviteTokens(pool, cutoff);
   summary.purgedRateLimitRows = await purgeStaleRateLimits(pool, nowSeconds, GLOBAL_RATE_LIMIT_WINDOW_SECONDS);
+  summary.purgedPushTokens = await purgeStalePushTokens(pool, nowSeconds);
 
   return summary;
 }

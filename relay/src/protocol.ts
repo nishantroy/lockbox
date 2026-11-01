@@ -1034,6 +1034,31 @@ export function decodeInboxQuery(value: unknown): InboxQuery {
   return { identityID, issuedAt: requireTimestampSeconds(v.issuedAt) };
 }
 
+/** Body of a `push_token` operation (docs/r5-apns-plan.md "Wire contract"). `token: null` unregisters. */
+export interface PushTokenRegistration {
+  identityID: string;
+  issuedAt: number;
+  token: string | null;
+  environment: "sandbox" | "production";
+}
+
+const PUSH_TOKEN_PATTERN = /^[0-9a-f]{64,200}$/;
+
+export function decodePushTokenRegistration(value: unknown): PushTokenRegistration {
+  if (typeof value !== "object" || value === null) throw relayError("malformed");
+  const v = value as Record<string, unknown>;
+  const identityID = requireIdentifier(v.identityID, "identityID");
+  if (v.issuedAt === undefined || v.issuedAt === null) throw relayError("malformed");
+  const issuedAt = requireTimestampSeconds(v.issuedAt);
+  if (v.environment !== "sandbox" && v.environment !== "production") throw relayError("malformed");
+  let token: string | null = null;
+  if (v.token !== undefined && v.token !== null) {
+    if (typeof v.token !== "string" || !PUSH_TOKEN_PATTERN.test(v.token)) throw relayError("malformed");
+    token = v.token;
+  }
+  return { identityID, issuedAt, token, environment: v.environment };
+}
+
 // ---------------------------------------------------------------------------
 // Signed operation envelope
 // ---------------------------------------------------------------------------

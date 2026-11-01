@@ -1,0 +1,16 @@
+{
+  "note": "Hand-built with the relay's canonical encoder, not Swift-produced. See scripts/gen-push-token-fixture.ts.",
+  "issuedAtUnix": 1793491200,
+  "bodyJSON": "{\"environment\":\"sandbox\",\"identityID\":\"ZbYGc9btiEvwHCwiLYKtoHQPKawzVdap\",\"issuedAt\":815184000,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+  "operation": {
+    "operationID": "Z4j1tc35WjxOqe5rjnmHCITPOqguAFy-",
+    "kind": "push_token",
+    "signer": {
+      "identityID": "ZbYGc9btiEvwHCwiLYKtoHQPKawzVdap",
+      "role": "trustedApprover",
+      "publicKey": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ="
+    },
+    "body": "eyJlbnZpcm9ubWVudCI6InNhbmRib3giLCJpZGVudGl0eUlEIjoiWmJZR2M5YnRpRXZ3SEN3aUxZS3RvSFFQS2F3elZkYXAiLCJpc3N1ZWRBdCI6ODE1MTg0MDAwLCJ0b2tlbiI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ==",
+    "signature": "cR5i9nCMi1HLZ77QXaBtZgVMOkG415IQwTZMNz31/bmMv0fz+YWu9o1g409TorRH1wcFKC1VbMZMFoOKVODWDQ=="
+  }
+}

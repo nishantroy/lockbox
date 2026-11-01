@@ -43,7 +43,7 @@ check `lsof -nP -iTCP:8002 -sTCP:LISTEN` / `:56330`.
 
 ## Layout
 
-- `api/v1/{operations,inbox,health}.ts`, `api/v1/invite/lookup.ts` (pairing v3 token lookup) — Vercel Node functions (Web
+- `api/v1/{operations,inbox,health,push-token}.ts`, `api/v1/invite/lookup.ts` (pairing v3 token lookup) — Vercel Node functions (Web
   `Request -> Response` signature). Thin wrappers over `src/handlers.ts`.
 - `api/cron/retention-purge.ts` — the daily Vercel Cron target
   (`vercel.json`); authenticated with `Authorization: Bearer $CRON_SECRET`,
@@ -327,6 +327,37 @@ log and never idempotency-checked/replayed — each fetch reads current
 committed state directly; `test/security-fixes.test.ts` proves two
 identical-body fetches straddling an intervening mutation return different
 (current) results.
+
+## APNs wake-up notifications (`POST /v1/push-token`)
+
+Spec: `docs/r5-apns-plan.md`. Push is a wake-up, never state or a credential;
+the app always fetches the signed inbox. A send failure or timeout never
+changes an operation's result.
+
+- **Endpoint.** `POST /v1/push-token` takes one `SignedOperation` with
+  `kind: "push_token"`, `expectedRevision: null`, whose body is a
+  `PushTokenRegistration` (`identityID`, `issuedAt`, `token` (lowercase hex,
+  64-200 chars, or `null` to unregister on `environment`), `environment`
+  `sandbox|production`). `identityID` must equal the signer (403
+  `unauthorized`); `issuedAt` uses the inbox freshness window (`expired`).
+  Returns `200 {"ok":true}`. Global rate limits apply. At most 5 tokens are
+  kept per identity (oldest dropped); `migrations/006_push_tokens.sql`.
+- **Events** (after COMMIT, never on an idempotent replay or failed op):
+  `request` -> each targeted approver, titled with the owner's signed name for
+  that approver's pairing; approval approve/decline -> the owner, titled with
+  the approver's signed name; `accept` -> the owner. A missing or blank name
+  becomes `Phone Lockbox`. Payload keys: `aps.alert{title,body}`,
+  `aps.sound`, `aps.thread-id`, `kind` (`request|answer|joined`).
+- **Sender** (`src/apns.ts`): ES256 JWT cached 50 minutes, HTTP/2 via
+  `node:http2`, 3 s total budget awaited before the response. `410` and
+  `400 BadDeviceToken|DeviceTokenNotForTopic` delete the token row.
+- **Env vars** (push is disabled unless the first three are all set):
+  `APNS_KEY_P8` (PEM text; `\n`-escaped also accepted), `APNS_KEY_ID`,
+  `APNS_TEAM_ID`, `APNS_TOPIC` (default `com.phone-lockbox.app`).
+- **Retention:** the purge sweep deletes tokens not refreshed for 90 days
+  (`purgedPushTokens`). Logs only ever say `apns: sent n, failed m, pruned k`.
+- `test/fixtures/push-token-op.json` is hand-built with the relay's canonical
+  encoder (`scripts/gen-push-token-fixture.ts`), not Swift-produced.
 
 ## Error codes
 
