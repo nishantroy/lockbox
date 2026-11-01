@@ -143,10 +143,11 @@ interface TransactionOutcome {
   notifications: PushNotification[];
 }
 
-const PUSH_FALLBACK_TITLE = "Phone Lockbox";
+const REQUEST_FALLBACK_TITLE = "Someone you help";
+const ANSWER_FALLBACK_TITLE = "Your trusted person";
 
-function pushTitle(name: string | undefined): string {
-  return name !== undefined && name.trim() !== "" ? name : PUSH_FALLBACK_TITLE;
+function pushTitle(name: string | undefined, fallback: string): string {
+  return name !== undefined && name.trim() !== "" ? name : fallback;
 }
 
 /**
@@ -159,25 +160,32 @@ function pushTitle(name: string | undefined): string {
  * - approver "accept" -> the owner only (title: the approver's signed name)
  * Everything else (revocations, expiries, natural end, ...) sends nothing.
  */
-function pushPlan(operation: SignedOperation, result: RelayResult, ledger: Ledger, ownerID: string): PushNotification[] {
+function pushPlan(operation: SignedOperation, result: RelayResult, ledger: Ledger, ownerID: string, priorStatuses: Record<string, string> = {}): PushNotification[] {
   if (operation.kind === "request" && result.kind === "request") {
     const request = result.value;
     if (request.status !== "pending") return [];
     return request.targetedApproverIDs.map((approverID) => {
       const binding = request.targetBindings.find((b) => b.approverIdentityID === approverID);
       const pairing = binding ? ledger.pairings[binding.pairingID]?.pairing : undefined;
-      return { identityID: approverID, message: { title: pushTitle(pairing?.ownerDisplayName), body: "Asks you to approve ending a lock early.", kind: "request" as const } };
+      return { identityID: approverID, message: { title: pushTitle(pairing?.ownerDisplayName, REQUEST_FALLBACK_TITLE), body: "Asks to end their lock early.", kind: "request" as const } };
     });
   }
   if (operation.kind === "approval" && result.kind === "approval") {
     const approval = result.value;
-    const name = pushTitle(ledger.pairings[approval.pairingID]?.pairing.approverDisplayName);
-    if (approval.decision === "approved") return [{ identityID: ownerID, message: { title: name, body: "Approved your request. Open Phone Lockbox to end your lock.", kind: "answer" } }];
-    if (approval.decision === "declined") return [{ identityID: ownerID, message: { title: name, body: "Declined your request.", kind: "answer" } }];
+    const name = pushTitle(ledger.pairings[approval.pairingID]?.pairing.approverDisplayName, ANSWER_FALLBACK_TITLE);
+    // Already answered "approved" before this operation: nothing new to say.
+    if (priorStatuses[approval.requestID] === "approved") return [];
+    const status = ledger.requests[approval.requestID]?.request.status;
+    if (approval.decision === "approved") return [{ identityID: ownerID, message: { title: name, body: "Approved ending your lock early.", kind: "answer" } }];
+    if (approval.decision === "declined") {
+      // Only the committed status says whether the owner is truly declined.
+      if (status === "pending") return [{ identityID: ownerID, message: { title: name, body: "Declined. Others you asked can still answer.", kind: "answer" } }];
+      if (status === "declined") return [{ identityID: ownerID, message: { title: name, body: "Declined your request.", kind: "answer" } }];
+    }
     return [];
   }
   if (operation.kind === "accept" && result.kind === "pairing") {
-    return [{ identityID: ownerID, message: { title: pushTitle(result.value.approverDisplayName), body: "Joined as your trusted person.", kind: "joined" } }];
+    return [{ identityID: ownerID, message: { title: pushTitle(result.value.approverDisplayName, ANSWER_FALLBACK_TITLE), body: "Joined as your trusted person.", kind: "joined" } }];
   }
   return [];
 }
@@ -295,6 +303,13 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
     }
     chargeRateLimit(ownerRow.ledger, operation.signer.identityID, now);
 
+    // Request statuses before this operation, so a push can tell "already
+    // approved" from a fresh answer (a second approver may still answer).
+    const priorStatuses: Record<string, string> = {};
+    if (operation.kind === "approval") {
+      for (const [id, record] of Object.entries(ownerRow.ledger.requests)) priorStatuses[id] = record.request.status;
+    }
+
     let reduced;
     try {
       reduced = reduce(operation.kind, operation.body, operation.signer, ownerRow.ledger.owner, ownerRow.ledger, now);
@@ -373,7 +388,7 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
         stateRoot: newStateRoot
       },
       surfaceExpired: reduced.rejectedExpired,
-      notifications: reduced.rejectedExpired ? [] : pushPlan(operation, reduced.result, ownerRow.ledger, ownerRow.ownerID)
+      notifications: reduced.rejectedExpired ? [] : pushPlan(operation, reduced.result, ownerRow.ledger, ownerRow.ownerID, priorStatuses)
     };
   });
 
