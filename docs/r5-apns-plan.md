@@ -1,6 +1,6 @@
 # R5 slice P4 — APNs wake-up notifications (plan, 2026-11-01)
 
-Status: **planned.** Owner decision: build APNs now. APNs Key ID `ABC123DEFG` (Sandbox & Production, team-scoped). Team `ABCDE12345`, topic `com.phone-lockbox.app`. The owner adds the `.p8` to Vercel themselves; it never enters chat or the repo.
+Status: **built and reviewed; review follow-up in progress.** Owner decision: build APNs now. APNs Key ID `ABC123DEFG` (Sandbox & Production, team-scoped). Team `ABCDE12345`, topic `com.phone-lockbox.app`. The owner adds the `.p8` to Vercel themselves; it never enters chat or the repo.
 
 ## Goal
 
@@ -101,3 +101,29 @@ A device can hold two identities (an owner identity and an approver identity). I
 3. **Relay deploy**, needing the owner: migration 006 runs, then `vercel env add` for `APNS_KEY_P8` (the owner pastes the `.p8` contents), plus `APNS_KEY_ID=ABC123DEFG`, `APNS_TEAM_ID=ABCDE12345` and `APNS_TOPIC=com.phone-lockbox.app`, then `vercel deploy --prod`, health, and `relay-smoke`.
 4. The pre-push unit and UI suites run, followed by the UX review of the new People row and the permission prompt timing.
 5. **Device QA by the owner:** Ask now on the iPhone produces a banner on the friend simulator (simulators on Apple silicon receive sandbox pushes); approve produces a banner on the iPhone; tapping it opens People. With the developer toggle **Friend approval can end locks (prototype)** on, **End lock now** releases that exact lock. That last step is the long-pending device test of friend release.
+
+## Build results (2026-11-01)
+
+- **P4-relay:** Sonnet builder (`claude-sonnet-5-5`), commit 3e2e9e2, merged as 5af97f2. Adds migration 006, `POST /v1/push-token`, `src/apns.ts` (ES256 JWT, `node:http2`, `PushSender` interface), `src/push-store.ts`, the hooks in `submitOperation`, and the 90-day token purge. Relay checks after merge, run by the parent: typecheck clean; `npm test` **222/222**.
+- **P4-app:** Sonnet builder (`claude-sonnet-5-5`), commits 18c4451, 8674d25 and 5e1dd3e, merged as 92b79ea. Adds `PushTokenRegistration` and `registerPushToken` in CompanionKit, `PushWakeup.swift` (registrar, ledger, kind parsing; host-tested), `PushNotificationSupport.swift` (app delegate, notification delegate, wake bridge), the `aps-environment` entitlement and the People "Notifications are off" row. The prompt is asked only after create invite, Accept or Ask now.
+- **Parent checks on the merged tree (66ba25e):**
+  - CompanionKit `swift test` **165/0**; root `swift test` **187/0**;
+  - compile-only simulator build **succeeded**;
+  - `tools/relay-smoke` (which now registers and unregisters push tokens) against the local relay: **all 26 steps passed**. This proves that Swift-signed `push_token` operations are accepted by the TypeScript relay. APNs was not configured locally, so no real push was sent.
+
+## Opus review (high, `claude-opus-5-5`), f3063e8..66ba25e
+
+No P1. Findings and disposition:
+
+| ID | Finding | Disposition |
+| --- | --- | --- |
+| P2-1 | Approvers who paired on an earlier build are never asked for permission, so they never register | Fix: a fourth moment, when People appears with an active approver pairing and permission is undecided |
+| P3-1 | 5-row cap can be exceeded under concurrent registrations | Fix: advisory transaction lock |
+| P3-2 | Cached JWT kept after a 403 | Fix: reset on 403 |
+| P3-3 | Stream closed without `end`/`error` waits for the 3 s budget | Fix: resolve on `close` |
+| P3-4 | Environment from DEBUG vs entitlement hard-coded `development` | Latent (device builds are Debug); revisit with TestFlight |
+| P3-5 | Registration counted as sent when self/identity is missing | Fix: throw |
+| P3-6 | 7-day dedupe doesn't notice relay-side pruning | Accepted for the prototype |
+| P3-7 | No Swift byte check of the relay fixture | Covered by the passing relay-smoke interop run |
+| P3-8 | Decline copy with several approvers | Left for the UX review |
+| Nits | Migration comment; duplicate hex helper; app never unregisters | Fix the first two; the third is fine (no identity-reset path) |
