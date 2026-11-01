@@ -127,3 +127,40 @@ No P1. Findings and disposition:
 | P3-7 | No Swift byte check of the relay fixture | Covered by the passing relay-smoke interop run |
 | P3-8 | Decline copy with several approvers | Left for the UX review |
 | Nits | Migration comment; duplicate hex helper; app never unregisters | Fix the first two; the third is fine (no identity-reset path) |
+
+## Follow-ups after review (2026-11-01)
+
+All builders were Sonnet (`claude-sonnet-5-5`); all reviewers were Opus (`claude-opus-5-5`).
+
+- **Code review follow-up** (merge 78e34e5):
+  - P2-1: a prompt moment for approvers who are already paired;
+  - P3-1: advisory lock on the 5-row cap (16-way concurrency test);
+  - P3-2: JWT reset on a 403;
+  - P3-3: stream resolves on `close`;
+  - P3-5: registration throws instead of counting as sent;
+  - one hex helper; migration comment fixed.
+
+  Relay 227/227; root 188/0.
+- **First pre-push suites** (78e34e5): unit **138/0 (1 skipped)**, UI **4/4**. They fed the UX review in [2026-11-01-ux-apns.md](reviews/2026-11-01-ux-apns.md).
+- **UX review fixes** (merge e239e80):
+  - P1-1: the decline banner is decided from the committed request status (pending → "Declined. Others you asked can still answer."; declined → "Declined your request."; approved → none);
+  - approve copy is "Approved ending your lock early.";
+  - request copy is "Asks to end their lock early." (and the Waiting row reads "‹Name› asks to end their lock early");
+  - fallback titles;
+  - invite prompt deferred until the owner returns to the app or taps Copy link, with a footnote;
+  - "Get notified" card replaces the automatic prompt when People appears;
+  - role-aware denied-row copy and a quiet "Turn On" row;
+  - no foreground banner while on People;
+  - only `[.alert, .sound]` requested;
+  - accepted-notice copy;
+  - Copy link label no longer cross-fades.
+
+  P3-7 (lock-screen placeholder) left as is. Relay 231/231; root 195/0.
+- **Delta code review (medium)** of e239e80: no P1. Fixed:
+  - P2-1: the deferred invite prompt now expires after 10 minutes, because the share sheet doesn't change the scene phase;
+  - P3-1: the card also shows for owners with trusted people;
+  - P3-2: the checkmark animates again.
+
+  P3-3 (unreachable defensive guard) kept. Merge 492a8aa, plus the parent's title fix 261e0ed.
+- **Second pre-push run** (e239e80): unit 138/0. UI: 4 of 5; `testNotificationsOffRow…` failed once with `notFound` from the scripted friend's invite lookup, then passed when run alone. The follow-up added a lookup retry helper with step-labelled failures and waits for the link value. The root cause was not confirmed.
+- **Final pre-push suites** (261e0ed): unit **138 tests, 0 failures, 1 skipped**; UI **5/5** (new denied-row screenshot `09-notifications-off-row`). Host checks: CompanionKit 165/0, root 197/0, relay 231/231.
