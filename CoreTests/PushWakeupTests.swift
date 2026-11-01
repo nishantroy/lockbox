@@ -125,6 +125,8 @@ final class PushWakeupTests: XCTestCase {
                        "Dana can ask you to approve ending a lock early. We'll let you know when Dana asks.")
         XCTAssertEqual(AcceptedNoticeCopy.detail(ownerName: "Dana", notificationsAllowed: false),
                        "Dana can ask you to approve ending a lock early. You'll see requests here.")
+        XCTAssertEqual(AcceptedNoticeCopy.detail(ownerName: "Dana", notificationsAllowed: false, notificationCardVisible: true),
+                       "Dana can ask you to approve ending a lock early.")
     }
 
     func testEnvironmentSelection() {
