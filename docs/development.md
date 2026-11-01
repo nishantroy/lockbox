@@ -100,7 +100,7 @@ xcrun devicectl device process launch --device '<CoreDevice-ID>' com.phone-lockb
 
 Check each exit status. Installation can succeed while launch fails because the phone is locked; report those separately. A transient wireless timeout is not a compiler/signing defect. No new deployment is needed for documentation-only changes. Never reinstall mid scheduled-release experiment.
 
-Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the revision alongside it. Build 23 (r5-relay f33e4ef plus the bump) was installed on 2026-11-01 on the iPhone 15 Pro and the friend simulator (iPhone 17 Pro Max), against the production relay.
+Increment `CURRENT_PROJECT_VERSION` for the next device QA build and record the revision alongside it. Build 24 (r5-relay 6cf80a2 plus the bump: P4 push notifications) was installed on 2026-11-01 on the iPhone 15 Pro and the friend simulator (iPhone 17 Pro Max), against the production relay.
 
 ## Review and continuation
 
