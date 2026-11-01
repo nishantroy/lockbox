@@ -86,8 +86,8 @@ final class PushWakeupTests: XCTestCase {
     func testNotificationCardTitleAndBody() {
         XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana"], trustedNames: []), "Get notified when Dana asks")
         XCTAssertEqual(NotificationCard.title(helpingNames: [], trustedNames: ["Ari"]), "Get notified when Ari answers")
-        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana", "Lee"], trustedNames: []), "Get notified about requests and answers")
-        XCTAssertEqual(NotificationCard.title(helpingNames: [], trustedNames: ["Ari", "Bo"]), "Get notified about requests and answers")
+        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana", "Lee"], trustedNames: []), "Get notified when someone asks")
+        XCTAssertEqual(NotificationCard.title(helpingNames: [], trustedNames: ["Ari", "Bo"]), "Get notified when someone answers")
         XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana"], trustedNames: ["Ari"]), "Get notified about requests and answers")
         XCTAssertEqual(NotificationCard.body(helpingNames: ["Dana"], trustedNames: []),
                        "Otherwise you'll only see requests when you open People.")

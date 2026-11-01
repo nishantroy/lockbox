@@ -95,6 +95,8 @@ enum NotificationCard {
         switch (!helpingNames.isEmpty, !trustedNames.isEmpty) {
         case (true, false) where helpingNames.count == 1: return "Get notified when \(helpingNames[0]) asks"
         case (false, true) where trustedNames.count == 1: return "Get notified when \(trustedNames[0]) answers"
+        case (true, false): return "Get notified when someone asks"
+        case (false, true): return "Get notified when someone answers"
         case (false, false): return "Get notified when someone asks"
         default: return "Get notified about requests and answers"
         }
