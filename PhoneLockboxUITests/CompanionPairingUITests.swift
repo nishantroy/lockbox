@@ -28,6 +28,9 @@ final class CompanionPairingUITests: XCTestCase {
             // `CompanionCoordinator.resetCompanionStateForUITests`.
             "-resetCompanionStateForUITests",
         ]
+        // DEBUG-only: forces the notification permission to "denied" so the
+        // quiet "Notifications are off" row can be captured.
+        if name.contains("NotificationsOffRow") { app.launchArguments += ["-forceNotificationPermissionDenied"] }
         app.launch()
         // A previous test can leave the simulator in the App Switcher.
         if !app.wait(for: .runningForeground, timeout: 15) { app.activate() }
@@ -86,6 +89,30 @@ final class CompanionPairingUITests: XCTestCase {
         attachScreenshot(named: "03b-people-bottom-scrolled")
     }
 
+    /// With notifications denied (forced by launch argument) and one trusted
+    /// person, People shows one quiet row with the person's name and a small
+    /// "Turn On" button. The screenshot lets the UX review see it.
+    func testNotificationsOffRowIsQuietAndNamesTheTrustedPerson() async throws {
+        guard navigateToPeopleTab() else { return XCTFail("'People' tab never stayed selected") }
+
+        let link = try await createInviteInApp(ownerName: "Nishant")
+        let token = try XCTUnwrap(InviteToken.token(fromShareLink: link))
+        let friend = try scriptedClient(role: .trustedApprover)
+        let invitation = try await friend.client.lookupInvite(token: token)
+        _ = try await friend.client.acceptInvite(invitation, token: token, approverDisplayName: "Ari",
+                                                 acceptanceID: UUID().uuidString, now: Date())
+
+        XCTAssertTrue(app.staticTexts["joinedNotice.text"].waitForExistence(timeout: 40), "the 'Ari joined' notice never appeared")
+        let row = app.staticTexts["people.notificationsOff.text"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the notifications-off row never appeared")
+        XCTAssertEqual(row.label, "Notifications are off, so you won't hear when Ari answers.")
+        let turnOn = app.buttons["people.notificationsOff.openSettingsButton"]
+        XCTAssertTrue(turnOn.exists)
+        XCTAssertEqual(turnOn.label, "Open Settings to turn notifications on")
+        for _ in 0..<3 where !row.isHittable { app.swipeUp() }
+        attachScreenshot(named: "09-notifications-off-row")
+    }
+
     // MARK: - Friend side
 
     /// A scripted owner creates an invite; opening its token link in the app
@@ -141,7 +168,7 @@ final class CompanionPairingUITests: XCTestCase {
                                                  session: session, targets: [pairing.approver.identityID], validFor: 600)
 
         // The idle poll (~30 s) brings it in without a manual refresh.
-        let askTitle = app.staticTexts["Dana is asking for help"]
+        let askTitle = app.staticTexts["Dana asks to end their lock early"]
         XCTAssertTrue(askTitle.waitForExistence(timeout: 60), "the friend never saw the request with the owner's name")
         XCTAssertTrue(app.buttons["Approve"].exists)
         XCTAssertTrue(app.staticTexts["Waiting for you"].exists, "the pending request sits in the Waiting for you card")

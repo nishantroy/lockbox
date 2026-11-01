@@ -265,6 +265,15 @@ final class CompanionCoordinator: ObservableObject {
     /// System notification permission as last read (R5 slice P4). Drives the
     /// quiet "Notifications are off" row in People.
     @Published private(set) var notificationPermission: NotificationPermission = .notDetermined
+    /// When the inline "Get notified" card was last set aside (hidden for
+    /// seven days), persisted in the App Group defaults.
+    @Published private(set) var notificationCardSnoozedUntil: Date?
+    /// Set when an invite link is created; the system prompt waits for the
+    /// person to come back from sharing (or tap Copy link), once.
+    private var invitePromptPending = false
+    /// DEBUG-only (`-forceNotificationPermissionDenied`): UI tests see the
+    /// denied row without touching real system settings.
+    private var forcedPermission: NotificationPermission?
     /// False in tests (an injected key store) and in the UI-test reset mode,
     /// so no system prompt or remote registration is ever attempted there.
     private let systemPushEnabled: Bool
@@ -312,6 +321,12 @@ final class CompanionCoordinator: ObservableObject {
         if ProcessInfo.processInfo.arguments.contains("-resetCompanionStateForUITests") { pushEnabled = false }
         #endif
         self.systemPushEnabled = pushEnabled
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-forceNotificationPermissionDenied") {
+            self.forcedPermission = .denied
+            self.notificationPermission = .denied
+        }
+        #endif
         // An injected key store means a test: never touch the real Keychain then.
         self.inviteStore = inviteStore ?? (keyStore == nil ? KeychainIssuedInviteStore() : InMemoryIssuedInviteStore())
         self.keyStore = keyStore ?? KeychainDeviceKeyStore(service: Self.keychainService)
@@ -324,6 +339,7 @@ final class CompanionCoordinator: ObservableObject {
             self.relayBaseURLString = (stored == nil || stored == Self.legacyLocalRelayBaseURLString) ? Self.defaultRelayBaseURLString : stored!
             self.friendApprovalCanEndLocksEnabled = resolvedDefaults.object(forKey: Self.friendApprovalGateDefaultsKey) as? Bool ?? false
             self.lastError = nil
+            self.notificationCardSnoozedUntil = NotificationCard.snoozedUntil(in: resolvedDefaults)
         } else {
             // Fail visibly and stay disabled — never substitute a random
             // ephemeral suite or `.standard`, and never create identities or
@@ -433,6 +449,7 @@ final class CompanionCoordinator: ObservableObject {
     /// retry any registration that has not succeeded or is a week old.
     func pushForegroundTick() async {
         #if os(iOS)
+        if let forcedPermission { notificationPermission = forcedPermission; return }
         guard systemPushEnabled else { return }
         notificationPermission = await PushPermissionSystem.current()
         if notificationPermission == .allowed { PushPermissionSystem.registerForRemoteNotifications() }
@@ -441,11 +458,12 @@ final class CompanionCoordinator: ObservableObject {
     }
 
     /// Called right after something that makes a notification worth having
-    /// (an invite link was made, an invite was accepted, Ask now was sent).
-    /// Asks for permission only if it is still undecided, then registers.
+    /// (an invite link was shared or copied, an invite was accepted, Ask now
+    /// was sent, or Turn on notifications was tapped). Asks for permission
+    /// only if it is still undecided, then registers.
     func notificationMomentReached() async {
         #if os(iOS)
-        guard systemPushEnabled else { return }
+        guard systemPushEnabled, forcedPermission == nil else { return }
         notificationPermission = await PushPermissionSystem.requestIfUndecided()
         if notificationPermission == .allowed { PushPermissionSystem.registerForRemoteNotifications() }
         // A newly created identity registers with the token we already hold.
@@ -453,20 +471,41 @@ final class CompanionCoordinator: ObservableObject {
         #endif
     }
 
-    /// Fourth prompt moment: People appeared on a device that was paired
-    /// before push existed and helps someone. Once per launch; the system
-    /// prompt itself is never repeated once decided.
-    private var peopleAppearPromptChecked = false
+    /// The scene became active again, or Copy link was tapped. Fires the
+    /// prompt deferred by Create invite link once, only while that link is
+    /// still live.
+    func invitePromptReturnPoint() {
+        guard invitePromptPending else { return }
+        let live = pendingInvite.map { Date() < $0.invitation.payload.expiresAt } ?? false
+        invitePromptPending = false
+        if InvitePromptTrigger.shouldFire(pending: true, linkIsLive: live) {
+            Task { await notificationMomentReached() }
+        }
+    }
 
-    func peopleTabAppeared() async {
+    /// People appeared: only re-read the permission (never prompts). The
+    /// inline "Get notified" card offers the choice instead.
+    func refreshNotificationPermission() async {
         #if os(iOS)
-        guard systemPushEnabled, !peopleAppearPromptChecked else { return }
-        let permission = await PushPermissionSystem.current()
-        notificationPermission = permission
-        guard PushPromptPolicy.shouldPromptOnPeopleAppear(permission: permission, helpingCount: helpingPeople.count) else { return }
-        peopleAppearPromptChecked = true
-        await notificationMomentReached()
+        if let forcedPermission { notificationPermission = forcedPermission; return }
+        guard systemPushEnabled else { return }
+        notificationPermission = await PushPermissionSystem.current()
         #endif
+    }
+
+    /// Names of the people this device helps, and of the people who help it.
+    var helpingNames: [String] { helpingPeople.map(\.nickname) }
+    var trustedNames: [String] { trustedPeople.map(\.nickname) }
+
+    var showsNotificationCard: Bool {
+        NotificationCard.isVisible(permission: notificationPermission, helpingCount: helpingPeople.count,
+                                   snoozedUntil: notificationCardSnoozedUntil, now: Date())
+    }
+
+    /// "Not now": hides the card for seven days.
+    func snoozeNotificationCard() {
+        guard let sharedDefaults else { return }
+        notificationCardSnoozedUntil = NotificationCard.snooze(in: sharedDefaults, now: Date())
     }
 
     /// A wake-up arrived or was tapped: the signed inbox stays authoritative.
@@ -989,7 +1028,9 @@ final class CompanionCoordinator: ObservableObject {
             }
             pendingInvite = issued
             lastError = nil; needsRepair = false
-            Task { await notificationMomentReached() }
+            // The system prompt waits until the person is back from sharing
+            // (or taps Copy link), so it never covers the link.
+            invitePromptPending = true
         } catch { fail(error) }
     }
 

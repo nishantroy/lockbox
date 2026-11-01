@@ -35,6 +35,70 @@ final class PushWakeupTests: XCTestCase {
         XCTAssertFalse(PushPromptPolicy.shouldPromptOnPeopleAppear(permission: .allowed, helpingCount: 2))
     }
 
+    func testDeniedRowCopyIsRoleAwareWithRealNames() {
+        XCTAssertEqual(NotificationsOffRow.message(helpingNames: ["Dana"], trustedNames: []),
+                       "Notifications are off, so you won't hear when Dana asks.")
+        XCTAssertEqual(NotificationsOffRow.message(helpingNames: [], trustedNames: ["Ari"]),
+                       "Notifications are off, so you won't hear when Ari answers.")
+        XCTAssertEqual(NotificationsOffRow.message(helpingNames: ["Dana", "Lee"], trustedNames: []),
+                       "Notifications are off, so you won't hear when they ask.")
+        XCTAssertEqual(NotificationsOffRow.message(helpingNames: [], trustedNames: ["Ari", "Sam"]),
+                       "Notifications are off, so you won't hear when they answer.")
+        XCTAssertEqual(NotificationsOffRow.message(helpingNames: ["Dana"], trustedNames: ["Ari"]),
+                       "Notifications are off, so you won't hear about requests or answers.")
+    }
+
+    func testNotificationCardVisibilityAndSnooze() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertTrue(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 1, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 0, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .denied, helpingCount: 1, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .allowed, helpingCount: 1, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 1,
+                                                  snoozedUntil: now.addingTimeInterval(3_600), now: now))
+        // Snooze over: the card returns.
+        XCTAssertTrue(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 1,
+                                                 snoozedUntil: now.addingTimeInterval(-1), now: now))
+        // An implausibly far stamp (clock moved back) does not hide it forever.
+        XCTAssertTrue(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 1,
+                                                 snoozedUntil: now.addingTimeInterval(NotificationCard.snoozeInterval + 10), now: now))
+    }
+
+    func testNotificationCardSnoozePersistsSevenDays() {
+        let defaults = freshDefaults()
+        let now = Date(timeIntervalSince1970: 5_000)
+        XCTAssertNil(NotificationCard.snoozedUntil(in: defaults))
+        let until = NotificationCard.snooze(in: defaults, now: now)
+        XCTAssertEqual(until.timeIntervalSince(now), 7 * 24 * 3_600)
+        XCTAssertEqual(NotificationCard.snoozedUntil(in: defaults), until)
+    }
+
+    func testNotificationCardTitle() {
+        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana"]), "Get notified when Dana asks")
+        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana", "Lee"]), "Get notified when someone asks")
+        XCTAssertEqual(NotificationCard.title(helpingNames: []), "Get notified when someone asks")
+        XCTAssertEqual(NotificationCard.body, "Otherwise you'll only see requests when you open People.")
+    }
+
+    func testInvitePromptFiresOnlyForALiveLinkWithAPendingFlag() {
+        XCTAssertTrue(InvitePromptTrigger.shouldFire(pending: true, linkIsLive: true))
+        XCTAssertFalse(InvitePromptTrigger.shouldFire(pending: true, linkIsLive: false))
+        XCTAssertFalse(InvitePromptTrigger.shouldFire(pending: false, linkIsLive: true))
+    }
+
+    func testForegroundBannerIsSkippedOnlyOnActivePeopleTab() {
+        XCTAssertFalse(PushForegroundPresentation.showsBanner(peopleTabSelected: true, appIsActive: true))
+        XCTAssertTrue(PushForegroundPresentation.showsBanner(peopleTabSelected: false, appIsActive: true))
+        XCTAssertTrue(PushForegroundPresentation.showsBanner(peopleTabSelected: true, appIsActive: false))
+    }
+
+    func testAcceptedNoticeDetail() {
+        XCTAssertEqual(AcceptedNoticeCopy.detail(ownerName: "Dana", notificationsAllowed: true),
+                       "Dana can ask you to approve ending a lock early. We'll let you know when Dana asks.")
+        XCTAssertEqual(AcceptedNoticeCopy.detail(ownerName: "Dana", notificationsAllowed: false),
+                       "Dana can ask you to approve ending a lock early. You'll see requests here.")
+    }
+
     func testEnvironmentSelection() {
         XCTAssertEqual(PushEnvironmentName.current(isDebug: true), "sandbox")
         XCTAssertEqual(PushEnvironmentName.current(isDebug: false), "production")
