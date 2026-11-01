@@ -10,6 +10,9 @@ import UserNotifications
 final class PushWakeBridge {
     static let shared = PushWakeBridge()
 
+    /// Set by the SwiftUI root: whether People is the selected tab.
+    var peopleTabIsSelected: () -> Bool = { false }
+
     private var pendingToken: Data?
     private var pendingWake: (PushWakeKind, Bool)?
 
@@ -70,8 +73,16 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
             completionHandler([])   // Unchanged: other notifications are not shown in the foreground.
             return
         }
-        Task { @MainActor in PushWakeBridge.shared.deliver(kind: kind, opened: false) }
-        completionHandler([.banner, .list, .sound])
+        // The completion handler is only ever called once, from the main actor.
+        nonisolated(unsafe) let complete = completionHandler
+        Task { @MainActor in
+            PushWakeBridge.shared.deliver(kind: kind, opened: false)
+            // People already shows the request: no banner or sound there.
+            let showsBanner = PushForegroundPresentation.showsBanner(
+                peopleTabSelected: PushWakeBridge.shared.peopleTabIsSelected(),
+                appIsActive: UIApplication.shared.applicationState == .active)
+            complete(showsBanner ? [.banner, .list, .sound] : [])
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -104,7 +115,7 @@ enum PushPermissionSystem {
     static func requestIfUndecided() async -> NotificationPermission {
         let existing = await current()
         guard existing == .notDetermined else { return existing }
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
         return await current()
     }
 

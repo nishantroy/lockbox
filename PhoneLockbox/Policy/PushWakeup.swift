@@ -39,20 +39,95 @@ enum NotificationPermission: Equatable, Sendable {
 }
 
 enum NotificationsOffRow {
-    static let message = "Notifications are off, so you won't hear about requests."
-
     /// One quiet row, only when the person has at least one pairing and has
     /// explicitly denied notifications.
     static func isVisible(permission: NotificationPermission, pairingCount: Int) -> Bool {
         permission == .denied && pairingCount > 0
     }
+
+    /// Role-aware copy. `helpingNames` are the people this device helps (it
+    /// receives their requests); `trustedNames` are the people who help this
+    /// device's owner (it receives their answers). A real name is used only
+    /// when exactly one person is on that side.
+    static func message(helpingNames: [String], trustedNames: [String]) -> String {
+        switch (!helpingNames.isEmpty, !trustedNames.isEmpty) {
+        case (true, true):
+            return "Notifications are off, so you won't hear about requests or answers."
+        case (true, false):
+            return helpingNames.count == 1
+                ? "Notifications are off, so you won't hear when \(helpingNames[0]) asks."
+                : "Notifications are off, so you won't hear when they ask."
+        case (false, true):
+            return trustedNames.count == 1
+                ? "Notifications are off, so you won't hear when \(trustedNames[0]) answers."
+                : "Notifications are off, so you won't hear when they answer."
+        case (false, false):
+            return "Notifications are off."
+        }
+    }
 }
 
 enum PushPromptPolicy {
     /// An approver who paired before push existed never hit another prompt
-    /// moment; ask when People appears, only while still undecided.
+    /// moment; offer the inline card while still undecided and helping someone.
     static func shouldPromptOnPeopleAppear(permission: NotificationPermission, helpingCount: Int) -> Bool {
         permission == .notDetermined && helpingCount > 0
+    }
+}
+
+/// The inline "Get notified" card in People. It replaces the old automatic
+/// system prompt when People appeared.
+enum NotificationCard {
+    static let snoozeInterval: TimeInterval = 7 * 24 * 3_600
+    static let snoozeDefaultsKey = "com.phone-lockbox.companion.notificationCardSnoozedUntil.v1"
+    static let body = "Otherwise you'll only see requests when you open People."
+
+    static func isVisible(permission: NotificationPermission, helpingCount: Int, snoozedUntil: Date?, now: Date) -> Bool {
+        guard PushPromptPolicy.shouldPromptOnPeopleAppear(permission: permission, helpingCount: helpingCount) else { return false }
+        // A stamp further out than one snooze (clock moved back) is ignored.
+        if let snoozedUntil, snoozedUntil > now, snoozedUntil.timeIntervalSince(now) <= snoozeInterval { return false }
+        return true
+    }
+
+    static func title(helpingNames: [String]) -> String {
+        helpingNames.count == 1 ? "Get notified when \(helpingNames[0]) asks" : "Get notified when someone asks"
+    }
+
+    static func snoozedUntil(in defaults: UserDefaults) -> Date? {
+        defaults.object(forKey: snoozeDefaultsKey) as? Date
+    }
+
+    @discardableResult
+    static func snooze(in defaults: UserDefaults, now: Date) -> Date {
+        let until = now.addingTimeInterval(snoozeInterval)
+        defaults.set(until, forKey: snoozeDefaultsKey)
+        return until
+    }
+}
+
+/// Whether an invite-link moment should ask for notification permission now.
+/// The ask is deferred until the person returns from sharing (or copies the
+/// link), once per link.
+enum InvitePromptTrigger {
+    /// Fires on the next return to the app, or on Copy link, whichever is
+    /// first, only while a link was just created and is still live.
+    static func shouldFire(pending: Bool, linkIsLive: Bool) -> Bool { pending && linkIsLive }
+}
+
+/// Foreground push presentation: People already shows the request, so no
+/// banner or sound while it is the selected tab of the active app.
+enum PushForegroundPresentation {
+    static func showsBanner(peopleTabSelected: Bool, appIsActive: Bool) -> Bool {
+        !(peopleTabSelected && appIsActive)
+    }
+}
+
+/// Detail line of the friend's "You're now a trusted person" notice.
+enum AcceptedNoticeCopy {
+    static func detail(ownerName: String, notificationsAllowed: Bool) -> String {
+        notificationsAllowed
+            ? "\(ownerName) can ask you to approve ending a lock early. We'll let you know when \(ownerName) asks."
+            : "\(ownerName) can ask you to approve ending a lock early. You'll see requests here."
     }
 }
 

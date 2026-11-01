@@ -134,7 +134,8 @@ struct PeopleView: View {
                 }
                 ForEach(Array(companion.acceptedNotices.enumerated()), id: \.element.id) { index, notice in
                     DismissibleNoticeCard(title: "You're now a trusted person for \(notice.ownerName)",
-                                          detail: "\(notice.ownerName) can ask you to approve ending a lock early. You'll see requests here.",
+                                          detail: AcceptedNoticeCopy.detail(ownerName: notice.ownerName,
+                                                                     notificationsAllowed: companion.notificationPermission == .allowed),
                                           titleIdentifier: "acceptedNotice.text",
                                           dismissIdentifier: "acceptedNotice.dismissButton") {
                         companion.dismissAcceptedNotice(id: notice.id)
@@ -147,6 +148,9 @@ struct PeopleView: View {
                     WaitingForYouCard(coordinator: coordinator, companion: companion, items: waiting)
                         .id(Self.waitingScrollID)
                 }
+                if companion.showsNotificationCard {
+                    NotificationInviteCard(companion: companion)
+                }
                 if coordinator.companionActiveSessionIdentity != nil {
                     AskToEndEarlyCard(coordinator: coordinator, companion: companion)
                 }
@@ -155,7 +159,8 @@ struct PeopleView: View {
                 }
                 if NotificationsOffRow.isVisible(permission: companion.notificationPermission,
                                                  pairingCount: companion.trustedPeople.count + companion.helpingPeople.count) {
-                    NotificationsOffRowView()
+                    NotificationsOffRowView(message: NotificationsOffRow.message(helpingNames: companion.helpingNames,
+                                                                                 trustedNames: companion.trustedNames))
                 }
                 if companion.hasUnverifiedOwnerPeople {
                     LockboxCard {
@@ -237,7 +242,7 @@ struct PeopleView: View {
         // scene leaves `.active`, and restarts with an immediate refresh.
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
-            await companion.peopleTabAppeared()
+            await companion.refreshNotificationPermission()
             await companion.runAutoRefreshLoop(coordinator: coordinator)
         }
         .refreshable {
@@ -255,26 +260,79 @@ struct PeopleView: View {
 /// at least one pairing. Without notifications they still see everything by
 /// opening People; this just explains why nothing taps them on the shoulder.
 private struct NotificationsOffRowView: View {
+    let message: String
     @Environment(\.openURL) private var openURL
+
+    private var text: some View {
+        Label(message, systemImage: "bell.slash")
+            .font(.footnote)
+            .foregroundStyle(LockboxTheme.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("people.notificationsOff.text")
+    }
+
+    #if os(iOS)
+    private var turnOnButton: some View {
+        Button("Turn On") {
+            if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityLabel("Open Settings to turn notifications on")
+        .accessibilityIdentifier("people.notificationsOff.openSettingsButton")
+    }
+    #endif
 
     var body: some View {
         LockboxCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Label(NotificationsOffRow.message, systemImage: "bell.slash")
+            #if os(iOS)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    text
+                    Spacer(minLength: 8)
+                    turnOnButton
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    text
+                    turnOnButton
+                }
+            }
+            .accessibilityElement(children: .contain)
+            #else
+            text
+            #endif
+        }
+    }
+}
+
+/// Inline replacement for the old automatic system prompt: shown to someone
+/// who already helps a person and hasn't decided about notifications yet.
+private struct NotificationInviteCard: View {
+    @ObservedObject var companion: CompanionCoordinator
+
+    var body: some View {
+        LockboxCard {
+            VStack(alignment: .leading, spacing: 13) {
+                Text(NotificationCard.title(helpingNames: companion.helpingNames))
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("people.notificationCard.title")
+                Text(NotificationCard.body)
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("people.notificationsOff.text")
-                #if os(iOS)
-                Button("Open Settings") {
-                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                Button("Turn on notifications") {
+                    Task { await companion.notificationMomentReached() }
                 }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-                .accessibilityLabel("Open Settings to turn notifications on")
-                .accessibilityIdentifier("people.notificationsOff.openSettingsButton")
-                #endif
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                .accessibilityIdentifier("people.notificationCard.turnOnButton")
+                Button("Not now") { companion.snoozeNotificationCard() }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LockboxTheme.accent)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("people.notificationCard.notNowButton")
             }
-            .accessibilityElement(children: .contain)
         }
     }
 }
@@ -319,6 +377,8 @@ private struct PrototypeLabelCard: View {
 private struct CopyLinkButton: View {
     let link: String
     let expiresAt: Date
+    /// Called after the link is copied (the deferred notification prompt hook).
+    var onCopied: () -> Void = {}
     @State private var copied = false
     @State private var resetTask: Task<Void, Never>?
 
@@ -328,6 +388,7 @@ private struct CopyLinkButton: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             UIAccessibility.post(notification: .announcement, argument: "Invite link copied")
             copied = true
+            onCopied()
             resetTask?.cancel()
             resetTask = Task {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -336,14 +397,18 @@ private struct CopyLinkButton: View {
             }
         } label: {
             Label {
+                // No cross-fade on the words: a mid-transition capture showed
+                // "Copy link" twice (2026-11-01 UX review). The symbol still
+                // animates on its own.
                 Text(copied ? "Copied" : "Copy link")
+                    .contentTransition(.identity)
             } icon: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     .contentTransition(.symbolEffect(.replace))
             }
         }
         .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-        .animation(.snappy, value: copied)
+        .transaction { $0.animation = nil }
         .accessibilityLabel(copied ? "Link copied" : "Copy link")
         .accessibilityHint("Copies the invite link to the clipboard, so you can paste it into a message")
         .accessibilityIdentifier("inviteSomeone.copyLinkButton")
@@ -600,8 +665,10 @@ private struct InviteSomeoneCard: View {
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                 .accessibilityIdentifier("inviteSomeone.shareLinkButton")
                 #if os(iOS)
-                CopyLinkButton(link: issued.shareLink, expiresAt: issued.invitation.payload.expiresAt)
-                    .id(issued.invitation.payload.inviteID)
+                CopyLinkButton(link: issued.shareLink, expiresAt: issued.invitation.payload.expiresAt) {
+                    companion.invitePromptReturnPoint()
+                }
+                .id(issued.invitation.payload.inviteID)
                 #endif
                 // The full link stays reachable under this identifier via the
                 // accessibility *value* so UI tests can read it exactly.
@@ -610,6 +677,12 @@ private struct InviteSomeoneCard: View {
                     .foregroundStyle(LockboxTheme.secondary)
                     .accessibilityIdentifier("inviteSomeone.inviteLinkText")
                     .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
+                if companion.notificationPermission == .notDetermined {
+                    Text("Phone Lockbox will ask to notify you when they join.")
+                        .font(.footnote)
+                        .foregroundStyle(LockboxTheme.secondary)
+                        .accessibilityIdentifier("inviteSomeone.notifyFootnote")
+                }
                 Button(isCreating ? "Creating…" : "Make a new link") { create() }
                     .font(.footnote.weight(.semibold))
                     .buttonStyle(.plain)
@@ -1015,7 +1088,7 @@ private struct InboxRow: View {
     /// fallback rather than a raw identifier.
     private var title: String {
         let name = companion.personName(forIdentityID: item.request.owner.identityID) ?? "Someone"
-        return "\(name) is asking for help"
+        return "\(name) asks to end their lock early"
     }
 
     private func respond(_ decision: CompanionKit.ApproverDecision) {

@@ -286,7 +286,7 @@ describe("push recipients per event", () => {
     await submitOperation(bytes(sendRequest(s, uniqueID("request"))));
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0]!.target).toEqual({ token: APPROVER_TOKEN, environment: "sandbox" });
-    expect(fake.sent[0]!.message).toEqual({ title: "Nishant", body: "Asks you to approve ending a lock early.", kind: "request" });
+    expect(fake.sent[0]!.message).toEqual({ title: "Nishant", body: "Asks to end their lock early.", kind: "request" });
   });
 
   it("approve notifies only the owner, titled with the approver's name", async () => {
@@ -299,7 +299,7 @@ describe("push recipients per event", () => {
     await submitOperation(bytes(sendApproval(s, requestID, "approved")));
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0]!.target).toEqual({ token: OWNER_TOKEN, environment: "production" });
-    expect(fake.sent[0]!.message).toEqual({ title: "Sam", body: "Approved your request. Open Phone Lockbox to end your lock.", kind: "answer" });
+    expect(fake.sent[0]!.message).toEqual({ title: "Sam", body: "Approved ending your lock early.", kind: "answer" });
   });
 
   it("decline notifies only the owner", async () => {
@@ -326,15 +326,15 @@ describe("push recipients per event", () => {
     expect(fake.sent[0]!.message).toEqual({ title: "Sam", body: "Joined as your trusted person.", kind: "joined" });
   });
 
-  it("falls back to the title Phone Lockbox when a name is missing or blank", async () => {
+  it("falls back to role-specific titles when a name is missing or blank", async () => {
     const s = await setupPaired({});
     await register(s.owner, OWNER_TOKEN);
     await register(s.approver, APPROVER_TOKEN);
     const requestID = uniqueID("request");
     await submitOperation(bytes(sendRequest(s, requestID)));
-    expect(fake.sent[0]!.message.title).toBe("Phone Lockbox");
+    expect(fake.sent[0]!.message.title).toBe("Someone you help");
     await submitOperation(bytes(sendApproval(s, requestID, "approved")));
-    expect(fake.sent[1]!.message.title).toBe("Phone Lockbox");
+    expect(fake.sent[1]!.message.title).toBe("Your trusted person");
   });
 
   it("other operations (ack, session, revoke-style) send nothing", async () => {
@@ -363,6 +363,71 @@ describe("push recipients per event", () => {
     await register(s.approver, hexToken("b2"), "production");
     await submitOperation(bytes(sendRequest(s, uniqueID("request"))));
     expect(fake.sent.map((x) => x.target.token).sort()).toEqual([hexToken("a1"), hexToken("b2")]);
+  });
+});
+
+describe("answer banners with two approvers", () => {
+  async function setupTwo() {
+    const owner = makeIdentity("owner");
+    const a1 = makeIdentity("trustedApprover");
+    const a2 = makeIdentity("trustedApprover");
+    const now = nowSec();
+    const p1 = await pairV3({ owner, approver: a1, now, ownerDisplayName: "Nishant", approverDisplayName: "Sam", nonceByte: 21 });
+    const p2 = await pairV3({ owner, approver: a2, now, startRevision: p1.nextRevision, legacyRevisionPad: 0, ownerDisplayName: "Nishant", approverDisplayName: "Ari", nonceByte: 22 });
+    const sessionID = uniqueID("session");
+    const activeSetID = uniqueID("activeset");
+    const sessionPayload = { owner: encodeDeviceIdentityWire(owner.identity), sessionID, activeSetID, startsAt: swiftDate(now - 60), endsAt: swiftDate(now + 100_000) };
+    await submitOperation(bytes(buildOperation({ kind: "session", payload: sessionPayload, signer: owner, expectedRevision: p2.nextRevision })));
+    const base = { owner, now, sessionID, activeSetID };
+    const s1: Scenario = { ...base, approver: a1, pairingID: p1.pairingID };
+    const s2: Scenario = { ...base, approver: a2, pairingID: p2.pairingID };
+    const requestID = uniqueID("request");
+    const payload = {
+      ...requestPayload(s1, requestID),
+      targetedApproverIDs: [a1.identity.identityID, a2.identity.identityID],
+      targetBindings: [
+        { approverIdentityID: a1.identity.identityID, pairingID: p1.pairingID, pairEpoch: 1, consentGeneration: 2 },
+        { approverIdentityID: a2.identity.identityID, pairingID: p2.pairingID, pairEpoch: 1, consentGeneration: 2 }
+      ],
+      decisions: { [a1.identity.identityID]: "pending", [a2.identity.identityID]: "pending" }
+    };
+    await register(owner, OWNER_TOKEN);
+    await submitOperation(bytes(buildOperation({ kind: "request", payload, signer: owner, expectedRevision: null })));
+    fake.sent.length = 0;
+    return { s1, s2, requestID };
+  }
+  const answer = (s: Scenario, requestID: string, decision: "approved" | "declined", nonceByte: number) =>
+    submitOperation(bytes(buildOperation({ kind: "approval", payload: approvalPayload(s, requestID, decision, nonceByte), signer: s.approver, expectedRevision: null })));
+  const bodies = () => fake.sent.map((x) => x.message.body);
+
+  it("decline then approve: first says others can still answer, second says approved", async () => {
+    const { s1, s2, requestID } = await setupTwo();
+    await answer(s1, requestID, "declined", 31);
+    await answer(s2, requestID, "approved", 32);
+    expect(bodies()).toEqual(["Declined. Others you asked can still answer.", "Approved ending your lock early."]);
+  });
+
+  // The reducer only accepts answers while a request is pending, so a late
+  // answer after approval is rejected (wrong_target) and must push nothing.
+  it("approve then decline: the late decline is rejected and sends nothing", async () => {
+    const { s1, s2, requestID } = await setupTwo();
+    await answer(s1, requestID, "approved", 31);
+    await expect(answer(s2, requestID, "declined", 32)).rejects.toMatchObject({ code: "wrong_target" });
+    expect(bodies()).toEqual(["Approved ending your lock early."]);
+  });
+
+  it("decline then decline: only the last says the request was declined", async () => {
+    const { s1, s2, requestID } = await setupTwo();
+    await answer(s1, requestID, "declined", 31);
+    await answer(s2, requestID, "declined", 32);
+    expect(bodies()).toEqual(["Declined. Others you asked can still answer.", "Declined your request."]);
+  });
+
+  it("approve then approve: the late approval is rejected and sends nothing", async () => {
+    const { s1, s2, requestID } = await setupTwo();
+    await answer(s1, requestID, "approved", 31);
+    await expect(answer(s2, requestID, "approved", 32)).rejects.toMatchObject({ code: "wrong_target" });
+    expect(bodies()).toEqual(["Approved ending your lock early."]);
   });
 });
 

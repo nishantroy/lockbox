@@ -91,6 +91,7 @@ struct ContentView: View {
             // source of truth, so a push only triggers a refresh. Tapping the
             // banner also opens People. Anything that arrived before this
             // handler existed (a cold-launch tap) is delivered on attach.
+            PushWakeBridge.shared.peopleTabIsSelected = { selectedTab == 1 }
             PushWakeBridge.shared.wakeHandler = { _, opened in
                 if opened { selectedTab = 1 }
                 Task { await companion.handlePushWake() }
@@ -113,6 +114,8 @@ struct ContentView: View {
                 // release on every foreground, not only from the People tab.
                 Task { await companion.replayPendingFriendRelease(coordinator: coordinator) }
                 Task { await companion.pushForegroundTick() }
+                // Back from sharing the invite link: now is the moment to ask.
+                companion.invitePromptReturnPoint()
             }
         }
     }
