@@ -80,17 +80,32 @@ enum PushPromptPolicy {
 enum NotificationCard {
     static let snoozeInterval: TimeInterval = 7 * 24 * 3_600
     static let snoozeDefaultsKey = "com.phone-lockbox.companion.notificationCardSnoozedUntil.v1"
-    static let body = "Otherwise you'll only see requests when you open People."
 
-    static func isVisible(permission: NotificationPermission, helpingCount: Int, snoozedUntil: Date?, now: Date) -> Bool {
-        guard PushPromptPolicy.shouldPromptOnPeopleAppear(permission: permission, helpingCount: helpingCount) else { return false }
+    /// Shown while undecided to anyone who helps someone (receives requests)
+    /// or has at least one trusted person (receives answers).
+    static func isVisible(permission: NotificationPermission, helpingCount: Int, trustedCount: Int = 0,
+                          snoozedUntil: Date?, now: Date) -> Bool {
+        guard permission == .notDetermined, helpingCount > 0 || trustedCount > 0 else { return false }
         // A stamp further out than one snooze (clock moved back) is ignored.
         if let snoozedUntil, snoozedUntil > now, snoozedUntil.timeIntervalSince(now) <= snoozeInterval { return false }
         return true
     }
 
-    static func title(helpingNames: [String]) -> String {
-        helpingNames.count == 1 ? "Get notified when \(helpingNames[0]) asks" : "Get notified when someone asks"
+    static func title(helpingNames: [String], trustedNames: [String] = []) -> String {
+        switch (!helpingNames.isEmpty, !trustedNames.isEmpty) {
+        case (true, false) where helpingNames.count == 1: return "Get notified when \(helpingNames[0]) asks"
+        case (false, true) where trustedNames.count == 1: return "Get notified when \(trustedNames[0]) answers"
+        case (false, false): return "Get notified when someone asks"
+        default: return "Get notified about requests and answers"
+        }
+    }
+
+    static func body(helpingNames: [String], trustedNames: [String] = []) -> String {
+        switch (!helpingNames.isEmpty, !trustedNames.isEmpty) {
+        case (true, true): return "Otherwise you'll only see updates when you open People."
+        case (false, true): return "Otherwise you'll only see answers when you open People."
+        default: return "Otherwise you'll only see requests when you open People."
+        }
     }
 
     static func snoozedUntil(in defaults: UserDefaults) -> Date? {
@@ -112,6 +127,17 @@ enum InvitePromptTrigger {
     /// Fires on the next return to the app, or on Copy link, whichever is
     /// first, only while a link was just created and is still live.
     static func shouldFire(pending: Bool, linkIsLive: Bool) -> Bool { pending && linkIsLive }
+
+    /// A share sheet never changes scene phase, so a pending flag older than
+    /// this is dropped silently instead of prompting hours later.
+    static let pendingLifetime: TimeInterval = 10 * 60
+
+    static func shouldFire(pendingSince: Date?, linkIsLive: Bool, now: Date) -> Bool {
+        guard let pendingSince else { return false }
+        let age = now.timeIntervalSince(pendingSince)
+        // A stamp from the future (clock moved back) counts as expired.
+        return age >= 0 && age <= pendingLifetime && linkIsLive
+    }
 }
 
 /// Foreground push presentation: People already shows the request, so no
