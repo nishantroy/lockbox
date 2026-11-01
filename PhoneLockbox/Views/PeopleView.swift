@@ -135,7 +135,8 @@ struct PeopleView: View {
                 ForEach(Array(companion.acceptedNotices.enumerated()), id: \.element.id) { index, notice in
                     DismissibleNoticeCard(title: "You're now a trusted person for \(notice.ownerName)",
                                           detail: AcceptedNoticeCopy.detail(ownerName: notice.ownerName,
-                                                                     notificationsAllowed: companion.notificationPermission == .allowed),
+                                                                     notificationsAllowed: companion.notificationPermission == .allowed,
+                                                                     notificationCardVisible: companion.showsNotificationCard),
                                           titleIdentifier: "acceptedNotice.text",
                                           dismissIdentifier: "acceptedNotice.dismissButton") {
                         companion.dismissAcceptedNotice(id: notice.id)
@@ -263,6 +264,9 @@ private struct NotificationsOffRowView: View {
     let message: String
     @Environment(\.openURL) private var openURL
 
+    /// Bell glyph width plus the Label's icon/title spacing.
+    @ScaledMetric(relativeTo: .footnote) private var iconInset: CGFloat = 26
+
     private var text: some View {
         Label(message, systemImage: "bell.slash")
             .font(.footnote)
@@ -295,6 +299,8 @@ private struct NotificationsOffRowView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     text
                     turnOnButton
+                        // Align with the text, which starts after the bell icon.
+                        .padding(.leading, iconInset)
                 }
             }
             .accessibilityElement(children: .contain)
@@ -322,17 +328,16 @@ private struct NotificationInviteCard: View {
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Turn on notifications") {
-                    Task { await companion.notificationMomentReached() }
+                AdaptiveButtonRow {
+                    Button("Turn on notifications") {
+                        Task { await companion.notificationMomentReached() }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+                    .accessibilityIdentifier("people.notificationCard.turnOnButton")
+                    Button("Not now") { companion.snoozeNotificationCard() }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                        .accessibilityIdentifier("people.notificationCard.notNowButton")
                 }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                .accessibilityIdentifier("people.notificationCard.turnOnButton")
-                Button("Not now") { companion.snoozeNotificationCard() }
-                    .font(.footnote.weight(.semibold))
-                    .buttonStyle(.plain)
-                    .foregroundStyle(LockboxTheme.accent)
-                    .frame(minHeight: 44)
-                    .accessibilityIdentifier("people.notificationCard.notNowButton")
             }
         }
     }

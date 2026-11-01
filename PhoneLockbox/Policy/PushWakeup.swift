@@ -152,8 +152,13 @@ enum PushForegroundPresentation {
 
 /// Detail line of the friend's "You're now a trusted person" notice.
 enum AcceptedNoticeCopy {
-    static func detail(ownerName: String, notificationsAllowed: Bool) -> String {
-        notificationsAllowed
+    /// While the "Get notified" card is on screen it already says where requests
+    /// appear, so the notice drops that sentence.
+    static func detail(ownerName: String, notificationsAllowed: Bool, notificationCardVisible: Bool = false) -> String {
+        if notificationCardVisible && !notificationsAllowed {
+            return "\(ownerName) can ask you to approve ending a lock early."
+        }
+        return notificationsAllowed
             ? "\(ownerName) can ask you to approve ending a lock early. We'll let you know when \(ownerName) asks."
             : "\(ownerName) can ask you to approve ending a lock early. You'll see requests here."
     }
