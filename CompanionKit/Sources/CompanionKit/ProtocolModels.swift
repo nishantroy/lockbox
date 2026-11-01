@@ -1265,6 +1265,37 @@ public struct InboxQuery: Codable, Sendable {
         self.issuedAt = issuedAt
     }
 }
+public enum PushEnvironment: String, Codable, Sendable {
+    case sandbox, production
+}
+/// Body of a `push_token` operation (`POST /v1/push-token`). Encoded exactly
+/// like `InboxQuery`: `JSONEncoder` `.sortedKeys`, default `Date` encoding.
+/// `token` is lowercase hex (64-200 chars); nil unregisters this identity's
+/// tokens on `environment`. The key is omitted from the JSON when nil.
+public struct PushTokenRegistration: Codable, Sendable, Equatable {
+    public static let operationKind = "push_token"
+    public let identityID: String
+    public let issuedAt: Date
+    public let token: String?
+    public let environment: PushEnvironment
+
+    public init(identityID: String, issuedAt: Date, token: String?, environment: PushEnvironment) {
+        self.identityID = identityID; self.issuedAt = issuedAt
+        self.token = token; self.environment = environment
+    }
+
+    public static func validate(token: String) throws {
+        guard (64...200).contains(token.utf8.count),
+              token.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }) else {
+            throw CompanionError.malformed("invalid push token")
+        }
+    }
+
+    /// Lowercase hex of the raw APNs device token bytes.
+    public static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+}
 public struct RequestReference: Codable, Sendable {
     public let requestID: String
     public init(requestID: String) { self.requestID = requestID }

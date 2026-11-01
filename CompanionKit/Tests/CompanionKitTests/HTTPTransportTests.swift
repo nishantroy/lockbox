@@ -1155,3 +1155,54 @@ final class HTTPTransportTests: XCTestCase {
         XCTAssertNil(try loadCheckpoint(store, ownerIdentityID: "owner-1"))
     }
 }
+
+
+final class PushTokenRegistrationTests: XCTestCase {
+    func testEncodingUsesSortedKeysAndOmitsNilToken() throws {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let date = Date(timeIntervalSinceReferenceDate: 750_000_000)
+        let withToken = PushTokenRegistration(identityID: "abc", issuedAt: date, token: "ab12", environment: .sandbox)
+        XCTAssertEqual(String(data: try encoder.encode(withToken), encoding: .utf8),
+                       "{\"environment\":\"sandbox\",\"identityID\":\"abc\",\"issuedAt\":750000000,\"token\":\"ab12\"}")
+        let cleared = PushTokenRegistration(identityID: "abc", issuedAt: date, token: nil, environment: .production)
+        XCTAssertEqual(String(data: try encoder.encode(cleared), encoding: .utf8),
+                       "{\"environment\":\"production\",\"identityID\":\"abc\",\"issuedAt\":750000000}")
+    }
+
+    func testHexFormattingAndValidation() throws {
+        XCTAssertEqual(PushTokenRegistration.hex(Data([0x00, 0xAB, 0x0F, 0xFF])), "00ab0fff")
+        let good = PushTokenRegistration.hex(Data(repeating: 0xA5, count: 32))
+        XCTAssertNoThrow(try PushTokenRegistration.validate(token: good))
+        XCTAssertThrowsError(try PushTokenRegistration.validate(token: "abcd"))
+        XCTAssertThrowsError(try PushTokenRegistration.validate(token: String(repeating: "A", count: 64)))
+    }
+
+    func testRegisterPushTokenPostsSignedOperationThatVerifies() async throws {
+        let signer = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let transport = HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession())
+        let now = fixedTime
+        let client = AsyncCompanionClient(signer: signer, transport: transport, now: { now })
+        let token = PushTokenRegistration.hex(Data(repeating: 0x3C, count: 32))
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/push-token")
+            XCTAssertEqual(request.httpMethod, "POST")
+            let signed = try! JSONDecoder().decode(SignedOperation.self, from: bodyData(from: request))
+            XCTAssertEqual(signed.kind, "push_token")
+            XCTAssertNil(signed.expectedRevision)
+            try! signed.validateSignature()
+            let body = try! JSONDecoder().decode(PushTokenRegistration.self, from: signed.body)
+            XCTAssertEqual(body.identityID, signer.identity.identityID)
+            XCTAssertEqual(body.issuedAt, now)
+            XCTAssertEqual(body.token, token)
+            XCTAssertEqual(body.environment, .sandbox)
+            return .init(status: 200, body: Data("{\"ok\":true}".utf8))
+        }
+        try await client.registerPushToken(token: token, environment: .sandbox)
+    }
+
+    func testRegisterPushTokenRejectsMalformedTokenLocally() async throws {
+        let signer = try DeviceSigner.create(role: .owner, keyStore: InMemoryDeviceKeyStore())
+        let client = AsyncCompanionClient(signer: signer, transport: HTTPCompanionTransport(baseURL: testBaseURL, session: StubURLProtocol.makeSession()))
+        do { try await client.registerPushToken(token: "nothex", environment: .production); XCTFail("expected throw") } catch {}
+    }
+}

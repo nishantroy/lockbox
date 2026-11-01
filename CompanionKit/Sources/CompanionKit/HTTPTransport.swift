@@ -30,9 +30,18 @@ public protocol AsyncCompanionTransport: Sendable {
     /// token) to the owner-signed invitation while it is unexpired and unused. The caller must verify the result
     /// (`Invitation.validate(at:matchingToken:)`), never trust the relay.
     func lookupInvite(lookupKey: String) async throws -> Invitation
+
+    /// `POST /v1/push-token`: registers (or, with a nil token, clears) the
+    /// APNs device token for the signing identity. A wake-up hint only; it
+    /// never carries or authorizes state.
+    func registerPushToken(_ operation: SignedOperation) async throws
 }
 
 public extension AsyncCompanionTransport {
+    func registerPushToken(_ operation: SignedOperation) async throws {
+        throw CompanionError.notFound
+    }
+
     func consent(relationshipID: String) async throws -> RelationshipConsent {
         throw CompanionError.notFound
     }
@@ -336,6 +345,12 @@ public struct HTTPCompanionTransport: AsyncCompanionTransport {
         struct LookupResponse: Decodable { let invitation: Invitation }
         let response: LookupResponse = try await post(path: "v1/invite/lookup", body: LookupBody(lookupKey: lookupKey))
         return response.invitation
+    }
+
+    public func registerPushToken(_ operation: SignedOperation) async throws {
+        struct Ack: Decodable { let ok: Bool }
+        let ack: Ack = try await post(path: "v1/push-token", body: operation)
+        guard ack.ok else { throw CompanionTransportError.malformedResponse }
     }
 
     /// `GET /v1/health` → `{"ok":true}`. Not part of `AsyncCompanionTransport`
@@ -704,6 +719,28 @@ public struct AsyncCompanionClient: Sendable {
 
     public func fetchInbox() async throws -> [TrustedRequest] {
         try await fetchInboxResponse().requests
+    }
+
+    /// Registers this identity's APNs device token (lowercase hex), or clears
+    /// it when `token` is nil. Signed like the inbox fetch: kind `push_token`,
+    /// no expected revision, `PushTokenRegistration` body.
+    public func registerPushToken(token: String?, environment: PushEnvironment) async throws {
+        if let token { try PushTokenRegistration.validate(token: token) }
+        let registration = PushTokenRegistration(identityID: signer.identity.identityID, issuedAt: now(),
+                                                 token: token, environment: environment)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let body = try encoder.encode(registration)
+        let kind = PushTokenRegistration.operationKind
+        let operationID = operationIdentifier(kind: kind, signer: signer.identity, body: body)
+        let unsigned = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                           kind: kind, signer: signer.identity, body: body,
+                                           signature: Data(repeating: 0, count: 64))
+        let signature = try signer.sign(domain: "\(CompanionCanonical.version).operation",
+                                        fields: unsigned.signingFields())
+        let operation = try SignedOperation(operationID: operationID, expectedRevision: nil,
+                                            kind: kind, signer: signer.identity, body: body,
+                                            signature: signature)
+        try await transport.registerPushToken(operation)
     }
 
     /// Classifies a failure from `useApproval` (R5 Slice B2a review fix,
