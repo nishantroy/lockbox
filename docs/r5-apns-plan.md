@@ -1,6 +1,6 @@
 # R5 slice P4 — APNs wake-up notifications (plan, 2026-11-01)
 
-Status: **built and reviewed; review follow-up in progress.** Owner decision: build APNs now. APNs Key ID `ABC123DEFG` (Sandbox & Production, team-scoped). Team `ABCDE12345`, topic `com.phone-lockbox.app`. The owner adds the `.p8` to Vercel themselves; it never enters chat or the repo.
+Status: **built, reviewed, UX-checked and pushed (2026-11-01); relay deploy and device QA pending.** Owner decision: build APNs now. APNs Key ID `ABC123DEFG` (Sandbox & Production, team-scoped). Team `ABCDE12345`, topic `com.phone-lockbox.app`. The owner adds the `.p8` to Vercel themselves; it never enters chat or the repo.
 
 ## Goal
 
@@ -164,3 +164,5 @@ All builders were Sonnet (`claude-sonnet-5-5`); all reviewers were Opus (`claude
   P3-3 (unreachable defensive guard) kept. Merge 492a8aa, plus the parent's title fix 261e0ed.
 - **Second pre-push run** (e239e80): unit 138/0. UI: 4 of 5; `testNotificationsOffRow…` failed once with `notFound` from the scripted friend's invite lookup, then passed when run alone. The follow-up added a lookup retry helper with step-labelled failures and waits for the link value. The root cause was not confirmed.
 - **Final pre-push suites** (261e0ed): unit **138 tests, 0 failures, 1 skipped**; UI **5/5** (new denied-row screenshot `09-notifications-off-row`). Host checks: CompanionKit 165/0, root 197/0, relay 231/231.
+- **UX re-check** (Opus, 261e0ed): every original finding resolved, no regressions. New P3s fixed in merge 56e46f8: "Get notified" card buttons side by side; denied-row "Turn On" aligned with its text; accepted-notice sentence dropped while the card is visible. The parent checked shots 05a and 09 after the fix.
+- **Final pre-push suites** (56e46f8): unit **138 tests, 0 failures, 1 skipped**; UI **5/5**; root 197/0. Pushed to GitHub. **Relay not yet deployed:** the owner must add the APNs env vars, apply migration 006 and deploy, because the safety check blocked the parent from doing so.
