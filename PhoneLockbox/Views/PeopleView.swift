@@ -153,6 +153,10 @@ struct PeopleView: View {
                 if !companion.trustedPeople.isEmpty || !companion.helpingPeople.isEmpty {
                     PeopleListCard(companion: companion)
                 }
+                if NotificationsOffRow.isVisible(permission: companion.notificationPermission,
+                                                 pairingCount: companion.trustedPeople.count + companion.helpingPeople.count) {
+                    NotificationsOffRowView()
+                }
                 if companion.hasUnverifiedOwnerPeople {
                     LockboxCard {
                         Label("Some people were added with an earlier version and can't be checked. Send them a new invite to add them again.",
@@ -244,6 +248,36 @@ struct PeopleView: View {
 #endif
     }
 }
+
+#if canImport(CompanionKit)
+/// One quiet row shown only when notifications are denied and the person has
+/// at least one pairing. Without notifications they still see everything by
+/// opening People; this just explains why nothing taps them on the shoulder.
+private struct NotificationsOffRowView: View {
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        LockboxCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(NotificationsOffRow.message, systemImage: "bell.slash")
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("people.notificationsOff.text")
+                #if os(iOS)
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+                .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                .accessibilityLabel("Open Settings to turn notifications on")
+                .accessibilityIdentifier("people.notificationsOff.openSettingsButton")
+                #endif
+            }
+            .accessibilityElement(children: .contain)
+        }
+    }
+}
+#endif
 
 private struct PrototypeLabelCard: View {
     var body: some View {

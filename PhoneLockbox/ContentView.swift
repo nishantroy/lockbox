@@ -86,6 +86,17 @@ struct ContentView: View {
             }
             coordinator.refreshAuthorization()
             coordinator.processPendingQuickActionRoute()
+            #if os(iOS)
+            // Wake-up pushes (R5 slice P4): the signed inbox is always the
+            // source of truth, so a push only triggers a refresh. Tapping the
+            // banner also opens People. Anything that arrived before this
+            // handler existed (a cold-launch tap) is delivered on attach.
+            PushWakeBridge.shared.wakeHandler = { _, opened in
+                if opened { selectedTab = 1 }
+                Task { await companion.handlePushWake() }
+            }
+            #endif
+            await companion.pushForegroundTick()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -101,6 +112,7 @@ struct ContentView: View {
                 // R5 Slice B2c review, P2-4: finish an interrupted friend
                 // release on every foreground, not only from the People tab.
                 Task { await companion.replayPendingFriendRelease(coordinator: coordinator) }
+                Task { await companion.pushForegroundTick() }
             }
         }
     }

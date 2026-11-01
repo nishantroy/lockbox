@@ -262,6 +262,14 @@ final class CompanionCoordinator: ObservableObject {
         didSet { sharedDefaults?.set(friendApprovalCanEndLocksEnabled, forKey: Self.friendApprovalGateDefaultsKey) }
     }
 
+    /// System notification permission as last read (R5 slice P4). Drives the
+    /// quiet "Notifications are off" row in People.
+    @Published private(set) var notificationPermission: NotificationPermission = .notDetermined
+    /// False in tests (an injected key store) and in the UI-test reset mode,
+    /// so no system prompt or remote registration is ever attempted there.
+    private let systemPushEnabled: Bool
+    private var push: PushRegistrar?
+
     private let keyStore: any DeviceKeyStore
     /// `nil` when the App Group suite could not be opened. When `nil`, no
     /// identity or Keychain key is ever created, no pairing data is ever
@@ -299,6 +307,11 @@ final class CompanionCoordinator: ObservableObject {
         sharedDefaults: UserDefaults? = nil,
         inviteStore: (any IssuedInviteStore)? = nil,
         makeSession: @escaping @Sendable () -> URLSession = { URLSession(configuration: .ephemeral) }) {
+        var pushEnabled = keyStore == nil
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-resetCompanionStateForUITests") { pushEnabled = false }
+        #endif
+        self.systemPushEnabled = pushEnabled
         // An injected key store means a test: never touch the real Keychain then.
         self.inviteStore = inviteStore ?? (keyStore == nil ? KeychainIssuedInviteStore() : InMemoryIssuedInviteStore())
         self.keyStore = keyStore ?? KeychainDeviceKeyStore(service: Self.keychainService)
@@ -375,8 +388,69 @@ final class CompanionCoordinator: ObservableObject {
             restorePendingInvite()
             recomputeJoinedNotices()
                         loadUseIDsByRequestID()
+            configurePushRegistration(defaults: resolvedDefaults!)
         }
     }
+
+    // MARK: - Push wake-ups (R5 slice P4)
+
+    private func configurePushRegistration(defaults: UserDefaults) {
+        push = PushRegistrar(
+            ledger: PushRegistrationLedger(defaults: defaults),
+            environment: PushEnvironmentName.forThisBuild,
+            identityIDs: { [weak self] in
+                [self?.ownerIdentity, self?.approverIdentity].compactMap { $0?.identityID }
+            },
+            send: { [weak self] identityID, token, environment in
+                try await self?.sendPushToken(identityID: identityID, token: token, environment: environment)
+            })
+        #if os(iOS)
+        if systemPushEnabled {
+            PushWakeBridge.shared.deviceTokenHandler = { [weak self] data in
+                guard let self else { return }
+                self.push?.updateDeviceToken(data)
+                Task { await self.push?.sync() }
+            }
+        }
+        #endif
+    }
+
+    /// Signs and sends the token for one local identity. Throws are swallowed
+    /// by the registrar (retried on the next launch or foreground).
+    private func sendPushToken(identityID: String, token: String, environment: String) async throws {
+        guard let identity = [ownerIdentity, approverIdentity].compactMap({ $0 }).first(where: { $0.identityID == identityID }),
+              let env = PushEnvironment(rawValue: environment) else { return }
+        let client = makeClient(signer: try signer(for: identity))
+        try await client.registerPushToken(token: token, environment: env)
+    }
+
+    /// Launch and every foreground: re-read permission, ask the system for a
+    /// token when notifications are already allowed (it never prompts), and
+    /// retry any registration that has not succeeded or is a week old.
+    func pushForegroundTick() async {
+        #if os(iOS)
+        guard systemPushEnabled else { return }
+        notificationPermission = await PushPermissionSystem.current()
+        if notificationPermission == .allowed { PushPermissionSystem.registerForRemoteNotifications() }
+        await push?.sync()
+        #endif
+    }
+
+    /// Called right after something that makes a notification worth having
+    /// (an invite link was made, an invite was accepted, Ask now was sent).
+    /// Asks for permission only if it is still undecided, then registers.
+    func notificationMomentReached() async {
+        #if os(iOS)
+        guard systemPushEnabled else { return }
+        notificationPermission = await PushPermissionSystem.requestIfUndecided()
+        if notificationPermission == .allowed { PushPermissionSystem.registerForRemoteNotifications() }
+        // A newly created identity registers with the token we already hold.
+        await push?.sync()
+        #endif
+    }
+
+    /// A wake-up arrived or was tapped: the signed inbox stays authoritative.
+    func handlePushWake() async { await refreshInbox() }
 
     // MARK: - Identity and persistence
 
@@ -895,6 +969,7 @@ final class CompanionCoordinator: ObservableObject {
             }
             pendingInvite = issued
             lastError = nil; needsRepair = false
+            Task { await notificationMomentReached() }
         } catch { fail(error) }
     }
 
@@ -1083,6 +1158,7 @@ final class CompanionCoordinator: ObservableObject {
             setDisplayName(displayName)
             incomingInvite = .none
             lastError = nil; needsRepair = false
+            Task { await notificationMomentReached() }
             return true
         } catch {
             if Self.keepsInviteOpen(after: error) {
@@ -1359,6 +1435,7 @@ final class CompanionCoordinator: ObservableObject {
                                                       targets: targets.map { $0.pairing.approver.identityID },
                                                       validFor: validFor)
             lastError = nil; needsRepair = false
+            Task { await notificationMomentReached() }
             await refreshInbox()
         } catch { fail(error) }
     }
