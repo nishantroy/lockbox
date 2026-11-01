@@ -237,6 +237,7 @@ struct PeopleView: View {
         // scene leaves `.active`, and restarts with an immediate refresh.
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            await companion.peopleTabAppeared()
             await companion.runAutoRefreshLoop(coordinator: coordinator)
         }
         .refreshable {

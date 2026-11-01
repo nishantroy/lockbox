@@ -100,12 +100,13 @@ const APNS_HOSTS: Record<PushEnvironment, string> = {
 export class ApnsSender implements PushSender {
   private sessions = new Map<PushEnvironment, ClientHttp2Session>();
 
-  constructor(private readonly config: ApnsConfig) {}
+  /** `hosts` overrides the APNs origins (tests point it at a local HTTP/2 server). */
+  constructor(private readonly config: ApnsConfig, private readonly hosts: Record<PushEnvironment, string> = APNS_HOSTS) {}
 
   private session(environment: PushEnvironment): ClientHttp2Session {
     const existing = this.sessions.get(environment);
     if (existing && !existing.closed && !existing.destroyed) return existing;
-    const created = connect(APNS_HOSTS[environment]);
+    const created = connect(this.hosts[environment]);
     created.on("error", () => undefined); // surfaced per-request as a failed send
     this.sessions.set(environment, created);
     return created;
@@ -137,7 +138,10 @@ export class ApnsSender implements PushSender {
         });
         request.on("data", (chunk: Buffer) => chunks.push(chunk));
         request.on("error", () => finish("failed"));
+        // A stream closed without `end`/`error` must not wait for the 3 s budget.
+        request.on("close", () => finish(status === 200 ? "sent" : "failed"));
         request.on("end", () => {
+          if (status === 403) cachedJWT = null; // Expired/InvalidProviderToken: re-sign on the next dispatch.
           if (status === 200) return finish("sent");
           if (status === 410) return finish("invalid_token");
           if (status === 400) {

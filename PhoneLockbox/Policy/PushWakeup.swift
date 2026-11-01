@@ -48,6 +48,14 @@ enum NotificationsOffRow {
     }
 }
 
+enum PushPromptPolicy {
+    /// An approver who paired before push existed never hit another prompt
+    /// moment; ask when People appears, only while still undecided.
+    static func shouldPromptOnPeopleAppear(permission: NotificationPermission, helpingCount: Int) -> Bool {
+        permission == .notDetermined && helpingCount > 0
+    }
+}
+
 /// Remembers what was last registered, per identity, so the relay is only
 /// contacted when `(identityID, token, environment)` changes or after seven
 /// days. Only a SHA-256 fingerprint is stored, never the token itself.

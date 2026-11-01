@@ -28,6 +28,13 @@ final class PushWakeupTests: XCTestCase {
         XCTAssertEqual(PushRegistrar.hex(Data([0x00, 0xAB, 0x0F, 0xFF])), "00ab0fff")
     }
 
+    func testPeopleAppearPromptPolicy() {
+        XCTAssertTrue(PushPromptPolicy.shouldPromptOnPeopleAppear(permission: .notDetermined, helpingCount: 1))
+        XCTAssertFalse(PushPromptPolicy.shouldPromptOnPeopleAppear(permission: .notDetermined, helpingCount: 0))
+        XCTAssertFalse(PushPromptPolicy.shouldPromptOnPeopleAppear(permission: .denied, helpingCount: 2))
+        XCTAssertFalse(PushPromptPolicy.shouldPromptOnPeopleAppear(permission: .allowed, helpingCount: 2))
+    }
+
     func testEnvironmentSelection() {
         XCTAssertEqual(PushEnvironmentName.current(isDebug: true), "sandbox")
         XCTAssertEqual(PushEnvironmentName.current(isDebug: false), "production")

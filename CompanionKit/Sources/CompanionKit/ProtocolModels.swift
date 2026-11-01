@@ -1290,11 +1290,6 @@ public struct PushTokenRegistration: Codable, Sendable, Equatable {
             throw CompanionError.malformed("invalid push token")
         }
     }
-
-    /// Lowercase hex of the raw APNs device token bytes.
-    public static func hex(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
-    }
 }
 public struct RequestReference: Codable, Sendable {
     public let requestID: String

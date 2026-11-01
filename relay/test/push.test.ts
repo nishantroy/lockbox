@@ -20,12 +20,15 @@ import {
   cachedApnsJWT,
   resetApnsJWTCacheForTesting,
   apnsConfigFromEnv,
+  ApnsSender,
   buildPushPayload,
   type PushSender,
   type PushMessage,
   type PushResult,
   type PushTarget
 } from "../src/apns.js";
+import { createServer as createH2Server, type Http2Server } from "node:http2";
+import type { AddressInfo } from "node:net";
 import { purgeExpiredRecords } from "../src/retention.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -108,6 +111,14 @@ describe("POST push-token registration", () => {
     }
     const stored = await rows(owner.identity.identityID);
     expect(stored.map((r) => r.token)).toEqual(seeds.slice(2).map(hexToken));
+  });
+
+  it("holds the cap under concurrent registrations of different tokens", async () => {
+    const owner = makeIdentity("owner");
+    const t = nowSec();
+    const seeds = Array.from({ length: 16 }, (_, i) => i.toString(16).padStart(2, "0") + "ff");
+    await Promise.all(seeds.map((seed) => registerPushToken(bytes(pushTokenOp(owner, { token: hexToken(seed), issuedAt: t })), t)));
+    expect(await rows(owner.identity.identityID)).toHaveLength(5);
   });
 
   it("the cap is per identity", async () => {
@@ -496,5 +507,64 @@ describe("push token retention", () => {
     const summary = await purgeExpiredRecords(testPool(), 30, t);
     expect(summary.purgedPushTokens).toBe(1);
     expect((await rows(owner.identity.identityID)).map((r) => r.token)).toEqual([hexToken("b2")]);
+  });
+});
+
+describe("ApnsSender against a local HTTP/2 server", () => {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const config = { keyP8: privateKey.export({ type: "pkcs8", format: "pem" }).toString(), keyID: "K1", teamID: "T1", topic: "com.phone-lockbox.app" };
+  const target: PushTarget = { token: hexToken("ab"), environment: "sandbox" };
+  const message: PushMessage = { title: "T", body: "B", kind: "request" };
+  let server: Http2Server;
+  let handler: (req: import("node:http2").Http2ServerRequest, res: import("node:http2").Http2ServerResponse) => void;
+  let sender: ApnsSender;
+  const auths: string[] = [];
+
+  beforeEach(async () => {
+    resetApnsJWTCacheForTesting();
+    auths.length = 0;
+    handler = (_req, res) => res.writeHead(200).end();
+    server = createH2Server((req, res) => {
+      auths.push(String(req.headers.authorization));
+      handler(req, res);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    sender = new ApnsSender(config, { sandbox: origin, production: origin });
+  });
+
+  afterEach(async () => {
+    sender.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    resetApnsJWTCacheForTesting();
+  });
+
+  it("maps 200 to sent", async () => {
+    expect(await sender.send(target, message)).toBe("sent");
+  });
+
+  it("a 403 resets the cached JWT so the next dispatch re-signs", async () => {
+    handler = (_req, res) => res.writeHead(403).end(JSON.stringify({ reason: "ExpiredProviderToken" }));
+    expect(await sender.send(target, message)).toBe("failed");
+    handler = (_req, res) => res.writeHead(200).end();
+    expect(await sender.send(target, message)).toBe("sent");
+    expect(auths).toHaveLength(2);
+    expect(auths[1]).not.toBe(auths[0]);
+  });
+
+  it("reuses the cached JWT after a 200", async () => {
+    await sender.send(target, message);
+    await sender.send(target, message);
+    expect(auths[1]).toBe(auths[0]);
+  });
+
+  it("settles on stream close without waiting for end", async () => {
+    handler = (_req, res) => {
+      res.writeHead(500);
+      res.stream.close(); // RST_STREAM before any DATA/END_STREAM
+    };
+    const started = Date.now();
+    expect(await sender.send(target, message)).toBe("failed");
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
