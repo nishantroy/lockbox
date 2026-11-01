@@ -270,7 +270,7 @@ final class CompanionCoordinator: ObservableObject {
     @Published private(set) var notificationCardSnoozedUntil: Date?
     /// Set when an invite link is created; the system prompt waits for the
     /// person to come back from sharing (or tap Copy link), once.
-    private var invitePromptPending = false
+    private var invitePromptPendingSince: Date?
     /// DEBUG-only (`-forceNotificationPermissionDenied`): UI tests see the
     /// denied row without touching real system settings.
     private var forcedPermission: NotificationPermission?
@@ -475,10 +475,12 @@ final class CompanionCoordinator: ObservableObject {
     /// prompt deferred by Create invite link once, only while that link is
     /// still live.
     func invitePromptReturnPoint() {
-        guard invitePromptPending else { return }
-        let live = pendingInvite.map { Date() < $0.invitation.payload.expiresAt } ?? false
-        invitePromptPending = false
-        if InvitePromptTrigger.shouldFire(pending: true, linkIsLive: live) {
+        guard invitePromptPendingSince != nil else { return }
+        let now = Date()
+        let live = pendingInvite.map { now < $0.invitation.payload.expiresAt } ?? false
+        let since = invitePromptPendingSince
+        invitePromptPendingSince = nil
+        if InvitePromptTrigger.shouldFire(pendingSince: since, linkIsLive: live, now: now) {
             Task { await notificationMomentReached() }
         }
     }
@@ -499,6 +501,7 @@ final class CompanionCoordinator: ObservableObject {
 
     var showsNotificationCard: Bool {
         NotificationCard.isVisible(permission: notificationPermission, helpingCount: helpingPeople.count,
+                                   trustedCount: trustedPeople.count,
                                    snoozedUntil: notificationCardSnoozedUntil, now: Date())
     }
 
@@ -1030,7 +1033,7 @@ final class CompanionCoordinator: ObservableObject {
             lastError = nil; needsRepair = false
             // The system prompt waits until the person is back from sharing
             // (or taps Copy link), so it never covers the link.
-            invitePromptPending = true
+            invitePromptPendingSince = Date()
         } catch { fail(error) }
     }
 

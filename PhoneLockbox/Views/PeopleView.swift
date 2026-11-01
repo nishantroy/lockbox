@@ -306,18 +306,19 @@ private struct NotificationsOffRowView: View {
 }
 
 /// Inline replacement for the old automatic system prompt: shown to someone
-/// who already helps a person and hasn't decided about notifications yet.
+/// who helps a person, or has a trusted person, and hasn't decided about
+/// notifications yet.
 private struct NotificationInviteCard: View {
     @ObservedObject var companion: CompanionCoordinator
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
-                Text(NotificationCard.title(helpingNames: companion.helpingNames))
+                Text(NotificationCard.title(helpingNames: companion.helpingNames, trustedNames: companion.trustedNames))
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
                     .accessibilityIdentifier("people.notificationCard.title")
-                Text(NotificationCard.body)
+                Text(NotificationCard.body(helpingNames: companion.helpingNames, trustedNames: companion.trustedNames))
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -398,17 +399,17 @@ private struct CopyLinkButton: View {
         } label: {
             Label {
                 // No cross-fade on the words: a mid-transition capture showed
-                // "Copy link" twice (2026-11-01 UX review). The symbol still
-                // animates on its own.
+                // "Copy link" twice (2026-11-01 UX review). The animation is
+                // removed from the Text only, so the symbol still animates.
                 Text(copied ? "Copied" : "Copy link")
                     .contentTransition(.identity)
+                    .transaction { $0.animation = nil }
             } icon: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     .contentTransition(.symbolEffect(.replace))
             }
         }
         .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
-        .transaction { $0.animation = nil }
         .accessibilityLabel(copied ? "Link copied" : "Copy link")
         .accessibilityHint("Copies the invite link to the clipboard, so you can paste it into a message")
         .accessibilityIdentifier("inviteSomeone.copyLinkButton")

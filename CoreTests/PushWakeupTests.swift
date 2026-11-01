@@ -73,17 +73,45 @@ final class PushWakeupTests: XCTestCase {
         XCTAssertEqual(NotificationCard.snoozedUntil(in: defaults), until)
     }
 
-    func testNotificationCardTitle() {
-        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana"]), "Get notified when Dana asks")
-        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana", "Lee"]), "Get notified when someone asks")
-        XCTAssertEqual(NotificationCard.title(helpingNames: []), "Get notified when someone asks")
-        XCTAssertEqual(NotificationCard.body, "Otherwise you'll only see requests when you open People.")
+    func testNotificationCardVisibleForOwnerWithTrustedPerson() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertTrue(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 0, trustedCount: 1, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 0, trustedCount: 0, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .denied, helpingCount: 0, trustedCount: 1, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .allowed, helpingCount: 1, trustedCount: 1, snoozedUntil: nil, now: now))
+        XCTAssertFalse(NotificationCard.isVisible(permission: .notDetermined, helpingCount: 0, trustedCount: 1,
+                                                  snoozedUntil: now.addingTimeInterval(3_600), now: now))
+    }
+
+    func testNotificationCardTitleAndBody() {
+        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana"], trustedNames: []), "Get notified when Dana asks")
+        XCTAssertEqual(NotificationCard.title(helpingNames: [], trustedNames: ["Ari"]), "Get notified when Ari answers")
+        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana", "Lee"], trustedNames: []), "Get notified about requests and answers")
+        XCTAssertEqual(NotificationCard.title(helpingNames: [], trustedNames: ["Ari", "Bo"]), "Get notified about requests and answers")
+        XCTAssertEqual(NotificationCard.title(helpingNames: ["Dana"], trustedNames: ["Ari"]), "Get notified about requests and answers")
+        XCTAssertEqual(NotificationCard.body(helpingNames: ["Dana"], trustedNames: []),
+                       "Otherwise you'll only see requests when you open People.")
+        XCTAssertEqual(NotificationCard.body(helpingNames: [], trustedNames: ["Ari"]),
+                       "Otherwise you'll only see answers when you open People.")
+        XCTAssertEqual(NotificationCard.body(helpingNames: ["Dana"], trustedNames: ["Ari"]),
+                       "Otherwise you'll only see updates when you open People.")
     }
 
     func testInvitePromptFiresOnlyForALiveLinkWithAPendingFlag() {
         XCTAssertTrue(InvitePromptTrigger.shouldFire(pending: true, linkIsLive: true))
         XCTAssertFalse(InvitePromptTrigger.shouldFire(pending: true, linkIsLive: false))
         XCTAssertFalse(InvitePromptTrigger.shouldFire(pending: false, linkIsLive: true))
+    }
+
+    func testInvitePromptPendingExpiresAfterTenMinutes() {
+        let t0 = Date(timeIntervalSince1970: 2_000_000)
+        XCTAssertTrue(InvitePromptTrigger.shouldFire(pendingSince: t0, linkIsLive: true, now: t0.addingTimeInterval(5)))
+        XCTAssertTrue(InvitePromptTrigger.shouldFire(pendingSince: t0, linkIsLive: true, now: t0.addingTimeInterval(600)))
+        XCTAssertFalse(InvitePromptTrigger.shouldFire(pendingSince: t0, linkIsLive: true, now: t0.addingTimeInterval(601)))
+        XCTAssertFalse(InvitePromptTrigger.shouldFire(pendingSince: t0, linkIsLive: false, now: t0.addingTimeInterval(5)))
+        XCTAssertFalse(InvitePromptTrigger.shouldFire(pendingSince: nil, linkIsLive: true, now: t0))
+        // Clock moved back: a future stamp is treated as expired.
+        XCTAssertFalse(InvitePromptTrigger.shouldFire(pendingSince: t0, linkIsLive: true, now: t0.addingTimeInterval(-5)))
     }
 
     func testForegroundBannerIsSkippedOnlyOnActivePeopleTab() {

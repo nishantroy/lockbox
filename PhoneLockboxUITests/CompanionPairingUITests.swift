@@ -57,11 +57,8 @@ final class CompanionPairingUITests: XCTestCase {
         attachScreenshot(named: "01-owner-invite-created")
 
         // The scripted friend: a throwaway in-memory identity.
-        let friend = try scriptedClient(role: .trustedApprover)
-        let invitation = try await friend.client.lookupInvite(token: token)
+        let invitation = try await scriptedFriendJoins(token: token, name: "Ari")
         XCTAssertEqual(invitation.payload.ownerDisplayName, "Nishant")
-        _ = try await friend.client.acceptInvite(invitation, token: token, approverDisplayName: "Ari",
-                                                 acceptanceID: UUID().uuidString, now: Date())
 
         // No pull-to-refresh: the 5 s poll surfaces the join by itself.
         let joinedText = app.staticTexts["joinedNotice.text"]
@@ -97,15 +94,13 @@ final class CompanionPairingUITests: XCTestCase {
 
         let link = try await createInviteInApp(ownerName: "Nishant")
         let token = try XCTUnwrap(InviteToken.token(fromShareLink: link))
-        let friend = try scriptedClient(role: .trustedApprover)
-        let invitation = try await friend.client.lookupInvite(token: token)
-        _ = try await friend.client.acceptInvite(invitation, token: token, approverDisplayName: "Ari",
-                                                 acceptanceID: UUID().uuidString, now: Date())
+        _ = try await scriptedFriendJoins(token: token, name: "Ari")
 
         XCTAssertTrue(app.staticTexts["joinedNotice.text"].waitForExistence(timeout: 40), "the 'Ari joined' notice never appeared")
         let row = app.staticTexts["people.notificationsOff.text"]
         XCTAssertTrue(row.waitForExistence(timeout: 10), "the notifications-off row never appeared")
         XCTAssertEqual(row.label, "Notifications are off, so you won't hear when Ari answers.")
+        XCTAssertFalse(app.staticTexts["people.notificationCard.title"].exists, "the get-notified card must not show when denied")
         let turnOn = app.buttons["people.notificationsOff.openSettingsButton"]
         XCTAssertTrue(turnOn.exists)
         XCTAssertEqual(turnOn.label, "Open Settings to turn notifications on")
@@ -296,6 +291,10 @@ final class CompanionPairingUITests: XCTestCase {
         guard linkTextElement.waitForExistence(timeout: 30) else {
             throw CompanionUITestError(description: "invite link text never appeared after creating an invite")
         }
+        // The value can lag the element's first appearance; wait for a full link.
+        let prefix = "\(CompanionCoordinatorScheme.companionLinkScheme)://i/"
+        let fullLink = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value BEGINSWITH %@", prefix), object: linkTextElement)
+        _ = await XCTWaiter.fulfillment(of: [fullLink], timeout: 10)
         let link = (linkTextElement.value as? String) ?? ""
 
         // Copy link answers visibly: the button reads "Copied" for about two seconds.
@@ -304,6 +303,40 @@ final class CompanionPairingUITests: XCTestCase {
         copyButton.tap()
         XCTAssertEqual(copyButton.label, "Link copied")
         return link
+    }
+
+    /// The scripted friend looks up and accepts the owner's invite. Lookup is
+    /// retried on `.notFound` for about 10 s (the relay can lag the app's
+    /// publish); errors say which step failed.
+    @discardableResult
+    private func scriptedFriendJoins(token: String, name: String) async throws -> Invitation {
+        let friend = try scriptedClient(role: .trustedApprover)
+        var invitation: Invitation?
+        var lastError: Error?
+        for attempt in 0..<6 {
+            do {
+                invitation = try await friend.client.lookupInvite(token: token)
+                break
+            } catch CompanionTransportError.server(.notFound) {
+                lastError = CompanionTransportError.server(.notFound)
+                if attempt < 5 { try await Task.sleep(nanoseconds: 2_000_000_000) }
+            } catch {
+                XCTFail("scripted friend lookupInvite failed: \(error)")
+                throw error
+            }
+        }
+        guard let invitation else {
+            XCTFail("scripted friend lookupInvite still not found after retries (token \(token.count) chars): \(String(describing: lastError))")
+            throw lastError ?? CompanionUITestError(description: "lookupInvite failed")
+        }
+        do {
+            _ = try await friend.client.acceptInvite(invitation, token: token, approverDisplayName: name,
+                                                     acceptanceID: UUID().uuidString, now: Date())
+        } catch {
+            XCTFail("scripted friend acceptInvite failed: \(error)")
+            throw error
+        }
+        return invitation
     }
 
     private func attachScreenshot(named name: String) {
