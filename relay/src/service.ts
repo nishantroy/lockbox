@@ -14,6 +14,7 @@ import {
   decodeSignedOperation,
   verifySignedOperationSignature,
   decodeInboxQuery,
+  decodePushTokenRegistration,
   type SignedOperation,
   type RelayResult,
   type RelayResponse,
@@ -63,6 +64,8 @@ import {
   PairingRoutingConflictError,
   type StoredOperation
 } from "./db.js";
+import { dispatchPush, type PushNotification } from "./apns.js";
+import { upsertPushToken, deletePushTokensForEnvironment } from "./push-store.js";
 import { canonicalFramed, digest, COMPANION_VERSION, isWellFormedLookupKey, fromBase64url } from "./canonical.js";
 import { timingSafeEqual } from "node:crypto";
 
@@ -136,6 +139,47 @@ interface TransactionOutcome {
    * state change (terminal expiry) and receipt were committed, but the
    * caller must still see a terminal `expired` error, not a success. */
   surfaceExpired: boolean;
+  /** Wake-up banners to send after commit; empty for replays, failures and rejected-expired outcomes. */
+  notifications: PushNotification[];
+}
+
+const PUSH_FALLBACK_TITLE = "Phone Lockbox";
+
+function pushTitle(name: string | undefined): string {
+  return name !== undefined && name.trim() !== "" ? name : PUSH_FALLBACK_TITLE;
+}
+
+/**
+ * Recipients and banner text for a *freshly committed* operation, computed from
+ * the committed ledger (docs/r5-apns-plan.md):
+ * - owner "request" -> every approver the request is addressed to (title: the
+ *   owner name signed into that approver's pairing)
+ * - approver "approval" approved/declined -> the owner only (title: the
+ *   approver name signed into the pairing the approval is bound to)
+ * - approver "accept" -> the owner only (title: the approver's signed name)
+ * Everything else (revocations, expiries, natural end, ...) sends nothing.
+ */
+function pushPlan(operation: SignedOperation, result: RelayResult, ledger: Ledger, ownerID: string): PushNotification[] {
+  if (operation.kind === "request" && result.kind === "request") {
+    const request = result.value;
+    if (request.status !== "pending") return [];
+    return request.targetedApproverIDs.map((approverID) => {
+      const binding = request.targetBindings.find((b) => b.approverIdentityID === approverID);
+      const pairing = binding ? ledger.pairings[binding.pairingID]?.pairing : undefined;
+      return { identityID: approverID, message: { title: pushTitle(pairing?.ownerDisplayName), body: "Asks you to approve ending a lock early.", kind: "request" as const } };
+    });
+  }
+  if (operation.kind === "approval" && result.kind === "approval") {
+    const approval = result.value;
+    const name = pushTitle(ledger.pairings[approval.pairingID]?.pairing.approverDisplayName);
+    if (approval.decision === "approved") return [{ identityID: ownerID, message: { title: name, body: "Approved your request. Open Phone Lockbox to end your lock.", kind: "answer" } }];
+    if (approval.decision === "declined") return [{ identityID: ownerID, message: { title: name, body: "Declined your request.", kind: "answer" } }];
+    return [];
+  }
+  if (operation.kind === "accept" && result.kind === "pairing") {
+    return [{ identityID: ownerID, message: { title: pushTitle(result.value.approverDisplayName), body: "Joined as your trusted person.", kind: "joined" } }];
+  }
+  return [];
 }
 
 export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(), clientIP: string | null = null): Promise<RelayResponse> {
@@ -237,7 +281,8 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
           ownerIdentityID: ownerRow.ownerID,
           stateRoot: isOwnerSigned ? ownerRow.storedStateRoot : prior.stateRootAfter
         },
-        surfaceExpired: prior.disposition === "rejectedExpiredRequest"
+        surfaceExpired: prior.disposition === "rejectedExpiredRequest",
+        notifications: []
       };
     }
 
@@ -327,9 +372,16 @@ export async function submitOperation(rawBody: Buffer, now: number = nowSeconds(
         ownerIdentityID: ownerRow.ownerID,
         stateRoot: newStateRoot
       },
-      surfaceExpired: reduced.rejectedExpired
+      surfaceExpired: reduced.rejectedExpired,
+      notifications: reduced.rejectedExpired ? [] : pushPlan(operation, reduced.result, ownerRow.ledger, ownerRow.ownerID)
     };
   });
+
+  // Wake-up push, strictly after COMMIT: never inside the transaction, never
+  // able to change the result (dispatchPush swallows every error and enforces
+  // a 3 s total budget). Awaited because the host may freeze the function once
+  // the response is sent.
+  await dispatchPush(pool, outcome.notifications);
 
   // The transaction above has already committed by this point (withTransaction
   // issues COMMIT before returning); only now do we surface a terminal
@@ -465,6 +517,40 @@ export async function fetchInboxOperation(rawBody: Buffer, now: number = nowSeco
     approvals,
     acceptances
   };
+}
+
+/**
+ * `POST /v1/push-token` (docs/r5-apns-plan.md "Wire contract"): a signed
+ * `push_token` operation registers (or, with `token: null`, unregisters) an
+ * APNs device token for the signing identity. Same decode -> signature ->
+ * rate limit -> body decode -> identity check -> freshness order as the inbox.
+ */
+export async function registerPushToken(rawBody: Buffer, now: number = nowSeconds(), clientIP: string | null = null): Promise<void> {
+  if (rawBody.length > MAX_RAW_BODY_BYTES) throw relayError("malformed");
+  let operation: SignedOperation;
+  try {
+    operation = decodeSignedOperation(safeJSONParse(rawBody));
+  } catch (error) {
+    throw error instanceof RelayError ? error : relayError("malformed");
+  }
+  if (operation.kind !== "push_token" || operation.expectedRevision !== null) throw relayError("malformed");
+  if (!verifySignedOperationSignature(operation)) throw relayError("invalid_signature");
+
+  const pool = getPool();
+  const allowed = await chargeGlobalRateLimits(pool, rateLimitSubjects(operation.signer.identityID, clientIP), now, GLOBAL_RATE_LIMIT_WINDOW_SECONDS, globalRateLimitMax());
+  if (!allowed) throw relayError("rate_limited");
+
+  let registration;
+  try {
+    registration = decodePushTokenRegistration(safeJSONParse(operation.body));
+  } catch (error) {
+    throw error instanceof RelayError ? error : relayError("malformed");
+  }
+  if (registration.identityID !== operation.signer.identityID) throw relayError("unauthorized");
+  if (registration.issuedAt > now + 60 || registration.issuedAt < now - INBOX_FRESHNESS_WINDOW_SECONDS) throw relayError("expired");
+
+  if (registration.token === null) await deletePushTokensForEnvironment(pool, registration.identityID, registration.environment);
+  else await upsertPushToken(pool, registration.identityID, registration.token, registration.environment, now);
 }
 
 /** Lookups are unauthenticated, so they get their own, tighter budget per client IP than signed operations (GLOBAL_RATE_LIMIT_MAX). */

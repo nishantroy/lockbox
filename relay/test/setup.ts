@@ -28,7 +28,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   const p = testPool();
-  await p.query("TRUNCATE companion_operation, companion_retention_marker, companion_approver_pairing, companion_invite_token, companion_owner");
+  await p.query("TRUNCATE companion_operation, companion_retention_marker, companion_approver_pairing, companion_invite_token, companion_push_token, companion_owner");
 });
 
 afterAll(async () => {
