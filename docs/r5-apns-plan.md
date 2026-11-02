@@ -1,6 +1,6 @@
 # R5 slice P4 — APNs wake-up notifications (plan, 2026-11-01)
 
-Status: **built, reviewed, UX-checked and pushed (2026-11-01); relay deploy and device QA pending.** Owner decision: build APNs now. APNs Key ID `ABC123DEFG` (Sandbox & Production, team-scoped). Team `ABCDE12345`, topic `com.phone-lockbox.app`. The owner adds the `.p8` to Vercel themselves; it never enters chat or the repo.
+Status: **built, reviewed, UX-checked and pushed (2026-11-01); relay deployed to production 2026-11-01 (APNs env set, migration 006 applied, health ok, relay-smoke 26/26 against production; Apple rejected the fake smoke token and the relay pruned it, as designed); owner device QA pending.** Owner decision: build APNs now. APNs Key ID `ABC123DEFG` (Sandbox & Production, team-scoped). Team `ABCDE12345`, topic `com.phone-lockbox.app`. At the owner's request the agent added the `.p8` to Vercel from a local file (`vercel env add` from stdin); it never entered chat or the repo.
 
 ## Goal
 
