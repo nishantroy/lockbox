@@ -29,6 +29,21 @@ struct LockboxPrototypeBadge: View {
     }
 }
 
+/// Sentence-case status capsule (the shared `LockboxStatusBadge` is uppercase).
+struct LockboxSentenceBadge: View {
+    let title: String
+    let color: Color
+
+    var body: some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.14), in: Capsule())
+    }
+}
+
 extension View {
     /// A dashed hairline outline for prototype-only controls (design language §6.5).
     func lockboxPrototypeOutline(cornerRadius: CGFloat = LockboxTheme.controlCornerRadius) -> some View {

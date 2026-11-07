@@ -110,10 +110,21 @@ struct PeopleView: View {
 #endif
     }
 
+    private var approvalEndsLocks: Bool {
+#if canImport(CompanionKit)
+        companion.friendApprovalCanEndLocksEnabled
+#else
+        false
+#endif
+    }
+
     private var headerSubline: String? {
 #if canImport(CompanionKit)
         guard companion.isAvailable else { return nil }
-        return PeopleDisplay.summary(trustedCount: companion.trustedPeople.count,
+        let listed = companion.trustedPeople
+        return PeopleDisplay.summary(activeCount: listed.filter(\.isFullyTrustedForEarlyEnd).count,
+                                     listedCount: listed.count,
+                                     settingUpCount: listed.filter { $0.consent == nil }.count,
                                      helpingCount: companion.helpingPeople.filter { !$0.approverStoppedHelping }.count)
 #else
         return nil
@@ -122,7 +133,7 @@ struct PeopleView: View {
 
     private var page: some View {
         LockboxScrollView {
-            PeopleHeader(subline: headerSubline)
+            PeopleHeader(subline: headerSubline, approvalEndsLocks: approvalEndsLocks)
 
 #if canImport(CompanionKit)
             if companion.isAvailable {
@@ -356,6 +367,13 @@ private struct NotificationInviteCard: View {
 /// State-first header: the title, a one-line summary, and a quiet prototype label.
 private struct PeopleHeader: View {
     let subline: String?
+    let approvalEndsLocks: Bool
+
+    private var prototypeLine: String {
+        approvalEndsLocks
+            ? "Ending a lock with an approval is a test feature."
+            : "Trusted people can see and answer your requests, but an approval doesn't end your lock in this build."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -368,13 +386,13 @@ private struct PeopleHeader: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 LockboxPrototypeBadge()
-                Text("Trusted-person approval is an early prototype and may change.")
+                Text(prototypeLine)
                     .font(.footnote)
                     .foregroundStyle(LockboxTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Prototype feature")
+            .accessibilityLabel("Prototype. \(prototypeLine)")
         }
     }
 }
@@ -832,6 +850,32 @@ private struct PeopleListCard: View {
     }
 }
 
+/// Avatar, text and a trailing control. At accessibility text sizes the avatar
+/// is hidden and the control stacks under the text.
+private struct PersonRowLayout<Text_: View, Trailing: View>: View {
+    let name: String
+    let dimmed: Bool
+    @ViewBuilder let text: Text_
+    @ViewBuilder let trailing: Trailing
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) { text }
+                trailing
+            }
+        } else {
+            HStack(alignment: .center, spacing: 12) {
+                LockboxAvatar(name: name).opacity(dimmed ? 0.4 : 1)
+                VStack(alignment: .leading, spacing: 2) { text }
+                Spacer(minLength: 0)
+                trailing
+            }
+        }
+    }
+}
+
 /// The trailing "more" menu of a person row. Holds the one destructive action.
 private struct PersonActionsMenu: View {
     let accessibilityLabel: String
@@ -864,20 +908,35 @@ private struct OwnerPersonRow: View {
     @State private var showingRemoveConfirmation = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            LockboxAvatar(name: person.nickname)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(person.nickname).font(.body.weight(.semibold))
-                Text(statusDetail)
-                    .font(.subheadline)
+        PersonRowLayout(name: person.nickname, dimmed: !person.isFullyTrustedForEarlyEnd) {
+            Text(person.nickname).font(.body.weight(.semibold))
+            if let caption {
+                Text(caption)
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(LockboxTheme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
-            PersonActionsMenu(accessibilityLabel: "More actions for \(person.nickname)",
-                              actionTitle: "Remove \(person.nickname)",
-                              identifier: "person.removeButton",
-                              isBusy: isBusy) { showingRemoveConfirmation = true }
+            Text(statusDetail)
+                .font(.subheadline)
+                .foregroundStyle(LockboxTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } trailing: {
+            if person.isFullyTrustedForEarlyEnd {
+                PersonActionsMenu(accessibilityLabel: "More actions for \(person.nickname)",
+                                  actionTitle: "Remove \(person.nickname)",
+                                  identifier: "person.removeButton",
+                                  isBusy: isBusy) { showingRemoveConfirmation = true }
+            } else {
+                // Not ready: the way out is visible, not tucked in a menu.
+                Button("Remove") { showingRemoveConfirmation = true }
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LockboxTheme.destructive)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .disabled(isBusy)
+                    .accessibilityLabel("Remove \(person.nickname)")
+                    .accessibilityIdentifier("person.removeButton")
+            }
         }
         .accessibilityElement(children: .contain)
         .confirmationDialog(
@@ -893,6 +952,11 @@ private struct OwnerPersonRow: View {
         } message: {
             Text("\(person.nickname) will no longer be able to approve early-end requests for you.")
         }
+    }
+
+    private var caption: String? {
+        if person.isFullyTrustedForEarlyEnd { return nil }
+        return person.consent == nil ? "Setting up" : "Not active"
     }
 
     private var statusDetail: String {
@@ -913,24 +977,24 @@ private struct ApproverPersonRow: View {
     @State private var showingStopConfirmation = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            LockboxAvatar(name: person.nickname)
-            VStack(alignment: .leading, spacing: 2) {
-                if person.approverStoppedHelping {
-                    Text("You stopped being a trusted person for \(person.nickname)")
-                        .font(.body.weight(.semibold))
-                        .accessibilityIdentifier("helping.statusText")
-                } else {
-                    Text("You're a trusted person for \(person.nickname)")
-                        .font(.body.weight(.semibold))
-                        .accessibilityIdentifier("helping.statusText")
-                    Text("You can approve ending one exact lock early, only when \(person.nickname) asks. It never starts, extends or controls their lock.")
-                        .font(.subheadline)
-                        .foregroundStyle(LockboxTheme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        PersonRowLayout(name: person.nickname, dimmed: person.approverStoppedHelping) {
+            if person.approverStoppedHelping {
+                Text("You stopped being a trusted person for \(person.nickname)")
+                    .font(.body.weight(.semibold))
+                    .accessibilityIdentifier("helping.statusText")
+                Text("Not active")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(LockboxTheme.textSecondary)
+            } else {
+                Text("You're a trusted person for \(person.nickname)")
+                    .font(.body.weight(.semibold))
+                    .accessibilityIdentifier("helping.statusText")
+                Text("You can approve ending one exact lock early, only when \(person.nickname) asks. It never starts, extends or controls their lock.")
+                    .font(.subheadline)
+                    .foregroundStyle(LockboxTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
+        } trailing: {
             if !person.approverStoppedHelping {
                 PersonActionsMenu(accessibilityLabel: "More actions for \(person.nickname)",
                                   actionTitle: "Stop being a trusted person",
@@ -1097,9 +1161,9 @@ private struct InboxRow: View {
                 Text(item.isMine ? "Your request" : title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                LockboxStatusBadge(title: CompanionCoordinator.statusBadgeTitle(item.status), color: color(for: item.status))
+                LockboxSentenceBadge(title: CompanionCoordinator.statusBadgeTitle(item.status), color: color(for: item.status))
             }
-            Text("Created \(RuntimeTimeFormat.string(item.request.createdAt))")
+            Text("Created \(RuntimeTimeFormat.string(item.request.createdAt, style: .atPhrase))")
                 .font(.subheadline)
                 .foregroundStyle(LockboxTheme.secondary)
             if !item.isMine, item.status == .pending, item.myDecision == .pending {
@@ -1199,6 +1263,8 @@ private struct FriendReleaseActionView: View {
             .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
             .padding(4)
             .lockboxPrototypeOutline(cornerRadius: 16)
+            .overlay(alignment: .topTrailing) { LockboxPrototypeBadge().offset(y: -12).padding(.trailing, 8) }
+            .padding(.top, 12)
             .disabled(isBusy || companion.approvalsByRequestID[item.request.requestID] == nil)
             .accessibilityHint("Ends your current lock now, using \(approverName)'s approval, after a confirmation")
             .confirmationDialog(

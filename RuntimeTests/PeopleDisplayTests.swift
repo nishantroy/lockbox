@@ -29,11 +29,39 @@ final class PeopleDisplayTests: XCTestCase {
         XCTAssertEqual(PeopleDisplay.initials(for: "محمد علي"), "مع")
     }
 
-    func testSummary() {
-        XCTAssertEqual(PeopleDisplay.summary(trustedCount: 0, helpingCount: 0), "No trusted people yet")
-        XCTAssertEqual(PeopleDisplay.summary(trustedCount: 1, helpingCount: 0), "1 trusted person")
-        XCTAssertEqual(PeopleDisplay.summary(trustedCount: 2, helpingCount: 0), "2 trusted people")
-        XCTAssertEqual(PeopleDisplay.summary(trustedCount: 2, helpingCount: 1), "2 trusted people · helping 1")
-        XCTAssertEqual(PeopleDisplay.summary(trustedCount: 0, helpingCount: 2), "No trusted people yet · helping 2")
+    func testInitialsHyphenDigitsEszettAndDefaultNames() {
+        XCTAssertEqual(PeopleDisplay.initials(for: "Anne-Marie"), "A")
+        XCTAssertEqual(PeopleDisplay.initials(for: "Mary-Jane Watson"), "MW")
+        XCTAssertEqual(PeopleDisplay.initials(for: "42"), "4")
+        XCTAssertEqual(PeopleDisplay.initials(for: "ß"), "S")
+        XCTAssertEqual(PeopleDisplay.initials(for: "Someone"), "S")
+        XCTAssertEqual(PeopleDisplay.initials(for: "The other person"), "TP")
+    }
+
+    func testSummaryNobody() {
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 0, listedCount: 0, helpingCount: 0), "No trusted people yet")
+    }
+
+    func testSummaryActive() {
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 1, listedCount: 1, helpingCount: 0), "1 trusted person")
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 2, listedCount: 3, helpingCount: 0), "2 trusted people")
+    }
+
+    func testSummaryListedButNoneActive() {
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 0, listedCount: 1, helpingCount: 0), "No active trusted people")
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 0, listedCount: 1, settingUpCount: 1, helpingCount: 0),
+                       "No active trusted people · 1 setting up")
+    }
+
+    func testSummarySettingUpAndHelping() {
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 2, listedCount: 3, settingUpCount: 1, helpingCount: 1),
+                       "2 trusted people · 1 setting up · helping 1 person")
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 1, listedCount: 1, helpingCount: 2),
+                       "1 trusted person · helping 2 people")
+    }
+
+    func testSummaryOnlyHelping() {
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 0, listedCount: 0, helpingCount: 2), "Helping 2 people")
+        XCTAssertEqual(PeopleDisplay.summary(activeCount: 0, listedCount: 0, helpingCount: 1), "Helping 1 person")
     }
 }
