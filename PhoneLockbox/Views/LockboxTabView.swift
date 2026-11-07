@@ -5,7 +5,10 @@ struct LockboxTabView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
     @Binding var navigationPath: [QuickActionRoute.Destination]
-    @State private var showingManualLock = false
+    /// One sheet slot for every sheet this tab presents, so a quick action can
+    /// never be presented over (or stranded behind) the custom-end picker.
+    @State private var sheet: LockboxSheet?
+    @Namespace private var stateNamespace
     @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
     @State private var presentedFocusAction: ScreenTimeCoordinator.PendingQuickAction?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -25,19 +28,26 @@ struct LockboxTabView: View {
                 if !coordinator.isConfigured {
                     SetupView(coordinator: coordinator)
                 } else if let display = coordinator.activeLockDisplay {
-                    ActiveLockView(coordinator: coordinator, display: display, now: context.date)
+                    ActiveLockView(coordinator: coordinator, display: display, now: context.date, namespace: stateNamespace)
                         .transition(.opacity)
                 } else {
-                    UnlockedLockboxView(coordinator: coordinator, companion: companion, now: context.date)
-                        .transition(.opacity)
+                    UnlockedLockboxView(
+                        coordinator: coordinator,
+                        companion: companion,
+                        now: context.date,
+                        namespace: stateNamespace,
+                        onPresentCustomEnd: { sheet = .customEnd($0) }
+                    )
+                    .transition(.opacity)
                 }
             }
+            // Fires only on becoming locked, wherever the lock came from.
+            .sensoryFeedback(.success, trigger: coordinator.activeLockDisplay != nil) { old, new in !old && new }
             // Open and Locked share one composition; cross-fade between them.
             .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: coordinator.activeLockDisplay)
         }
-        .sensoryFeedback(.success, trigger: coordinator.hasActiveLock) { old, new in !old && new }
         .lockboxScreen()
-        .sheet(isPresented: $showingManualLock, onDismiss: {
+        .sheet(item: $sheet, onDismiss: {
             // A focus identity remains busy until the sheet is actually gone.
             // This prevents a rapid second URL from replacing its state while
             // SwiftUI is still presenting or dismissing the first sheet.
@@ -49,19 +59,33 @@ struct LockboxTabView: View {
             // If a regular Lock now sheet was already visible when an external
             // route arrived, consume the queued route after that sheet closes.
             consumeQuickAction()
-        }) {
-            ManualLockSheet(
-                coordinator: coordinator,
-                requestedPreset: requestedManualPreset,
-                onPresented: { pending in
-                    guard let presentedFocusAction,
-                          presentedFocusAction == pending else { return }
-                    // Validate only the exact identity at presentation. The
-                    // durable claim is retained until onDismiss settles the
-                    // sheet, so a crash before dismissal can retry it.
-                    _ = coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
-                }
-            )
+        }) { presented in
+            switch presented {
+            case .manualLock:
+                ManualLockSheet(
+                    coordinator: coordinator,
+                    requestedPreset: requestedManualPreset,
+                    onPresented: { pending in
+                        guard let presentedFocusAction,
+                              presentedFocusAction == pending else { return }
+                        // Validate only the exact identity at presentation. The
+                        // durable claim is retained until onDismiss settles the
+                        // sheet, so a crash before dismissal can retry it.
+                        _ = coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
+                    }
+                )
+            case .customEnd(let request):
+                CustomEndSheet(
+                    coordinator: coordinator,
+                    referenceDate: request.referenceDate,
+                    currentEnd: request.currentEnd,
+                    onSet: request.onSet
+                )
+            }
+        }
+        .onChange(of: coordinator.hasActiveLock) { _, isActive in
+            // The picker belongs to the Open screen; drop it if a lock starts.
+            if isActive, case .customEnd = sheet { sheet = nil }
         }
         .onAppear {
             consumeQuickAction()
@@ -77,11 +101,12 @@ struct LockboxTabView: View {
         case .focus(let preset):
             // The sheet's onAppear is the presentation callback. Until then,
             // the claim (including its ID/token) remains durable and retryable.
-            // Never replace an already-presented regular or quick-action sheet.
-            guard presentedFocusAction == nil, !showingManualLock else { return }
+            // Never replace an already-presented sheet. A queued route is
+            // consumed from the sheet's onDismiss.
+            guard presentedFocusAction == nil, sheet == nil else { return }
             presentedFocusAction = pending
             requestedManualPreset = preset
-            showingManualLock = true
+            sheet = .manualLock
         case .status:
             // Status has no second screen: this visible Lockbox tab is its
             // destination, and this explicit consumption handler is the ack
@@ -99,6 +124,27 @@ struct LockboxTabView: View {
             }
         }
     }
+}
+
+private enum LockboxSheet: Identifiable {
+    case manualLock
+    case customEnd(CustomEndRequest)
+
+    var id: String {
+        switch self {
+        case .manualLock: return "manualLock"
+        case .customEnd(let request): return "customEnd-\(request.id)"
+        }
+    }
+}
+
+/// What the Open screen asks the custom-end picker to show, and how to report
+/// the chosen end back.
+struct CustomEndRequest: Identifiable {
+    let id = UUID()
+    let referenceDate: Date
+    let currentEnd: Date?
+    let onSet: (Date) -> Void
 }
 
 private struct SetupView: View {
@@ -189,26 +235,46 @@ struct UnlockedLockboxView: View {
     @ObservedObject var companion: CompanionCoordinator
     let now: Date
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let namespace: Namespace.ID
+    let onPresentCustomEnd: (CustomEndRequest) -> Void
     // Each appearance of the Open screen starts on 30 min (no persistence).
     @State private var choice: LockDurationChoice = .thirtyMinutes
     @State private var customSelection = RuntimeCustomEndSelectionState()
-    @State private var showingCustomEnd = false
-    @State private var customSheetReference = Date()
     @State private var customRangeUnavailable = false
     @State private var attempted = false
 
     /// The end shown on the circle. It is also the exact end submitted on tap,
-    /// so what the user saw is what is frozen.
+    /// so what the user saw is what is frozen. Nil when unavailable or when it
+    /// would already be rejected a minute from now.
     private var displayedEnd: Date? {
+        let preset: RuntimeLockNowEnd.Preset?
         switch choice {
-        case .thirtyMinutes: return coordinator.manualLockProposedEnd(after: 30 * 60, at: now)
-        case .oneHour: return coordinator.manualLockProposedEnd(after: 60 * 60, at: now)
-        case .custom:
-            guard let end = customSelection.customEnd,
-                  let range = coordinator.manualLockCustomRange(at: now),
-                  range.contains(end) else { return nil }
-            return end
+        case .thirtyMinutes: preset = .thirtyMinutes
+        case .oneHour: preset = .oneHour
+        case .custom: preset = nil
         }
+        return RuntimeLockNowEnd.displayedEnd(
+            preset: preset,
+            customEnd: choice == .custom ? customSelection.customEnd : nil,
+            now: now
+        )
+    }
+
+    /// One calm line when a saved bedtime begins during the lock and keeps the
+    /// phone locked past the shown end.
+    private var overlapNote: String? {
+        guard coordinator.isAuthorized, let end = displayedEnd else { return nil }
+        let schedule = (
+            start: RuntimeTime(hour: coordinator.savedStartComponents.hour ?? 22, minute: coordinator.savedStartComponents.minute ?? 0),
+            end: RuntimeTime(hour: coordinator.savedEndComponents.hour ?? 7, minute: coordinator.savedEndComponents.minute ?? 0)
+        )
+        guard let overlap = RuntimeLockNowEnd.bedtimeOverlap(
+            schedule: schedule,
+            enabled: coordinator.recurringEnabledIntent,
+            lockEnd: end,
+            now: now
+        ) else { return nil }
+        return "Bedtime starts \(RuntimeTimeFormat.string(overlap.bedtimeStart, now: now, style: .atPhrase)), so this stays locked until \(RuntimeTimeFormat.string(overlap.effectiveEnd, now: now))."
     }
 
     private func lockNow(until end: Date) {
@@ -216,43 +282,56 @@ struct UnlockedLockboxView: View {
         coordinator.startManualLock(expectedEnd: end)
     }
 
-    private func presentCustomEnd() {
+    private func openCustomEnd() {
         let reference = Date()
-        guard coordinator.manualLockCustomRange(at: reference) != nil else {
+        guard coordinator.manualLockCustomRange(at: RuntimeLockNowEnd.pickerReference(at: reference)) != nil else {
             customRangeUnavailable = true
             return
         }
         customRangeUnavailable = false
-        customSheetReference = reference
-        showingCustomEnd = true
+        onPresentCustomEnd(CustomEndRequest(referenceDate: reference, currentEnd: customSelection.customEnd) { end in
+            customSelection = RuntimeCustomEndSelectionState.transition(
+                customSelection, event: .userSelected(end), at: now, calendar: Calendar.current
+            )
+            select(.custom)
+        })
     }
 
     private func select(_ newChoice: LockDurationChoice) {
         customRangeUnavailable = false
+        attempted = false // a stale error must not outlive a new choice
         choice = newChoice
     }
 
     private var customChipTitle: String {
         if choice == .custom, let end = customSelection.customEnd {
-            return "Until \(RuntimeTimeFormat.string(end, now: now))"
+            return "Until \(RuntimeLockNowEnd.chipTime(end, now: now))"
         }
         return "Until…"
     }
 
-    @ViewBuilder
+    private var chip30: some View {
+        LockboxDurationChip(title: "30 min", isSelected: choice == .thirtyMinutes) { select(.thirtyMinutes) }
+    }
+
+    private var chip1h: some View {
+        LockboxDurationChip(title: "1 hour", isSelected: choice == .oneHour) { select(.oneHour) }
+    }
+
+    private var chipUntil: some View {
+        LockboxDurationChip(title: customChipTitle, isSelected: choice == .custom, hint: "Opens a time picker") { openCustomEnd() }
+    }
+
+    /// Three chips in a row; if they don't fit, 30 min and 1 hour on one row
+    /// with Until… below; at the largest sizes, one per row.
     private var durationChips: some View {
-        let chips = Group {
-            LockboxDurationChip(title: "30 min", isSelected: choice == .thirtyMinutes) { select(.thirtyMinutes) }
-            LockboxDurationChip(title: "1 hour", isSelected: choice == .oneHour) { select(.oneHour) }
-            LockboxDurationChip(title: customChipTitle, isSelected: choice == .custom) { presentCustomEnd() }
-        }
-        if dynamicTypeSize >= .accessibility1 {
-            VStack(spacing: 8) { chips }
-        } else {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { chips }
-                VStack(spacing: 8) { chips }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { chip30; chip1h; chipUntil }
+            VStack(spacing: 8) {
+                HStack(spacing: 8) { chip30; chip1h }
+                chipUntil
             }
+            VStack(spacing: 8) { chip30; chip1h; chipUntil }
         }
     }
 
@@ -261,6 +340,7 @@ struct UnlockedLockboxView: View {
         let end = coordinator.isAuthorized ? displayedEnd : nil
         let endLine = end.map { "until \(RuntimeTimeFormat.string($0, now: now))" }
         let spokenEnd = end.map { RuntimeTimeFormat.string($0, now: now, style: .phrase) }
+        let note = overlapNote
         if dynamicTypeSize >= .accessibility1 {
             Button {
                 if let end { lockNow(until: end) }
@@ -270,13 +350,14 @@ struct UnlockedLockboxView: View {
             .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
             .disabled(end == nil)
             .accessibilityLabel(spokenEnd.map { "Lock now until \($0)" } ?? "Lock now")
-            .accessibilityHint(end == nil ? "Needs Screen Time access or an available end" : "Locks right away")
+            .accessibilityHint(end == nil ? "Needs Screen Time access or an available end" : "Locks right away. \(note ?? "")")
         } else {
-            LockboxLockNowButton(endLine: endLine, spokenEnd: spokenEnd) {
+            LockboxLockNowButton(endLine: endLine, spokenEnd: spokenEnd, note: note) {
                 if let end { lockNow(until: end) }
             }
             .disabled(end == nil)
             .padding(.vertical, 12)
+            .matchedGeometryEffect(id: "stateCircle", in: namespace)
         }
     }
 
@@ -326,6 +407,13 @@ struct UnlockedLockboxView: View {
                 }
                 lockControl
                 if coordinator.isAuthorized {
+                    if let note = overlapNote {
+                        Text(note)
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.textSecondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    }
                     if customRangeUnavailable {
                         attentionLine("No finite end is available at the moment.")
                     } else if displayedEnd == nil {
@@ -401,18 +489,6 @@ struct UnlockedLockboxView: View {
                 OperationalWarning(coordinator: coordinator)
             }
         }
-        .sheet(isPresented: $showingCustomEnd) {
-            CustomEndSheet(
-                coordinator: coordinator,
-                referenceDate: customSheetReference,
-                currentEnd: customSelection.customEnd
-            ) { end in
-                customSelection = RuntimeCustomEndSelectionState.transition(
-                    customSelection, event: .userSelected(end), at: now, calendar: Calendar.current
-                )
-                select(.custom)
-            }
-        }
     }
 }
 
@@ -425,6 +501,7 @@ private enum LockDurationChoice {
 private struct LockboxDurationChip: View {
     let title: String
     let isSelected: Bool
+    var hint: String?
     let action: () -> Void
 
     var body: some View {
@@ -442,6 +519,7 @@ private struct LockboxDurationChip: View {
         .buttonStyle(.plain)
         .fixedSize()
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityHint(hint ?? "")
     }
 }
 
@@ -509,6 +587,7 @@ struct ActiveLockView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     let display: RuntimeActiveLockDisplay
     let now: Date
+    let namespace: Namespace.ID
 
     private var semanticColor: Color { display.isBedtime ? LockboxTheme.rest : LockboxTheme.focus }
 
@@ -526,16 +605,17 @@ struct ActiveLockView: View {
             }
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity)
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Locked, \(display.spokenOriginCopy)")
+            .accessibilityAddTraits(.isHeader)
             .zIndex(1) // keep the halo behind the header text
 
             VStack(spacing: 16) {
-                // Takes the place of the Open screen's duration chips.
-                Label(display.label, systemImage: display.isBedtime ? "moon.fill" : "scope")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(semanticColor)
-                    .frame(minHeight: 44)
-                    .accessibilityHidden(true) // covered by the circle's summary
+                // Keeps the circle where it sits on the Open screen, under
+                // the duration chips (one 44 pt row).
+                Color.clear
+                    .frame(height: 44)
+                    .accessibilityHidden(true)
                 if dynamicTypeSize >= .accessibility1 {
                     endText
                         .frame(maxWidth: .infinity)
@@ -546,6 +626,7 @@ struct ActiveLockView: View {
                         endCircleContent(diameter: diameter)
                     }
                     .padding(.vertical, 12)
+                    .matchedGeometryEffect(id: "stateCircle", in: namespace)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(activeSummary)
                 }
@@ -645,9 +726,9 @@ struct ActiveLockView: View {
 
     private var activeSummary: String {
         if let end = coordinator.activeLockEnd {
-            return "Locked until \(RuntimeTimeFormat.string(end, now: now, style: .phrase)), \(display.spokenOriginCopy)"
+            return "Locked until \(RuntimeTimeFormat.string(end, now: now, style: .phrase))"
         }
-        return "Locked, opening time unavailable, \(display.spokenOriginCopy)"
+        return "Opening time unavailable"
     }
 }
 

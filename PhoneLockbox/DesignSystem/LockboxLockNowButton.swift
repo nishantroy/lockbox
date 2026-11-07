@@ -48,6 +48,8 @@ struct LockboxLockNowButton: View {
     let endLine: String?
     /// Spoken end, e.g. "11:46 PM" or "tomorrow at 7:00 AM".
     let spokenEnd: String?
+    /// Extra spoken context, e.g. that a saved bedtime extends the lock.
+    var note: String?
     let action: () -> Void
     @Environment(\.isEnabled) private var isEnabled
 
@@ -74,7 +76,7 @@ struct LockboxLockNowButton: View {
         }
         .buttonStyle(LockboxCircleButtonStyle())
         .accessibilityLabel(spokenEnd.map { "Lock now until \($0)" } ?? "Lock now")
-        .accessibilityHint(isEnabled ? "Locks right away" : "Needs Screen Time access or an available end")
+        .accessibilityHint(isEnabled ? "Locks right away. \(note ?? "")" : "Needs Screen Time access or an available end")
         .saturation(isEnabled ? 1 : 0.3)
         .opacity(isEnabled ? 1 : 0.5)
     }

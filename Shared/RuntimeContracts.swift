@@ -168,6 +168,24 @@ public enum RuntimeManualLockDecision {
         intervalEnd: Date,
         calendar: Calendar = .current
     ) -> [RuntimeOccurrenceResolver.Occurrence] {
+        overlappingScheduledOccurrences(
+            start: configuration.start,
+            end: configuration.end,
+            intervalStart: intervalStart,
+            intervalEnd: intervalEnd,
+            calendar: calendar
+        )
+    }
+
+    /// Same as the configuration overload, for callers that only hold the
+    /// saved civil times.
+    public static func overlappingScheduledOccurrences(
+        start: RuntimeTime,
+        end: RuntimeTime,
+        intervalStart: Date,
+        intervalEnd: Date,
+        calendar: Calendar = .current
+    ) -> [RuntimeOccurrenceResolver.Occurrence] {
         guard intervalStart < intervalEnd,
               intervalStart.timeIntervalSinceReferenceDate.isFinite,
               intervalEnd.timeIntervalSinceReferenceDate.isFinite else { return [] }
@@ -183,8 +201,8 @@ public enum RuntimeManualLockDecision {
         var iterations = 0
         while day <= last && iterations < 32 {
             let candidates = RuntimeOccurrenceResolver.candidates(
-                start: configuration.start,
-                end: configuration.end,
+                start: start,
+                end: end,
                 around: day,
                 calendar: calendar
             )
