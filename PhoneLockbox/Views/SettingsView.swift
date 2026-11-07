@@ -16,8 +16,7 @@ struct SettingsView: View {
     }
 
     private var blockedValue: String {
-        let count = coordinator.savedSelectedItemCount
-        return "\(coordinator.savedModeTitle) · \(count) \(count == 1 ? "item" : "items")"
+        coordinator.savedRestrictionsSummary
     }
 
     var body: some View {

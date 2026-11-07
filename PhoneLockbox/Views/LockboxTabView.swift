@@ -468,14 +468,7 @@ struct UnlockedLockboxView: View {
                     NavigationLink {
                         ConfigurationEditorView(coordinator: coordinator, isInitialSetup: false, sections: .restrictions)
                     } label: {
-                        LockboxNavigationRowLabel(title: "Mode", value: coordinator.savedModeTitle)
-                    }
-                    .buttonStyle(.plain)
-                    Divider().overlay(LockboxTheme.border.opacity(0.6))
-                    NavigationLink {
-                        ConfigurationEditorView(coordinator: coordinator, isInitialSetup: false, sections: .restrictions)
-                    } label: {
-                        LockboxNavigationRowLabel(title: "Apps & categories", value: "\(coordinator.savedSelectedItemCount) selected")
+                        LockboxNavigationRowLabel(title: "What gets blocked", value: coordinator.savedRestrictionsSummary)
                     }
                     .buttonStyle(.plain)
                     Divider().overlay(LockboxTheme.border.opacity(0.6))
@@ -564,7 +557,7 @@ private struct TonightCard: View {
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
+                HStack(alignment: .center) {
                     LockboxSectionLabel(isBedtimeWindowInProgress(coordinator, now: now) ? "Next bedtime" : "Tonight", systemImage: "moon.fill")
                     Spacer()
                     if coordinator.recurringEnabledIntent, nextOccurrence != nil {

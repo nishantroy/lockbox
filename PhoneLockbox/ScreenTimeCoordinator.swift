@@ -522,9 +522,28 @@ final class ScreenTimeCoordinator: ObservableObject {
 
     var hasPendingConfiguration: Bool { document.pendingConfiguration != nil }
 
+    /// The last saved values: a queued change if there is one, else the applied configuration.
+    var effectiveConfiguration: RuntimeConfiguration? { document.effectiveConfiguration }
+    var effectiveStartComponents: DateComponents {
+        DateComponents(hour: effectiveConfiguration?.start.hour ?? 22, minute: effectiveConfiguration?.start.minute ?? 0)
+    }
+    var effectiveEndComponents: DateComponents {
+        DateComponents(hour: effectiveConfiguration?.end.hour ?? 7, minute: effectiveConfiguration?.end.minute ?? 0)
+    }
+    /// True when the last saved mode and selection form a valid policy.
+    var effectiveSelectionIsValid: Bool {
+        guard let configuration = effectiveConfiguration else { return false }
+        return (try? RuntimePolicyPlan.make(mode: configuration.mode, selection: configuration.selectionSummary)) != nil
+    }
+
+    /// "Block · 11 selected" / "Allow only · 2 selected" for the applied configuration.
+    var savedRestrictionsSummary: String {
+        "\(document.configuration?.mode == .blockSelected ? "Block" : "Allow only") · \(savedSelectedItemCount) selected"
+    }
+
     var pendingChangesSummary: String? {
         guard let pending = document.pendingConfiguration else { return nil }
-        return "Pending after the current lock: \(pending.mode == .blockSelected ? "block selected" : "allow only selected"), \(pending.start.displayValue)–\(pending.end.displayValue)"
+        return "Queued for after this lock: \(pending.mode == .blockSelected ? "block" : "allow only") \(pending.selectionSummary.totalCount) selected, \(RuntimeBedtimeSummary.window(start: pending.start, end: pending.end))"
     }
 
     func manualLockProposedEnd(after duration: TimeInterval, at date: Date = Date()) -> Date? {
@@ -1437,54 +1456,109 @@ final class ScreenTimeCoordinator: ObservableObject {
         refreshDocument()
     }
 
-    func saveConfiguration(start: DateComponents, end: DateComponents) {
-        guard isAuthorized else { lastError = "Screen Time access is not authorized."; return }
-        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
-        guard !testScheduleActive, document.activeOwner != .prototypeTest else { lastError = "Finish the developer prototype restriction before changing the schedule."; return }
+    private enum ConfigurationSource {
+        /// Mode and selection come from the editable draft (the restrictions editor).
+        case draft
+        /// Mode and selection come from the last saved configuration; the
+        /// restrictions draft is left alone (the bedtime editor).
+        case effective
+    }
+
+    /// Saves the draft's mode and selection with these times and registers the
+    /// schedule. Used by initial setup and the full editor.
+    @discardableResult
+    func saveConfiguration(start: DateComponents, end: DateComponents) -> RuntimeSaveOutcome {
+        commitConfiguration(start: start, end: end, source: .draft, register: true)
+    }
+
+    /// Saves the draft's mode and selection keeping the last saved times. The
+    /// schedule is registered only if bedtime is currently on, so saving what
+    /// gets blocked never turns bedtime back on.
+    @discardableResult
+    func saveRestrictions() -> RuntimeSaveOutcome {
+        commitConfiguration(start: effectiveStartComponents, end: effectiveEndComponents, source: .draft, register: recurringEnabledIntent)
+    }
+
+    /// Saves new bedtime times (and turns bedtime on) using the last saved
+    /// mode and selection. The restrictions draft is not committed.
+    @discardableResult
+    func saveSchedule(start: DateComponents, end: DateComponents) -> RuntimeSaveOutcome {
+        commitConfiguration(start: start, end: end, source: .effective, register: true)
+    }
+
+    private func commitConfiguration(start: DateComponents, end: DateComponents, source: ConfigurationSource, register: Bool) -> RuntimeSaveOutcome {
+        guard isAuthorized else { lastError = "Screen Time access is not authorized."; return .failed }
+        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return .failed }
+        guard !testScheduleActive, document.activeOwner != .prototypeTest else { lastError = "Finish the developer prototype restriction before changing the schedule."; return .failed }
         // Expire a missed end before deciding whether this save is pending;
         // otherwise a stale shield could survive a same-process edit.
         reconcileRuntime()
         refreshDocument()
-        guard !document.legacyRegistrationNeedsReview else { lastError = "Clean up the legacy registration before re-registering this schedule."; return }
-        guard let sh = start.hour, let sm = start.minute, let eh = end.hour, let em = end.minute else { lastError = "Choose a valid bedtime window."; return }
+        guard !document.legacyRegistrationNeedsReview else { lastError = "Clean up the legacy registration before re-registering this schedule."; return .failed }
+        guard let sh = start.hour, let sm = start.minute, let eh = end.hour, let em = end.minute else { lastError = "Choose a valid bedtime window."; return .failed }
         do {
-            let runtimeMode = RuntimeMode(rawValue: mode.rawValue)!
-            let summary = selectionSummary(selection)
+            let runtimeMode: RuntimeMode
+            let summary: RuntimeSelectionSummary
+            let selectionData: Data
+            switch source {
+            case .draft:
+                runtimeMode = RuntimeMode(rawValue: mode.rawValue)!
+                summary = selectionSummary(selection)
+                selectionData = try JSONEncoder().encode(selection)
+            case .effective:
+                guard let base = document.effectiveConfiguration else { lastError = "Save a valid bedtime configuration first."; return .failed }
+                runtimeMode = base.mode
+                summary = base.selectionSummary
+                selectionData = base.selectionData
+            }
             _ = try RuntimePolicyPlan.make(mode: runtimeMode, selection: summary)
-            let configuration = RuntimeConfiguration(revision: (document.configuration?.revision ?? 0) + 1, start: RuntimeTime(hour: sh, minute: sm), end: RuntimeTime(hour: eh, minute: em), mode: runtimeMode, selectionSummary: summary, selectionData: try JSONEncoder().encode(selection))
+            let configuration = RuntimeConfiguration(revision: (document.configuration?.revision ?? 0) + 1, start: RuntimeTime(hour: sh, minute: sm), end: RuntimeTime(hour: eh, minute: em), mode: runtimeMode, selectionSummary: summary, selectionData: selectionData)
             try configuration.validate()
             let draft = RuntimeDraft(start: configuration.start, end: configuration.end, mode: runtimeMode, selectionSummary: summary, selectionData: configuration.selectionData)
             var shouldRegister = false
+            var queued = false
             try store.transaction { document in
                 guard document.activeOwner != .prototypeTest,
                       !document.testLockActive,
                       !document.legacyRegistrationNeedsReview else {
                     throw RuntimeValidationError.invalidConfiguration("Finish the developer prototype restriction before changing the schedule.")
                 }
+                // The schedule save leaves an existing restrictions draft's
+                // mode and selection alone and only moves its times.
+                let nextDraft: RuntimeDraft?
+                switch source {
+                case .draft:
+                    nextDraft = draft
+                case .effective:
+                    nextDraft = document.draft.map {
+                        RuntimeDraft(start: configuration.start, end: configuration.end, mode: $0.mode, selectionSummary: $0.selectionSummary, selectionData: $0.selectionData)
+                    }
+                }
                 let active = hasAnyCommittedSession(in: document, at: Date())
                 if active {
                     document.pendingConfiguration = configuration
                     // Existing suppression/fence history belongs to the
                     // current civil occurrence and must survive ordinary edits.
-                    document.draft = draft
+                    document.draft = nextDraft
                     document.record(RuntimeDiagnostic(operation: .configurationSaved, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Validated configuration queued until committed sessions end."), succeeded: true)
+                    queued = true
                 } else {
                     document.configuration = configuration
                     document.pendingConfiguration = nil
-                    document.draft = draft
+                    document.draft = nextDraft
                     document.recurringEnabledIntent = false
-                    document.record(RuntimeDiagnostic(operation: .configurationSaved, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: "Validated draft saved; registration requested."), succeeded: true)
-                    shouldRegister = true
+                    document.record(RuntimeDiagnostic(operation: .configurationSaved, requestedStart: configuration.start, requestedEnd: configuration.end, revision: configuration.revision, detail: register ? "Validated draft saved; registration requested." : "Validated restrictions saved; bedtime stays off."), succeeded: true)
+                    shouldRegister = register
                 }
             }
             refreshDocument()
             if shouldRegister {
-                registerConfiguredSchedule()
-            } else {
-                clearLastErrorAfterSuccessfulOperation()
-                scheduleAmbientReconciliation()
+                return registerConfiguredSchedule()
             }
-        } catch { lastError = error.localizedDescription }
+            clearLastErrorAfterSuccessfulOperation()
+            scheduleAmbientReconciliation()
+            return queued ? .queued : .saved
+        } catch { lastError = error.localizedDescription; return .failed }
     }
 
     func registerDailySchedule() {
@@ -1494,10 +1568,11 @@ final class ScreenTimeCoordinator: ObservableObject {
         registerConfiguredSchedule()
     }
 
-    private func registerConfiguredSchedule() {
-        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
-        guard let configuration = document.configuration else { lastError = "Save a valid bedtime configuration first."; return }
-        guard !document.legacyRegistrationNeedsReview else { lastError = "Clean up the legacy registration before re-registering."; return }
+    @discardableResult
+    private func registerConfiguredSchedule() -> RuntimeSaveOutcome {
+        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return .failed }
+        guard let configuration = document.configuration else { lastError = "Save a valid bedtime configuration first."; return .failed }
+        guard !document.legacyRegistrationNeedsReview else { lastError = "Clean up the legacy registration before re-registering."; return .failed }
         var replacingRegistration = false
         do {
             try store.transaction { document in
@@ -1523,8 +1598,9 @@ final class ScreenTimeCoordinator: ObservableObject {
             }
             refreshDocument(); reconcileRegistration(); clearLastErrorAfterSuccessfulOperation()
             scheduleAmbientReconciliation()
+            return .saved
         } catch {
-            guard replacingRegistration else { refreshDocument(); reconcileRegistration(); lastError = error.localizedDescription; return }
+            guard replacingRegistration else { refreshDocument(); reconcileRegistration(); lastError = error.localizedDescription; return .failed }
             activityCenter.stopMonitoring([Self.activityName])
             try? store.transaction { document in
                 guard document.configuration?.revision == configuration.revision else { return }
@@ -1533,6 +1609,7 @@ final class ScreenTimeCoordinator: ObservableObject {
             }
             refreshDocument(); reconcileRegistration(); lastError = error.localizedDescription
             scheduleAmbientReconciliation()
+            return .failed
         }
     }
 
@@ -1572,8 +1649,9 @@ final class ScreenTimeCoordinator: ObservableObject {
         catch { refreshDocument(); lastError = error.localizedDescription }
     }
 
-    func stopSchedule() {
-        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return }
+    @discardableResult
+    func stopSchedule() -> RuntimeSaveOutcome {
+        guard let store else { lastError = storageError ?? RuntimeValidationError.appGroupUnavailable.localizedDescription; return .failed }
         var shouldStopMonitoring = false
         do {
             // Do not reconcile from the cached document before this transaction:
@@ -1617,7 +1695,8 @@ final class ScreenTimeCoordinator: ObservableObject {
             if shouldStopMonitoring { activityCenter.stopMonitoring([Self.activityName]) }
             refreshDocument(); clearLastErrorAfterSuccessfulOperation()
             scheduleAmbientReconciliation()
-        } catch { refreshDocument(); lastError = error.localizedDescription }
+            return .saved
+        } catch { refreshDocument(); lastError = error.localizedDescription; return .failed }
     }
 
     /// Ultimate developer cleanup. Unlike normal recovery it intentionally

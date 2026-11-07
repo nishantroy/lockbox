@@ -98,8 +98,9 @@ struct ConfigurationEditorView: View {
                         if showsTimes {
                             coordinator.saveConfiguration(start: coordinator.startComponents, end: coordinator.endComponents)
                         } else {
-                            // Times are edited elsewhere; keep the saved ones.
-                            coordinator.saveConfiguration(start: coordinator.savedStartComponents, end: coordinator.savedEndComponents)
+                            // Times are edited elsewhere; keep the last saved ones,
+                            // and never turn bedtime on from here.
+                            coordinator.saveRestrictions()
                         }
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
@@ -109,7 +110,12 @@ struct ConfigurationEditorView: View {
                             .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                     }
-                    Text("The system has the final say on when apps are blocked.")
+                    if let pending = coordinator.pendingChangesSummary {
+                        Text(pending)
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
+                    Text("The system decides when, and whether, apps are blocked.")
                         .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
