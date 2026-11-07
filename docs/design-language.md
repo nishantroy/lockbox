@@ -179,4 +179,19 @@ Each step goes through the UX review gate (AGENTS.md) on owner-approved screensh
   - Validation: compile-only builds of the app and UI-test targets, and `swift test` 227/0. No simulator run.
   - Build 27 is installed on the owner's iPhone.
   - Known cosmetic doubt: the colour change is a cross-fade with `matchedGeometryEffect` between two circles, not one animated fill.
-- **Next:** D2 People, then D3 Settings.
+- **D2 (People tab, §6.5):** merged 2026-11-07.
+  - Builder: Claude Sonnet 5.5. Review: Claude Opus 5.5, no P1. One P2 fixed: the header count included people who had stopped being trusted. The prototype line now says what is live.
+  - Validation: compile-only builds of the app and UI-test targets. No simulator run.
+- **D3a (bedtime schedule editor and entry points, §6.7):** merged 2026-11-07.
+  - Builder: Claude Sonnet 5.5. Reviews: Claude Opus 5.5, an initial review and two delta reviews, no P1.
+  - P2s fixed:
+    - saving restrictions turned bedtime back on;
+    - queued changes were lost during a lock;
+    - a bedtime save committed the restrictions draft;
+    - the disabled toggle had no explanation;
+    - a false "locks now" note appeared after an early release.
+  - Bedtime on/off is now a user-facing control. There is no confirmation, but turn-off is refused while an unreleased window is running.
+  - Validation: compile-only builds, and `swift test` 247/0. No simulator run.
+- Build 28 (D2 and D3a) is installed on the owner's iPhone.
+- **Untested on device:** saving inside an open bedtime window is expected to lock immediately, based on iOS's documented `intervalDidStart` behaviour.
+- **Next:** D3b, the rest of Settings (native grouped rows, Developer last and distinct).
