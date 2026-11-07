@@ -8,6 +8,7 @@ struct CustomEndSheet: View {
     /// The clock at presentation, shifted one minute so every selectable end
     /// is still valid when the Open screen checks it (see `RuntimeLockNowEnd`).
     let pickerReference: Date
+    private let unshiftedReference: Date
     let onSet: (Date) -> Void
     @State private var selection: RuntimeCustomEndSelectionState
 
@@ -20,10 +21,11 @@ struct CustomEndSheet: View {
         self.coordinator = coordinator
         let reference = RuntimeLockNowEnd.pickerReference(at: referenceDate)
         self.pickerReference = reference
+        self.unshiftedReference = referenceDate
         self.onSet = onSet
         // A previous end that is no longer in range is dropped: seed from the
         // default with no user selection, so the picker never opens on a stale end.
-        let range = coordinator.manualLockCustomRange(at: reference)
+        let range = RuntimeLockNowEnd.pickerRange(at: referenceDate)
         let keepsCurrent = currentEnd.map { end in range?.contains(end) ?? false } ?? false
         let initial = keepsCurrent
             ? RuntimeCustomEndSelectionState(customEnd: currentEnd, hasUserSelection: true)
@@ -34,7 +36,7 @@ struct CustomEndSheet: View {
     }
 
     private var range: ClosedRange<Date>? {
-        coordinator.manualLockCustomRange(at: pickerReference)
+        RuntimeLockNowEnd.pickerRange(at: unshiftedReference)
     }
 
     private var endBinding: Binding<Date> {

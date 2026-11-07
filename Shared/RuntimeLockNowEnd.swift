@@ -16,8 +16,9 @@ public enum RuntimeLockNowEnd {
         }
     }
 
-    /// The displayed end must still be valid this long after `now`, because
-    /// the clock keeps running between the minute tick and the tap.
+    /// The displayed end must still be long enough this much later than `now`,
+    /// because the clock keeps running between the minute tick and the tap.
+    /// The margin applies only to the 15-minute minimum, not the 7-day maximum.
     public static let staleMargin: TimeInterval = 60
 
     /// The end to show and submit, or nil when it is unavailable or would
@@ -31,10 +32,22 @@ public enum RuntimeLockNowEnd {
             end = customEnd
         }
         guard let end,
-              RuntimeManualLockDecision.accepts(expectedEnd: end, startedAt: now.addingTimeInterval(staleMargin)) else {
+              end.timeIntervalSinceReferenceDate.isFinite,
+              now.timeIntervalSinceReferenceDate.isFinite,
+              end >= now.addingTimeInterval(staleMargin + RuntimeManualLockDecision.minimumDuration),
+              end <= now.addingTimeInterval(RuntimeManualLockDecision.maximumDuration) else {
             return nil
         }
         return end
+    }
+
+    /// Selectable custom ends: the lower bound is one minute later than the
+    /// plain 15-minute rule (see `staleMargin`); the upper bound is unchanged.
+    public static func pickerRange(at date: Date, calendar: Calendar = .current) -> ClosedRange<Date>? {
+        guard let lower = RuntimeManualLockDecision.customEndRange(at: pickerReference(at: date), calendar: calendar)?.lowerBound,
+              let upper = RuntimeManualLockDecision.customEndRange(at: date, calendar: calendar)?.upperBound,
+              lower <= upper else { return nil }
+        return lower...upper
     }
 
     /// Reference date for the custom-end picker range: one minute later than
@@ -51,12 +64,15 @@ public enum RuntimeLockNowEnd {
     /// A saved bedtime that begins during the lock and ends after it, so the
     /// phone stays locked past the shown end. A lock that ends exactly when
     /// bedtime starts does not overlap. Nil when bedtime is off or unset.
+    /// `isSuppressed` skips occurrences the runtime will not start (for example
+    /// bedtime that was started early and then released).
     public static func bedtimeOverlap(
         schedule: (start: RuntimeTime, end: RuntimeTime)?,
         enabled: Bool,
         lockEnd: Date,
         now: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        isSuppressed: (RuntimeOccurrenceResolver.Occurrence) -> Bool = { _ in false }
     ) -> BedtimeOverlap? {
         guard enabled, let schedule else { return nil }
         let overlaps = RuntimeManualLockDecision.overlappingScheduledOccurrences(
@@ -66,7 +82,9 @@ public enum RuntimeLockNowEnd {
             intervalEnd: lockEnd,
             calendar: calendar
         )
-        guard let occurrence = overlaps.first(where: { $0.start > now && $0.start < lockEnd && $0.end > lockEnd }) else {
+        guard let occurrence = overlaps.first(where: {
+            $0.start > now && $0.start < lockEnd && $0.end > lockEnd && !isSuppressed($0)
+        }) else {
             return nil
         }
         return BedtimeOverlap(bedtimeStart: occurrence.start, effectiveEnd: occurrence.end)

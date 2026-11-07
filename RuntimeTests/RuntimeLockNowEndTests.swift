@@ -39,8 +39,10 @@ final class RuntimeLockNowEndTests: XCTestCase {
 
     func testCustomEndUpperBoundAndMissingEnd() {
         let now = date(6, 20, 0)
-        let max = now.addingTimeInterval(7 * 24 * 3600 + 60)
-        XCTAssertNotNil(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: max, now: now))
+        // The 60 s margin applies to the minimum only: exactly seven days is
+        // the maximum, one second more is rejected.
+        let max = now.addingTimeInterval(7 * 24 * 3600)
+        XCTAssertEqual(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: max, now: now), max)
         XCTAssertNil(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: max.addingTimeInterval(1), now: now))
         XCTAssertNil(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: nil, now: now))
     }
@@ -51,6 +53,16 @@ final class RuntimeLockNowEndTests: XCTestCase {
         let lower = RuntimeManualLockDecision.customEndRange(at: RuntimeLockNowEnd.pickerReference(at: now), calendar: calendar)?.lowerBound
         XCTAssertEqual(lower, date(6, 20, 16))
         XCTAssertNotNil(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: lower, now: now))
+    }
+
+    func testPickerRangeShiftsOnlyTheLowerBound() throws {
+        let now = date(6, 20, 0)
+        let range = try XCTUnwrap(RuntimeLockNowEnd.pickerRange(at: now, calendar: calendar))
+        XCTAssertEqual(range.lowerBound, date(6, 20, 16))
+        let plain = try XCTUnwrap(RuntimeManualLockDecision.customEndRange(at: now, calendar: calendar))
+        XCTAssertEqual(range.upperBound, plain.upperBound)
+        XCTAssertNotNil(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: range.lowerBound, now: now))
+        XCTAssertNotNil(RuntimeLockNowEnd.displayedEnd(preset: nil, customEnd: range.upperBound, now: now))
     }
 
     // MARK: bedtime overlap
@@ -89,6 +101,31 @@ final class RuntimeLockNowEndTests: XCTestCase {
         XCTAssertNil(RuntimeLockNowEnd.bedtimeOverlap(
             schedule: bedtime, enabled: true, lockEnd: date(8, 12, 0), now: date(6, 23, 0), calendar: calendar
         ))
+    }
+
+    func testSuppressedOccurrenceDoesNotOverlap() {
+        // Bedtime was started early and then released, so the runtime will
+        // skip tonight's occurrence: no note for a Lock now that runs into it.
+        let now = date(6, 21, 30)
+        let tonight = date(6, 22, 0)
+        XCTAssertNil(RuntimeLockNowEnd.bedtimeOverlap(
+            schedule: bedtime, enabled: true, lockEnd: date(6, 22, 30), now: now, calendar: calendar,
+            isSuppressed: { $0.start == tonight }
+        ))
+        // An unrelated suppression does not hide the real overlap.
+        let lastNight = date(5, 22, 0)
+        XCTAssertNotNil(RuntimeLockNowEnd.bedtimeOverlap(
+            schedule: bedtime, enabled: true, lockEnd: date(6, 22, 30), now: now, calendar: calendar,
+            isSuppressed: { $0.start == lastNight }
+        ))
+    }
+
+    func testBedtimeStartingAfterMidnight() {
+        let late = (start: RuntimeTime(hour: 0, minute: 30), end: RuntimeTime(hour: 7, minute: 0))
+        let overlap = RuntimeLockNowEnd.bedtimeOverlap(
+            schedule: late, enabled: true, lockEnd: date(7, 0, 50), now: date(6, 23, 50), calendar: calendar
+        )
+        XCTAssertEqual(overlap, .init(bedtimeStart: date(7, 0, 30), effectiveEnd: date(7, 7, 0)))
     }
 
     func testNoOverlapNoteForBedtimeAlreadyInProgress() {

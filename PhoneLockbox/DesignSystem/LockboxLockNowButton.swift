@@ -76,7 +76,7 @@ struct LockboxLockNowButton: View {
         }
         .buttonStyle(LockboxCircleButtonStyle())
         .accessibilityLabel(spokenEnd.map { "Lock now until \($0)" } ?? "Lock now")
-        .accessibilityHint(isEnabled ? "Locks right away. \(note ?? "")" : "Needs Screen Time access or an available end")
+        .accessibilityHint(isEnabled ? ["Locks right away.", note].compactMap { $0 }.joined(separator: " ") : "Needs Screen Time access or an available end")
         .saturation(isEnabled ? 1 : 0.3)
         .opacity(isEnabled ? 1 : 0.5)
     }

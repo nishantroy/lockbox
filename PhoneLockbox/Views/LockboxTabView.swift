@@ -9,6 +9,9 @@ struct LockboxTabView: View {
     /// never be presented over (or stranded behind) the custom-end picker.
     @State private var sheet: LockboxSheet?
     @Namespace private var stateNamespace
+    /// Height of the Open screen's duration chips, so the Locked screen can
+    /// leave the same space and keep the circle at the same y position.
+    @State private var chipBlockHeight: CGFloat = 44
     @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
     @State private var presentedFocusAction: ScreenTimeCoordinator.PendingQuickAction?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -28,7 +31,7 @@ struct LockboxTabView: View {
                 if !coordinator.isConfigured {
                     SetupView(coordinator: coordinator)
                 } else if let display = coordinator.activeLockDisplay {
-                    ActiveLockView(coordinator: coordinator, display: display, now: context.date, namespace: stateNamespace)
+                    ActiveLockView(coordinator: coordinator, display: display, now: context.date, namespace: stateNamespace, chipBlockHeight: chipBlockHeight)
                         .transition(.opacity)
                 } else {
                     UnlockedLockboxView(
@@ -36,6 +39,7 @@ struct LockboxTabView: View {
                         companion: companion,
                         now: context.date,
                         namespace: stateNamespace,
+                        chipBlockHeight: $chipBlockHeight,
                         onPresentCustomEnd: { sheet = .customEnd($0) }
                     )
                     .transition(.opacity)
@@ -236,6 +240,7 @@ struct UnlockedLockboxView: View {
     let now: Date
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let namespace: Namespace.ID
+    @Binding var chipBlockHeight: CGFloat
     let onPresentCustomEnd: (CustomEndRequest) -> Void
     // Each appearance of the Open screen starts on 30 min (no persistence).
     @State private var choice: LockDurationChoice = .thirtyMinutes
@@ -272,9 +277,10 @@ struct UnlockedLockboxView: View {
             schedule: schedule,
             enabled: coordinator.recurringEnabledIntent,
             lockEnd: end,
-            now: now
+            now: now,
+            isSuppressed: { coordinator.isScheduledOccurrenceSuppressed($0) }
         ) else { return nil }
-        return "Bedtime starts \(RuntimeTimeFormat.string(overlap.bedtimeStart, now: now, style: .atPhrase)), so this stays locked until \(RuntimeTimeFormat.string(overlap.effectiveEnd, now: now))."
+        return "Bedtime starts \(RuntimeTimeFormat.string(overlap.bedtimeStart, now: now, style: .atPhrase)), so this stays locked until \(RuntimeTimeFormat.string(overlap.effectiveEnd, now: now, style: .phrase))."
     }
 
     private func lockNow(until end: Date) {
@@ -284,7 +290,7 @@ struct UnlockedLockboxView: View {
 
     private func openCustomEnd() {
         let reference = Date()
-        guard coordinator.manualLockCustomRange(at: RuntimeLockNowEnd.pickerReference(at: reference)) != nil else {
+        guard RuntimeLockNowEnd.pickerRange(at: reference) != nil else {
             customRangeUnavailable = true
             return
         }
@@ -350,7 +356,7 @@ struct UnlockedLockboxView: View {
             .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
             .disabled(end == nil)
             .accessibilityLabel(spokenEnd.map { "Lock now until \($0)" } ?? "Lock now")
-            .accessibilityHint(end == nil ? "Needs Screen Time access or an available end" : "Locks right away. \(note ?? "")")
+            .accessibilityHint(end == nil ? "Needs Screen Time access or an available end" : ["Locks right away.", note].compactMap { $0 }.joined(separator: " "))
         } else {
             LockboxLockNowButton(endLine: endLine, spokenEnd: spokenEnd, note: note) {
                 if let end { lockNow(until: end) }
@@ -404,6 +410,9 @@ struct UnlockedLockboxView: View {
             VStack(spacing: 16) {
                 if coordinator.isAuthorized {
                     durationChips
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(key: ChipBlockHeightKey.self, value: proxy.size.height)
+                        })
                 }
                 lockControl
                 if coordinator.isAuthorized {
@@ -413,6 +422,7 @@ struct UnlockedLockboxView: View {
                             .foregroundStyle(LockboxTheme.textSecondary)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: .infinity)
+                            .accessibilityHidden(true) // spoken in the Lock now hint
                     }
                     if customRangeUnavailable {
                         attentionLine("No finite end is available at the moment.")
@@ -440,6 +450,7 @@ struct UnlockedLockboxView: View {
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 }
             }
+            .onPreferenceChange(ChipBlockHeightKey.self) { chipBlockHeight = $0 }
 
             TonightCard(coordinator: coordinator, now: now)
 
@@ -490,6 +501,11 @@ struct UnlockedLockboxView: View {
             }
         }
     }
+}
+
+private struct ChipBlockHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 private enum LockDurationChoice {
@@ -588,6 +604,7 @@ struct ActiveLockView: View {
     let display: RuntimeActiveLockDisplay
     let now: Date
     let namespace: Namespace.ID
+    let chipBlockHeight: CGFloat
 
     private var semanticColor: Color { display.isBedtime ? LockboxTheme.rest : LockboxTheme.focus }
 
@@ -612,9 +629,9 @@ struct ActiveLockView: View {
 
             VStack(spacing: 16) {
                 // Keeps the circle where it sits on the Open screen, under
-                // the duration chips (one 44 pt row).
+                // the duration chips (height measured on the Open screen).
                 Color.clear
-                    .frame(height: 44)
+                    .frame(height: chipBlockHeight)
                     .accessibilityHidden(true)
                 if dynamicTypeSize >= .accessibility1 {
                     endText
