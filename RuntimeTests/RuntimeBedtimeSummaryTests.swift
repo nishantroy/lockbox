@@ -64,6 +64,22 @@ final class RuntimeBedtimeSummaryTests: XCTestCase {
         XCTAssertEqual(RuntimeBedtimeSummary.inProgressEnd(start: t(13), end: t(15), at: date(7, 14), calendar: calendar), date(7, 15))
     }
 
+    func testSuppressedOccurrenceIsNotInProgress() {
+        let now = date(7, 23)
+        let released = RuntimeBedtimeSummary.inProgressOccurrence(start: t(22), end: t(7), at: now, calendar: calendar) { _ in true }
+        XCTAssertNil(released)
+        let live = RuntimeBedtimeSummary.inProgressOccurrence(start: t(22), end: t(7), at: now, calendar: calendar) { _ in false }
+        XCTAssertEqual(live?.end, date(8, 7))
+        // Predicate sees the actual occurrence, as a suppressed-key lookup would.
+        let key = RuntimeSessionDecision.occurrenceKey(origin: .scheduled, start: date(7, 22), end: date(8, 7))
+        var document = RuntimeStoreDocument()
+        document.suppressedOccurrenceKeys.insert(key)
+        let viaDocument = RuntimeBedtimeSummary.inProgressOccurrence(start: t(22), end: t(7), at: now, calendar: calendar) {
+            RuntimeLifecycle.shouldSuppressScheduledOccurrence(document, start: $0.start, end: $0.end, calendar: calendar)
+        }
+        XCTAssertNil(viaDocument)
+    }
+
     func testEditBlocksAndChanges() {
         XCTAssertEqual(RuntimeBedtimeEditBlock.evaluate(isOn: true, wasOn: false, locked: true, savedWindowInProgress: false), .turnOnAfterLock)
         XCTAssertEqual(RuntimeBedtimeEditBlock.evaluate(isOn: false, wasOn: true, locked: false, savedWindowInProgress: true), .turnOffDuringWindow)

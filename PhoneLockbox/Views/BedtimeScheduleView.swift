@@ -51,10 +51,9 @@ struct BedtimeScheduleView: View {
 
     /// Whether the window that is currently applied is running right now.
     private var savedWindowInProgress: Bool {
-        RuntimeBedtimeSummary.inProgressEnd(
+        coordinator.lockingBedtimeEnd(
             start: LockboxClockTime.runtimeTime(from: coordinator.savedStartComponents),
-            end: LockboxClockTime.runtimeTime(from: coordinator.savedEndComponents),
-            at: Date()
+            end: LockboxClockTime.runtimeTime(from: coordinator.savedEndComponents)
         ) != nil
     }
 
@@ -71,16 +70,17 @@ struct BedtimeScheduleView: View {
     }
 
     /// Saving inside tonight's window: registration makes the system start
-    /// the already-open occurrence, so the phone locks straight away.
+    /// the already-open occurrence, so the phone locks straight away, unless
+    /// that occurrence was released early or is fenced off.
     private var inProgressNote: String? {
         guard isOn, hasChanges, !locked, validationMessage == nil else { return nil }
         let now = Date()
-        guard let windowEnd = RuntimeBedtimeSummary.inProgressEnd(start: startTime, end: endTime, at: now) else { return nil }
+        guard let windowEnd = coordinator.lockingBedtimeEnd(start: startTime, end: endTime, at: now) else { return nil }
         return "Bedtime is in progress, so saving locks now until \(RuntimeTimeFormat.string(windowEnd, now: now, style: .phrase))."
     }
 
     private var helpText: String {
-        if locked { return "Bedtime can be turned on or off after this lock ends. Time changes apply then." }
+        if locked { return "Bedtime can be turned on or off after this lock ends. Time changes apply then; if the new window has already started, it starts the next night." }
         if wasOn && !isOn { return "Future nights won’t lock until you turn it back on." }
         return "Repeats every night. Lock now and Start bedtime now don’t change it."
     }
@@ -123,16 +123,13 @@ struct BedtimeScheduleView: View {
                             .padding(.horizontal, 4)
                     }
                 }
-            } else if locked {
-                LockboxHelpText(RuntimeBedtimeEditBlock.turnOnAfterLock.message)
-                    .padding(.horizontal, 4)
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 if let pending = coordinator.pendingChangesSummary {
                     LockboxHelpText(pending)
                 }
-                if let editBlock, editBlock == .turnOffDuringWindow {
+                if let editBlock {
                     LockboxAttentionNote(editBlock.message)
                 }
                 if !coordinator.isAuthorized {

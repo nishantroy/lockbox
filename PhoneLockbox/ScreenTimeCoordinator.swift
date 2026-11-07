@@ -562,6 +562,21 @@ final class ScreenTimeCoordinator: ObservableObject {
         )
     }
 
+    /// The end of the bedtime occurrence running now that registering this
+    /// window would lock for, or nil when none is running or it was released
+    /// early / fenced off (so the system would skip it).
+    func lockingBedtimeEnd(start: RuntimeTime, end: RuntimeTime, at now: Date = Date()) -> Date? {
+        RuntimeBedtimeSummary.inProgressOccurrence(start: start, end: end, at: now) { occurrence in
+            RuntimeLifecycle.shouldSuppressScheduledCallback(
+                document,
+                at: now,
+                occurrenceStart: occurrence.start,
+                occurrenceEnd: occurrence.end,
+                calendar: Calendar.current
+            )
+        }?.end
+    }
+
     func manualLockCustomRange(at date: Date = Date()) -> ClosedRange<Date>? {
         RuntimeManualLockDecision.customEndRange(at: date, calendar: Calendar.current)
     }
@@ -1483,7 +1498,13 @@ final class ScreenTimeCoordinator: ObservableObject {
     /// mode and selection. The restrictions draft is not committed.
     @discardableResult
     func saveSchedule(start: DateComponents, end: DateComponents) -> RuntimeSaveOutcome {
-        commitConfiguration(start: start, end: end, source: .effective, register: true)
+        // A queued save can't turn bedtime on (activation only registers when
+        // the intent is already on), so refuse instead of claiming success.
+        if !recurringEnabledIntent && hasAnyCommittedSession(at: Date()) {
+            lastError = "Bedtime can be turned on after this lock ends."
+            return .failed
+        }
+        return commitConfiguration(start: start, end: end, source: .effective, register: true)
     }
 
     private func commitConfiguration(start: DateComponents, end: DateComponents, source: ConfigurationSource, register: Bool) -> RuntimeSaveOutcome {

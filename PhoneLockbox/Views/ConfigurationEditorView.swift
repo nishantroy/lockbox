@@ -10,6 +10,7 @@ struct ConfigurationEditorView: View {
     /// in `BedtimeScheduleView`. Initial setup always shows everything.
     var sections: Sections = .all
     @State private var showingPicker = false
+    @State private var bedtimeOffUntilSaved = false
     @State private var draftSelection = FamilyActivitySelection(includeEntireCategory: true)
 
     var body: some View {
@@ -100,7 +101,9 @@ struct ConfigurationEditorView: View {
                         } else {
                             // Times are edited elsewhere; keep the last saved ones,
                             // and never turn bedtime on from here.
-                            coordinator.saveRestrictions()
+                            let wasOn = coordinator.recurringEnabledIntent
+                            let outcome = coordinator.saveRestrictions()
+                            bedtimeOffUntilSaved = outcome == .failed && wasOn && !coordinator.recurringEnabledIntent
                         }
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
@@ -109,6 +112,16 @@ struct ConfigurationEditorView: View {
                         Text("Changes apply after this lock ends.")
                             .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
+                    }
+                    if let note = locksNowNote {
+                        Text(note)
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
+                    if bedtimeOffUntilSaved && !coordinator.recurringEnabledIntent {
+                        Label("Bedtime is off until this saves.", systemImage: "exclamationmark.circle")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                     if let pending = coordinator.pendingChangesSummary {
                         Text(pending)
@@ -174,6 +187,18 @@ struct ConfigurationEditorView: View {
             get: { date(from: coordinator.endComponents) },
             set: { coordinator.setDraftEnd($0) }
         )
+    }
+
+    /// Saving re-registers a running bedtime, which makes the system lock now.
+    private var locksNowNote: String? {
+        guard !showsTimes, coordinator.recurringEnabledIntent, !coordinator.hasActiveLock else { return nil }
+        let now = Date()
+        guard let windowEnd = coordinator.lockingBedtimeEnd(
+            start: LockboxClockTime.runtimeTime(from: coordinator.savedStartComponents),
+            end: LockboxClockTime.runtimeTime(from: coordinator.savedEndComponents),
+            at: now
+        ) else { return nil }
+        return "Bedtime is in progress, so saving locks now until \(RuntimeTimeFormat.string(windowEnd, now: now, style: .phrase))."
     }
 
     private var showsTimes: Bool { isInitialSetup || sections == .all }

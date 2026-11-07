@@ -16,12 +16,6 @@ struct LockboxRowGroup<Content: View>: View {
     }
 }
 
-struct LockboxRowDivider: View {
-    var body: some View {
-        Divider().overlay(LockboxTheme.border.opacity(0.6))
-    }
-}
-
 /// Label for a `NavigationLink` row: title, a trailing value, then a chevron.
 /// Wrap in `NavigationLink { ... } label: { ... }` with `.buttonStyle(.plain)`.
 struct LockboxNavigationRowLabel: View {

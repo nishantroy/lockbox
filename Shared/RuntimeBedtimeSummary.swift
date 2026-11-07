@@ -65,9 +65,23 @@ public enum RuntimeBedtimeSummary {
         at now: Date,
         calendar: Calendar = .current
     ) -> Date? {
+        inProgressOccurrence(start: start, end: end, at: now, calendar: calendar, isSuppressed: { _ in false })?.end
+    }
+
+    /// The occurrence running at `now` that the system would actually lock for:
+    /// nil when `now` is outside the window, or when `isSuppressed` says the
+    /// occurrence was released early or is fenced off.
+    public static func inProgressOccurrence(
+        start: RuntimeTime,
+        end: RuntimeTime,
+        at now: Date,
+        calendar: Calendar = .current,
+        isSuppressed: (RuntimeOccurrenceResolver.Occurrence) -> Bool
+    ) -> RuntimeOccurrenceResolver.Occurrence? {
         guard let occurrence = RuntimeOccurrenceResolver.currentOrNext(start: start, end: end, enabled: true, after: now, calendar: calendar),
-              occurrence.start <= now, now < occurrence.end else { return nil }
-        return occurrence.end
+              occurrence.start <= now, now < occurrence.end,
+              !isSuppressed(occurrence) else { return nil }
+        return occurrence
     }
 }
 
