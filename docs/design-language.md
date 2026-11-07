@@ -146,4 +146,8 @@ Each step goes through the UX review gate (AGENTS.md) on owner-approved screensh
   - No simulator run (owner rule).
   - Build 25 is installed on the owner's iPhone for hands-on review.
   - The UX review gate is still owed, on owner screenshots or an owner-approved suite run.
+- **D1b (Lock now hero circle, §6.2a):** merged 2026-11-06.
+  - Builder: Claude Sonnet 5.5. Review: Claude Opus 5.5, no P1 or P2. All five P3s handled: the not-determined access path, the disabled VoiceOver hint, a softer halo, icon sizing, and the centred header, which was left for the owner to judge.
+  - Validation: compile-only builds, and `swift test` 210/0. No simulator run.
+  - Build 26 is installed on the owner's iPhone.
 - **Next:** D2 People, then D3 Settings.
