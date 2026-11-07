@@ -110,10 +110,30 @@ struct PeopleView: View {
 #endif
     }
 
+    private var approvalEndsLocks: Bool {
+#if canImport(CompanionKit)
+        companion.friendApprovalCanEndLocksEnabled
+#else
+        false
+#endif
+    }
+
+    private var headerSubline: String? {
+#if canImport(CompanionKit)
+        guard companion.isAvailable else { return nil }
+        let listed = companion.trustedPeople
+        return PeopleDisplay.summary(activeCount: listed.filter(\.isFullyTrustedForEarlyEnd).count,
+                                     listedCount: listed.count,
+                                     settingUpCount: listed.filter { $0.consent == nil }.count,
+                                     helpingCount: companion.helpingPeople.filter { !$0.approverStoppedHelping }.count)
+#else
+        return nil
+#endif
+    }
+
     private var page: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: "People")
-            PrototypeLabelCard()
+            PeopleHeader(subline: headerSubline, approvalEndsLocks: approvalEndsLocks)
 
 #if canImport(CompanionKit)
             if companion.isAvailable {
@@ -167,7 +187,7 @@ struct PeopleView: View {
                     LockboxCard {
                         Label("Some people were added with an earlier version and can't be checked. Send them a new invite to add them again.",
                               systemImage: "arrow.triangle.2.circlepath")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("people.reinviteHint")
@@ -192,7 +212,7 @@ struct PeopleView: View {
                 if let notice = companion.inboxDataNotice {
                     LockboxCard {
                         Label(notice, systemImage: "info.circle")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityElement(children: .combine)
                     }
@@ -200,7 +220,7 @@ struct PeopleView: View {
                 if let notice = companion.integrityNotice {
                     LockboxCard {
                         Label(notice, systemImage: "info.circle")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("people.integrityNotice")
@@ -211,11 +231,11 @@ struct PeopleView: View {
                 LockboxCard {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.attention)
                         if companion.needsRepair {
                             Text("This device's companion key needs to be re-paired: create a new invite or accept one again.")
-                                .font(.footnote)
+                                .font(.subheadline)
                                 .foregroundStyle(LockboxTheme.secondary)
                         }
                     }
@@ -265,11 +285,11 @@ private struct NotificationsOffRowView: View {
     @Environment(\.openURL) private var openURL
 
     /// Bell glyph width plus the Label's icon/title spacing.
-    @ScaledMetric(relativeTo: .footnote) private var iconInset: CGFloat = 26
+    @ScaledMetric(relativeTo: .subheadline) private var iconInset: CGFloat = 26
 
     private var text: some View {
         Label(message, systemImage: "bell.slash")
-            .font(.footnote)
+            .font(.subheadline)
             .foregroundStyle(LockboxTheme.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("people.notificationsOff.text")
@@ -325,7 +345,7 @@ private struct NotificationInviteCard: View {
                     .accessibilityAddTraits(.isHeader)
                     .accessibilityIdentifier("people.notificationCard.title")
                 Text(NotificationCard.body(helpingNames: companion.helpingNames, trustedNames: companion.trustedNames))
-                    .font(.footnote)
+                    .font(.subheadline)
                     .foregroundStyle(LockboxTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 AdaptiveButtonRow {
@@ -344,18 +364,35 @@ private struct NotificationInviteCard: View {
 }
 #endif
 
-private struct PrototypeLabelCard: View {
+/// State-first header: the title, a one-line summary, and a quiet prototype label.
+private struct PeopleHeader: View {
+    let subline: String?
+    let approvalEndsLocks: Bool
+
+    private var prototypeLine: String {
+        approvalEndsLocks
+            ? "Ending a lock with an approval is a test feature."
+            : "Trusted people can see and answer your requests, but an approval doesn't end your lock in this build."
+    }
+
     var body: some View {
-        LockboxCard {
-            HStack(spacing: 10) {
-                Image(systemName: "network.slash")
-                    .foregroundStyle(LockboxTheme.attention)
-                Text("Prototype")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            LockboxPageHeader(title: "People")
+            if let subline {
+                Text(subline)
+                    .font(.subheadline)
+                    .foregroundStyle(LockboxTheme.textSecondary)
+                    .accessibilityIdentifier("people.summary")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                LockboxPrototypeBadge()
+                Text(prototypeLine)
+                    .font(.footnote)
+                    .foregroundStyle(LockboxTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Prototype feature")
+            .accessibilityLabel("Prototype. \(prototypeLine)")
         }
     }
 }
@@ -433,7 +470,7 @@ private struct InviteStoreResetCard: View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
                 Label(CompanionCoordinator.inviteStoreCorruptMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote)
+                    .font(.subheadline)
                     .foregroundStyle(LockboxTheme.attention)
                     .accessibilityIdentifier("people.inviteStoreCorruptMessage")
                 Button("Reset saved invites", role: .destructive) { showingConfirmation = true }
@@ -469,7 +506,7 @@ private struct DismissibleNoticeCard: View {
                         .font(.subheadline.weight(.semibold))
                         .accessibilityIdentifier(titleIdentifier)
                     Text(detail)
-                        .font(.footnote)
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
                 Spacer(minLength: 0)
@@ -501,7 +538,7 @@ private struct InlineNameField: View {
                 .accessibilityLabel("Your name")
                 .accessibilityIdentifier(identifier)
             Text(footnote)
-                .font(.footnote)
+                .font(.subheadline)
                 .foregroundStyle(LockboxTheme.secondary)
         }
     }
@@ -560,7 +597,7 @@ private struct IncomingInviteCard: View {
                             .accessibilityIdentifier("incomingInvite.title")
                     }
                     Text("Accepting lets you approve ending one of their locks early, only when they ask. You can stop at any time.")
-                        .font(.footnote)
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                     if needsName {
                         InlineNameField(text: $name,
@@ -617,17 +654,10 @@ private struct InviteSomeoneCard: View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
                 if isFirstRun {
-                    HStack(spacing: 12) {
-                        LockboxIconBadge(systemImage: "person.2.fill", color: LockboxTheme.accent)
-                        Text("Set up a trusted person")
-                            .font(.title3.weight(.semibold))
-                            .accessibilityAddTraits(.isHeader)
-                    }
-                    Text("Send a link to someone you trust. Once they accept, they can approve ending a lock early, only when you ask. Your apps and usage are never shared.")
+                    Text("Send a link to someone you trust, so they can approve ending a lock early when you ask. Your apps and usage are never shared.")
                         .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
-                } else {
-                    LockboxSectionLabel("Invite a trusted person", systemImage: "person.badge.plus")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if needsName && !companion.inviteStoreIsCorrupt && !hidesNameField {
@@ -679,20 +709,20 @@ private struct InviteSomeoneCard: View {
                 // The full link stays reachable under this identifier via the
                 // accessibility *value* so UI tests can read it exactly.
                 Text("The link works once, for one hour.")
-                    .font(.footnote)
+                    .font(.subheadline)
                     .foregroundStyle(LockboxTheme.secondary)
                     .accessibilityIdentifier("inviteSomeone.inviteLinkText")
                     .accessibilityValue(Self.linkAccessibilityValue(issued.shareLink))
                 if companion.notificationPermission == .notDetermined {
                     Text("Phone Lockbox will ask to notify you when they join.")
-                        .font(.footnote)
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                         .accessibilityIdentifier("inviteSomeone.notifyFootnote")
                 }
                 Button(isCreating ? "Creating…" : "Make a new link") { create() }
-                    .font(.footnote.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .buttonStyle(.plain)
-                    .foregroundStyle(LockboxTheme.accent)
+                    .foregroundStyle(LockboxTheme.rest)
                     .frame(minHeight: 44)
                     .disabled(isCreating)
                     .accessibilityHint("Creates another one-use invitation link")
@@ -700,7 +730,7 @@ private struct InviteSomeoneCard: View {
             } else if !companion.inviteStoreIsCorrupt {
                 if let issued, expired {
                     Label("This link expired. Create a new one.", systemImage: "clock.badge.exclamationmark")
-                        .font(.footnote)
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                         .accessibilityIdentifier("inviteSomeone.expiredNotice")
                         .accessibilityHint("The old link no longer works")
@@ -709,7 +739,7 @@ private struct InviteSomeoneCard: View {
                 Button {
                     create()
                 } label: {
-                    Label(isCreating ? "Creating…" : (expired ? "Create a new invite" : "Create invite link"),
+                    Label(isCreating ? "Creating…" : (expired ? "Create a new invite" : "Invite a trusted person"),
                           systemImage: "link.badge.plus")
                 }
                 .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
@@ -741,32 +771,35 @@ private struct AcceptInviteCard: View {
     }
 
     var body: some View {
-        LockboxCard {
-            if hasPeople {
-                // Compact once the user is set up: a single row.
+        // A compact secondary row, not a card.
+        LockboxGroupedRows {
+            VStack(alignment: .leading, spacing: 6) {
                 ViewThatFits(in: .horizontal) {
                     HStack {
-                        Label("Got an invite link?", systemImage: "hand.raised")
-                            .font(.subheadline.weight(.semibold))
+                        rowTitle
                         Spacer()
                         pasteButton
                     }
                     VStack(alignment: .leading, spacing: 10) {
-                        Label("Got an invite link?", systemImage: "hand.raised")
-                            .font(.subheadline.weight(.semibold))
+                        rowTitle
                         pasteButton
                     }
                 }
-            } else {
-                VStack(alignment: .leading, spacing: 13) {
-                    LockboxSectionLabel("Got an invite link?", systemImage: "hand.raised")
+                if !hasPeople {
                     Text("Tapping the link opens it here. If it didn't, paste it.")
-                        .font(.footnote)
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
-                    pasteButton
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .padding(16)
         }
+    }
+
+    private var rowTitle: some View {
+        Label("Got an invite link?", systemImage: "hand.raised")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(LockboxTheme.primary)
     }
 }
 
@@ -777,13 +810,16 @@ private struct WaitingForYouCard: View {
     let items: [CompanionInboxItem]
 
     var body: some View {
-        LockboxCard {
-            VStack(alignment: .leading, spacing: 13) {
-                LockboxSectionLabel("Waiting for you", systemImage: "bell.badge")
-                ForEach(items) { item in
-                    InboxRow(coordinator: coordinator, companion: companion, item: item)
-                    if item.id != items.last?.id { Divider().overlay(LockboxTheme.border) }
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(LockboxTheme.attention)
+                    .accessibilityHidden(true)
+                LockboxSectionLabel("Waiting for you")
+            }
+            LockboxGroupedList(items: items) { item in
+                InboxRow(coordinator: coordinator, companion: companion, item: item)
             }
         }
     }
@@ -796,27 +832,72 @@ private struct PeopleListCard: View {
         let owners = companion.trustedPeople
         let helping = companion.helpingPeople
         if !owners.isEmpty {
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    LockboxSectionLabel("Your trusted people", systemImage: "person.2.badge.gearshape")
-                    ForEach(owners) { person in
-                        OwnerPersonRow(companion: companion, person: person)
-                        if person.id != owners.last?.id { Divider().overlay(LockboxTheme.border) }
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                LockboxSectionLabel("Your trusted people")
+                LockboxGroupedList(items: owners) { person in
+                    OwnerPersonRow(companion: companion, person: person)
                 }
             }
         }
         if !helping.isEmpty {
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    LockboxSectionLabel("People you're helping", systemImage: "hands.sparkles")
-                    ForEach(helping) { person in
-                        ApproverPersonRow(companion: companion, person: person)
-                        if person.id != helping.last?.id { Divider().overlay(LockboxTheme.border) }
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                LockboxSectionLabel("People you're helping")
+                LockboxGroupedList(items: helping) { person in
+                    ApproverPersonRow(companion: companion, person: person)
                 }
             }
         }
+    }
+}
+
+/// Avatar, text and a trailing control. At accessibility text sizes the avatar
+/// is hidden and the control stacks under the text.
+private struct PersonRowLayout<Text_: View, Trailing: View>: View {
+    let name: String
+    let dimmed: Bool
+    @ViewBuilder let text: Text_
+    @ViewBuilder let trailing: Trailing
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) { text }
+                trailing
+            }
+        } else {
+            HStack(alignment: .center, spacing: 12) {
+                LockboxAvatar(name: name).opacity(dimmed ? 0.4 : 1)
+                VStack(alignment: .leading, spacing: 2) { text }
+                Spacer(minLength: 0)
+                trailing
+            }
+        }
+    }
+}
+
+/// The trailing "more" menu of a person row. Holds the one destructive action.
+private struct PersonActionsMenu: View {
+    let accessibilityLabel: String
+    let actionTitle: String
+    let identifier: String
+    let isBusy: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Menu {
+            Button(actionTitle, role: .destructive, action: action)
+                .accessibilityIdentifier(identifier)
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(LockboxTheme.textSecondary)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .disabled(isBusy)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityIdentifier("\(identifier).menu")
     }
 }
 
@@ -827,19 +908,35 @@ private struct OwnerPersonRow: View {
     @State private var showingRemoveConfirmation = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(person.nickname).font(.subheadline.weight(.semibold))
-                Spacer()
-                LockboxStatusBadge(title: statusTitle, color: person.isFullyTrustedForEarlyEnd ? LockboxTheme.focus : LockboxTheme.secondary)
+        PersonRowLayout(name: person.nickname, dimmed: !person.isFullyTrustedForEarlyEnd) {
+            Text(person.nickname).font(.body.weight(.semibold))
+            if let caption {
+                Text(caption)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(LockboxTheme.textSecondary)
             }
             Text(statusDetail)
-                .font(.footnote)
-                .foregroundStyle(LockboxTheme.secondary)
-            Button("Remove \(person.nickname)", role: .destructive) { showingRemoveConfirmation = true }
-                .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-                .disabled(isBusy)
-                .accessibilityIdentifier("person.removeButton")
+                .font(.subheadline)
+                .foregroundStyle(LockboxTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } trailing: {
+            if person.isFullyTrustedForEarlyEnd {
+                PersonActionsMenu(accessibilityLabel: "More actions for \(person.nickname)",
+                                  actionTitle: "Remove \(person.nickname)",
+                                  identifier: "person.removeButton",
+                                  isBusy: isBusy) { showingRemoveConfirmation = true }
+            } else {
+                // Not ready: the way out is visible, not tucked in a menu.
+                Button("Remove") { showingRemoveConfirmation = true }
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LockboxTheme.destructive)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .disabled(isBusy)
+                    .accessibilityLabel("Remove \(person.nickname)")
+                    .accessibilityIdentifier("person.removeButton")
+            }
         }
         .accessibilityElement(children: .contain)
         .confirmationDialog(
@@ -857,9 +954,9 @@ private struct OwnerPersonRow: View {
         }
     }
 
-    private var statusTitle: String {
-        if person.isFullyTrustedForEarlyEnd { return "Trusted" }
-        return person.consent == nil ? "Joined" : "Not active"
+    private var caption: String? {
+        if person.isFullyTrustedForEarlyEnd { return nil }
+        return person.consent == nil ? "Setting up" : "Not active"
     }
 
     private var statusDetail: String {
@@ -880,22 +977,29 @@ private struct ApproverPersonRow: View {
     @State private var showingStopConfirmation = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PersonRowLayout(name: person.nickname, dimmed: person.approverStoppedHelping) {
             if person.approverStoppedHelping {
                 Text("You stopped being a trusted person for \(person.nickname)")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.body.weight(.semibold))
                     .accessibilityIdentifier("helping.statusText")
+                Text("Not active")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(LockboxTheme.textSecondary)
             } else {
                 Text("You're a trusted person for \(person.nickname)")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.body.weight(.semibold))
                     .accessibilityIdentifier("helping.statusText")
                 Text("You can approve ending one exact lock early, only when \(person.nickname) asks. It never starts, extends or controls their lock.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
-                Button("Stop being a trusted person", role: .destructive) { showingStopConfirmation = true }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
-                    .disabled(isBusy)
-                    .accessibilityIdentifier("helping.stopButton")
+                    .font(.subheadline)
+                    .foregroundStyle(LockboxTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } trailing: {
+            if !person.approverStoppedHelping {
+                PersonActionsMenu(accessibilityLabel: "More actions for \(person.nickname)",
+                                  actionTitle: "Stop being a trusted person",
+                                  identifier: "helping.stopButton",
+                                  isBusy: isBusy) { showingStopConfirmation = true }
             }
         }
         .accessibilityElement(children: .contain)
@@ -924,21 +1028,21 @@ private struct AskToEndEarlyCard: View {
         let chosen = trusted.count == 1 ? trusted : trusted.filter { selected.contains($0.id) }
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
-                LockboxSectionLabel("Ask to end early", systemImage: "arrow.uturn.backward.circle")
+                LockboxSectionLabel("Ask to end early")
                 if let session = coordinator.companionActiveSessionIdentity {
                     if trusted.isEmpty && !companion.trustedPeople.isEmpty {
                         Text("None of your trusted people can be asked right now. Their status is shown below; you can send a new invite from there.")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityIdentifier("askToEnd.noneAvailableHint")
                     } else if trusted.isEmpty {
                         Text("No one is a trusted person yet. Invite someone above; once they tap Accept, you can ask them to end this lock early.")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                             .accessibilityIdentifier("askToEnd.noTrustedHint")
                     } else {
                         Text("Ask a trusted person to approve ending your current lock early. This only asks about the session that's active right now.")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                         ForEach(trusted) { person in
                             personRow(person, isSelected: chosen.contains { $0.id == person.id }, interactive: trusted.count > 1)
@@ -957,12 +1061,12 @@ private struct AskToEndEarlyCard: View {
                         Text(companion.friendApprovalCanEndLocksEnabled
                              ? "Once someone approves, you can end your lock from this screen with a confirmation. It never ends automatically."
                              : "This shows an approval once someone accepts. It never ends your lock by itself in this build.")
-                            .font(.footnote)
+                            .font(.subheadline)
                             .foregroundStyle(LockboxTheme.secondary)
                     }
                 } else {
                     Text("There's no single active lock right now, so there's nothing exact to ask about.")
-                        .font(.footnote)
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
             }
@@ -1017,31 +1121,28 @@ private struct InboxCard: View {
     }
 
     private var card: some View {
-        LockboxCard {
-            VStack(alignment: .leading, spacing: 13) {
-                HStack {
-                    LockboxSectionLabel("Inbox", systemImage: "tray")
-                    Spacer()
-                    if companion.isRefreshing {
-                        // Owner-review follow-up (P2-8): gives
-                        // `PhoneLockboxUITests` a concrete "a refresh is
-                        // actually in flight right now" marker to wait on,
-                        // rather than only inferring completion from a
-                        // fixed timeout after the pull gesture.
-                        ProgressView().controlSize(.small)
-                            .accessibilityIdentifier("inboxCard.refreshingIndicator")
-                    }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                LockboxSectionLabel("Inbox")
+                Spacer()
+                if companion.isRefreshing {
+                    // Owner-review follow-up (P2-8): gives
+                    // `PhoneLockboxUITests` a concrete "a refresh is
+                    // actually in flight right now" marker to wait on,
+                    // rather than only inferring completion from a
+                    // fixed timeout after the pull gesture.
+                    ProgressView().controlSize(.small)
+                        .accessibilityIdentifier("inboxCard.refreshingIndicator")
                 }
-                let history = companion.historyItems(coordinator: coordinator)
-                if history.isEmpty {
-                    Text("Nothing here yet. Requests appear here automatically.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
-                } else {
-                    ForEach(history) { item in
-                        InboxRow(coordinator: coordinator, companion: companion, item: item)
-                        if item.id != history.last?.id { Divider().overlay(LockboxTheme.border) }
-                    }
+            }
+            let history = companion.historyItems(coordinator: coordinator)
+            if history.isEmpty {
+                Text("Nothing here yet. Requests appear here automatically.")
+                    .font(.subheadline)
+                    .foregroundStyle(LockboxTheme.textSecondary)
+            } else {
+                LockboxGroupedList(items: history) { item in
+                    InboxRow(coordinator: coordinator, companion: companion, item: item)
                 }
             }
         }
@@ -1060,10 +1161,10 @@ private struct InboxRow: View {
                 Text(item.isMine ? "Your request" : title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                LockboxStatusBadge(title: CompanionCoordinator.statusBadgeTitle(item.status), color: color(for: item.status))
+                LockboxSentenceBadge(title: CompanionCoordinator.statusBadgeTitle(item.status), color: color(for: item.status))
             }
-            Text("Created \(item.request.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                .font(.footnote)
+            Text("Created \(RuntimeTimeFormat.string(item.request.createdAt, style: .atPhrase))")
+                .font(.subheadline)
                 .foregroundStyle(LockboxTheme.secondary)
             if !item.isMine, item.status == .pending, item.myDecision == .pending {
                 AdaptiveButtonRow {
@@ -1105,7 +1206,9 @@ private struct InboxRow: View {
     private func color(for status: CompanionKit.TrustedRequestStatus) -> Color {
         switch status {
         case .approved: return LockboxTheme.focus
-        case .pending: return LockboxTheme.accent
+        case .pending:
+            // Only a request waiting on this person's decision needs attention.
+            return !item.isMine && item.myDecision == .pending ? LockboxTheme.attention : LockboxTheme.textSecondary
         case .declined, .cancelled, .expired: return LockboxTheme.secondary
         }
     }
@@ -1144,7 +1247,7 @@ private struct FriendReleaseActionView: View {
         switch state {
         case .finishing:
             Label("Finishing…", systemImage: "hourglass")
-                .font(.footnote)
+                .font(.subheadline)
                 .foregroundStyle(LockboxTheme.secondary)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .accessibilityElement(children: .combine)
@@ -1158,6 +1261,10 @@ private struct FriendReleaseActionView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+            .padding(4)
+            .lockboxPrototypeOutline(cornerRadius: 16)
+            .overlay(alignment: .topTrailing) { LockboxPrototypeBadge().offset(y: -12).padding(.trailing, 8) }
+            .padding(.top, 12)
             .disabled(isBusy || companion.approvalsByRequestID[item.request.requestID] == nil)
             .accessibilityHint("Ends your current lock now, using \(approverName)'s approval, after a confirmation")
             .confirmationDialog(
@@ -1172,13 +1279,13 @@ private struct FriendReleaseActionView: View {
             }
         case .usedToEnd where companion.friendApprovalCanEndLocksEnabled:
             Label("Used to end lock", systemImage: "checkmark.circle.fill")
-                .font(.footnote)
+                .font(.subheadline)
                 .foregroundStyle(LockboxTheme.focus)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .accessibilityElement(children: .combine)
         case .alreadyEnded where companion.friendApprovalCanEndLocksEnabled:
             Label("Lock already ended", systemImage: "checkmark.circle")
-                .font(.footnote)
+                .font(.subheadline)
                 .foregroundStyle(LockboxTheme.secondary)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .accessibilityElement(children: .combine)
