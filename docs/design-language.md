@@ -122,3 +122,13 @@ Order of work: tokens first, then the Lockbox tab, then the active lock and reco
 6. **Settings:** native grouped `Form` styled with the tokens, with Developer last and visually distinct.
 
 Each step goes through the UX review gate (AGENTS.md) on owner-approved screenshots.
+
+## 7. Progress
+
+- **D1 (tokens, Lockbox tab, active lock, Lock now / Recovery copy):** merged 2026-11-06 (9a0b39c).
+  - Builder: Claude Sonnet 5.5. Reviews: Claude Opus 5.5, an initial review and two delta reviews, no P1.
+  - Validation: a compile-only simulator build, and `swift test` 210/0 (including the new `RuntimeTimeFormat`/`RuntimeActiveLockDisplay` tests).
+  - No simulator run (owner rule).
+  - Build 25 is installed on the owner's iPhone for hands-on review.
+  - The UX review gate is still owed, on owner screenshots or an owner-approved suite run.
+- **Next:** D2 People, then D3 Settings.
