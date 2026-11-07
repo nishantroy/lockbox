@@ -8,6 +8,7 @@ struct LockboxTabView: View {
     @State private var showingManualLock = false
     @State private var requestedManualPreset: QuickActionRoute.FocusPreset?
     @State private var presentedFocusAction: ScreenTimeCoordinator.PendingQuickAction?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(coordinator: ScreenTimeCoordinator, companion: CompanionCoordinator,
         navigationPath: Binding<[QuickActionRoute.Destination]> = .constant([])) {
@@ -20,14 +21,21 @@ struct LockboxTabView: View {
         // The minute tick re-evaluates which state is shown, so the screen
         // flips from active to open at the lock's end and across midnight.
         TimelineView(.everyMinute) { context in
-            if !coordinator.isConfigured {
-                SetupView(coordinator: coordinator)
-            } else if let display = coordinator.activeLockDisplay {
-                ActiveLockView(coordinator: coordinator, display: display, now: context.date)
-            } else {
-                UnlockedLockboxView(coordinator: coordinator, companion: companion, showingManualLock: $showingManualLock, now: context.date)
+            Group {
+                if !coordinator.isConfigured {
+                    SetupView(coordinator: coordinator)
+                } else if let display = coordinator.activeLockDisplay {
+                    ActiveLockView(coordinator: coordinator, display: display, now: context.date)
+                        .transition(.opacity)
+                } else {
+                    UnlockedLockboxView(coordinator: coordinator, companion: companion, now: context.date)
+                        .transition(.opacity)
+                }
             }
+            // Open and Locked share one composition; cross-fade between them.
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: coordinator.activeLockDisplay)
         }
+        .sensoryFeedback(.success, trigger: coordinator.hasActiveLock) { old, new in !old && new }
         .lockboxScreen()
         .sheet(isPresented: $showingManualLock, onDismiss: {
             // A focus identity remains busy until the sheet is actually gone.
@@ -179,9 +187,106 @@ private func currentOrNextBedtime(_ coordinator: ScreenTimeCoordinator, after da
 struct UnlockedLockboxView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
-    @Binding var showingManualLock: Bool
     let now: Date
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    // Each appearance of the Open screen starts on 30 min (no persistence).
+    @State private var choice: LockDurationChoice = .thirtyMinutes
+    @State private var customSelection = RuntimeCustomEndSelectionState()
+    @State private var showingCustomEnd = false
+    @State private var customSheetReference = Date()
+    @State private var customRangeUnavailable = false
+    @State private var attempted = false
+
+    /// The end shown on the circle. It is also the exact end submitted on tap,
+    /// so what the user saw is what is frozen.
+    private var displayedEnd: Date? {
+        switch choice {
+        case .thirtyMinutes: return coordinator.manualLockProposedEnd(after: 30 * 60, at: now)
+        case .oneHour: return coordinator.manualLockProposedEnd(after: 60 * 60, at: now)
+        case .custom:
+            guard let end = customSelection.customEnd,
+                  let range = coordinator.manualLockCustomRange(at: now),
+                  range.contains(end) else { return nil }
+            return end
+        }
+    }
+
+    private func lockNow(until end: Date) {
+        attempted = true
+        coordinator.startManualLock(expectedEnd: end)
+    }
+
+    private func presentCustomEnd() {
+        let reference = Date()
+        guard coordinator.manualLockCustomRange(at: reference) != nil else {
+            customRangeUnavailable = true
+            return
+        }
+        customRangeUnavailable = false
+        customSheetReference = reference
+        showingCustomEnd = true
+    }
+
+    private func select(_ newChoice: LockDurationChoice) {
+        customRangeUnavailable = false
+        choice = newChoice
+    }
+
+    private var customChipTitle: String {
+        if choice == .custom, let end = customSelection.customEnd {
+            return "Until \(RuntimeTimeFormat.string(end, now: now))"
+        }
+        return "Until…"
+    }
+
+    @ViewBuilder
+    private var durationChips: some View {
+        let chips = Group {
+            LockboxDurationChip(title: "30 min", isSelected: choice == .thirtyMinutes) { select(.thirtyMinutes) }
+            LockboxDurationChip(title: "1 hour", isSelected: choice == .oneHour) { select(.oneHour) }
+            LockboxDurationChip(title: customChipTitle, isSelected: choice == .custom) { presentCustomEnd() }
+        }
+        if dynamicTypeSize >= .accessibility1 {
+            VStack(spacing: 8) { chips }
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { chips }
+                VStack(spacing: 8) { chips }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var lockControl: some View {
+        let end = coordinator.isAuthorized ? displayedEnd : nil
+        let endLine = end.map { "until \(RuntimeTimeFormat.string($0, now: now))" }
+        let spokenEnd = end.map { RuntimeTimeFormat.string($0, now: now, style: .phrase) }
+        if dynamicTypeSize >= .accessibility1 {
+            Button {
+                if let end { lockNow(until: end) }
+            } label: {
+                Label(endLine.map { "Lock now · \($0)" } ?? "Lock now", systemImage: "lock.fill")
+            }
+            .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
+            .disabled(end == nil)
+            .accessibilityLabel(spokenEnd.map { "Lock now until \($0)" } ?? "Lock now")
+            .accessibilityHint(end == nil ? "Needs Screen Time access or an available end" : "Locks right away")
+        } else {
+            LockboxLockNowButton(endLine: endLine, spokenEnd: spokenEnd) {
+                if let end { lockNow(until: end) }
+            }
+            .disabled(end == nil)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private func attentionLine(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.circle")
+            .font(.subheadline)
+            .foregroundStyle(LockboxTheme.attention)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+    }
 
     private var windDownStatusMessage: String {
         if let error = coordinator.ambientError { return error }
@@ -216,26 +321,19 @@ struct UnlockedLockboxView: View {
             .zIndex(1) // keep the halo behind the header text
 
             VStack(spacing: 16) {
-                if dynamicTypeSize >= .accessibility1 {
-                    Button {
-                        showingManualLock = true
-                    } label: {
-                        Label("Lock now", systemImage: "lock.fill")
-                    }
-                    .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
-                    .disabled(!coordinator.isAuthorized)
-                    .accessibilityHint(coordinator.isAuthorized ? "Choose a finite focus lock duration" : "Needs Screen Time access")
-                } else {
-                    LockboxLockNowButton { showingManualLock = true }
-                        .disabled(!coordinator.isAuthorized)
-                        .padding(.vertical, 12)
-                }
                 if coordinator.isAuthorized {
-                    Text("30 minutes, 1 hour, or until a time you choose.")
-                        .font(.subheadline)
-                        .foregroundStyle(LockboxTheme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
+                    durationChips
+                }
+                lockControl
+                if coordinator.isAuthorized {
+                    if customRangeUnavailable {
+                        attentionLine("No finite end is available at the moment.")
+                    } else if displayedEnd == nil {
+                        attentionLine("This end is no longer available. Pick another.")
+                    }
+                    if attempted, let error = coordinator.lastError {
+                        attentionLine(error)
+                    }
                 } else if coordinator.authorizationStatus == .denied {
                     Text("Screen Time access is off. Turn it on in iOS Settings to start a lock.")
                         .font(.subheadline)
@@ -299,8 +397,51 @@ struct UnlockedLockboxView: View {
                 .background(LockboxTheme.surface, in: RoundedRectangle(cornerRadius: LockboxTheme.cornerRadius, style: .continuous))
             }
 
-            OperationalWarning(coordinator: coordinator)
+            if !attempted {
+                OperationalWarning(coordinator: coordinator)
+            }
         }
+        .sheet(isPresented: $showingCustomEnd) {
+            CustomEndSheet(
+                coordinator: coordinator,
+                referenceDate: customSheetReference,
+                currentEnd: customSelection.customEnd
+            ) { end in
+                customSelection = RuntimeCustomEndSelectionState.transition(
+                    customSelection, event: .userSelected(end), at: now, calendar: Calendar.current
+                )
+                select(.custom)
+            }
+        }
+    }
+}
+
+private enum LockDurationChoice {
+    case thirtyMinutes, oneHour, custom
+}
+
+/// One option in a single-selection row: filled and bordered in the rest
+/// colour when selected, surface and hairline otherwise.
+private struct LockboxDurationChip: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(isSelected ? LockboxTheme.primary : LockboxTheme.textSecondary)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 44)
+                .background(isSelected ? LockboxTheme.rest.opacity(0.2) : LockboxTheme.surface, in: Capsule())
+                .overlay(Capsule().strokeBorder(isSelected ? LockboxTheme.rest : LockboxTheme.border.opacity(0.6), lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -371,32 +512,44 @@ struct ActiveLockView: View {
 
     private var semanticColor: Color { display.isBedtime ? LockboxTheme.rest : LockboxTheme.focus }
 
-    private var heroTime: String {
-        guard let end = coordinator.activeLockEnd else { return "Opening time unavailable" }
-        return "Locked until \(RuntimeTimeFormat.string(end, now: now, style: .phrase))"
-    }
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         LockboxScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Label(display.label, systemImage: display.isBedtime ? "moon.fill" : "scope")
-                    .font(.subheadline.weight(.semibold))
-                Text(heroTime)
-                    .lockboxTimeHero()
-                    .multilineTextAlignment(.leading)
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.fill").accessibilityHidden(true)
-                    Text(display.originCopy)
-                        .font(.subheadline)
-                }
-                .opacity(0.85)
+            // Same header, position and size as the Open screen.
+            VStack(alignment: .center, spacing: 4) {
+                LockboxPageHeader(title: "Locked")
+                Text(display.originCopy)
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(LockboxTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .foregroundStyle(LockboxTheme.onAccent)
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(semanticColor, in: RoundedRectangle(cornerRadius: LockboxTheme.cornerRadius, style: .continuous))
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(activeSummary)
+            .zIndex(1) // keep the halo behind the header text
+
+            VStack(spacing: 16) {
+                // Takes the place of the Open screen's duration chips.
+                Label(display.label, systemImage: display.isBedtime ? "moon.fill" : "scope")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(semanticColor)
+                    .frame(minHeight: 44)
+                    .accessibilityHidden(true) // covered by the circle's summary
+                if dynamicTypeSize >= .accessibility1 {
+                    endText
+                        .frame(maxWidth: .infinity)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(activeSummary)
+                } else {
+                    LockboxStateCircle(color: semanticColor) { diameter in
+                        endCircleContent(diameter: diameter)
+                    }
+                    .padding(.vertical, 12)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(activeSummary)
+                }
+            }
 
             if let pending = coordinator.pendingChangesSummary {
                 LockboxCard {
@@ -444,8 +597,57 @@ struct ActiveLockView: View {
         }
     }
 
+    @ViewBuilder
+    private func endCircleContent(diameter: CGFloat) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: diameter * 0.16, weight: .semibold))
+                .padding(.bottom, 4)
+                .accessibilityHidden(true)
+            if let end = coordinator.activeLockEnd {
+                let parts = RuntimeTimeFormat.parts(end, now: now)
+                Text("until").font(.subheadline)
+                if let day = parts.day {
+                    Text(day)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                Text(parts.time)
+                    .lockboxTimeHero()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            } else {
+                Text("Opening time unavailable")
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    /// Accessibility-size fallback for the circle: the same content as plain text.
+    @ViewBuilder
+    private var endText: some View {
+        if let end = coordinator.activeLockEnd {
+            VStack(spacing: 4) {
+                Text("until").font(.subheadline).foregroundStyle(LockboxTheme.textSecondary)
+                Text(RuntimeTimeFormat.string(end, now: now))
+                    .lockboxTimeHero()
+                    .foregroundStyle(semanticColor)
+                    .multilineTextAlignment(.center)
+            }
+        } else {
+            Text("Opening time unavailable")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(semanticColor)
+        }
+    }
+
     private var activeSummary: String {
-        "\(display.label). \(heroTime). \(display.originCopy)."
+        if let end = coordinator.activeLockEnd {
+            return "Locked until \(RuntimeTimeFormat.string(end, now: now, style: .phrase)), \(display.spokenOriginCopy)"
+        }
+        return "Locked, opening time unavailable, \(display.spokenOriginCopy)"
     }
 }
 
