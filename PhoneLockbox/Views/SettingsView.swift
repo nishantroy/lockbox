@@ -7,41 +7,47 @@ struct SettingsView: View {
     @State private var showingEmergencyReset = false
     @State private var showingDesignGallery = false
 
+    private var bedtimeValue: String {
+        guard coordinator.recurringEnabledIntent else { return "Off" }
+        return RuntimeBedtimeSummary.window(
+            start: LockboxClockTime.runtimeTime(from: coordinator.savedStartComponents),
+            end: LockboxClockTime.runtimeTime(from: coordinator.savedEndComponents)
+        )
+    }
+
+    private var blockedValue: String {
+        let count = coordinator.savedSelectedItemCount
+        return "\(coordinator.savedModeTitle) · \(count) \(count == 1 ? "item" : "items")"
+    }
+
     var body: some View {
         LockboxScrollView {
             LockboxPageHeader(title: "Settings")
 
+            if coordinator.isConfigured {
+                LockboxRowGroup {
+                    NavigationLink {
+                        BedtimeScheduleView(coordinator: coordinator)
+                    } label: {
+                        LockboxNavigationRowLabel(title: "Bedtime", value: bedtimeValue)
+                    }
+                    .buttonStyle(.plain)
+                    LockboxRowDivider()
+                    NavigationLink {
+                        ConfigurationEditorView(coordinator: coordinator, isInitialSetup: false, sections: .restrictions)
+                    } label: {
+                        LockboxNavigationRowLabel(title: "What gets blocked", value: blockedValue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                Label("Finish setup from the Lockbox tab", systemImage: "info.circle")
+                    .foregroundStyle(LockboxTheme.secondary)
+            }
+
 #if canImport(CompanionKit)
             SettingsNameCard(companion: companion)
 #endif
-
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 13) {
-                    LockboxSectionLabel("Bedtime schedule", systemImage: "calendar.badge.clock")
-                    if coordinator.isConfigured {
-                        NavigationLink {
-                            ConfigurationEditorView(coordinator: coordinator, isInitialSetup: false)
-                        } label: {
-                            HStack {
-                                Label("Schedule and restrictions", systemImage: "slider.horizontal.3")
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(LockboxTheme.secondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        Text("Edits made during a committed lock are queued and cannot weaken that lock.")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
-                    } else {
-                        Label("Finish setup from the Lockbox tab", systemImage: "info.circle")
-                            .foregroundStyle(LockboxTheme.secondary)
-                    }
-                }
-            }
 
             LockboxCard {
                 VStack(alignment: .leading, spacing: 12) {

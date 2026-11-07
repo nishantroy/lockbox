@@ -520,6 +520,8 @@ final class ScreenTimeCoordinator: ObservableObject {
         return document.recoveryCommitment?.eligibleAt
     }
 
+    var hasPendingConfiguration: Bool { document.pendingConfiguration != nil }
+
     var pendingChangesSummary: String? {
         guard let pending = document.pendingConfiguration else { return nil }
         return "Pending after the current lock: \(pending.mode == .blockSelected ? "block selected" : "allow only selected"), \(pending.start.displayValue)–\(pending.end.displayValue)"
