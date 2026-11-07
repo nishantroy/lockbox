@@ -1,0 +1,124 @@
+# Phone Lockbox design language v1 — "Quiet Night"
+
+Status: **proposed 2026-11-06, awaiting owner review.** App icon v1 is implemented from it (`design/icon/render-app-icon.swift`). The UX redesign follows only after owner sign-off. It builds on the owner-selected Midnight Original direction ([design polish](design-polish.md)) and keeps the approved structure ([layout v1](layout-v1-contract.md), [interaction design](interaction-design.md)).
+
+Evidence base: the SwiftUI source (`DesignSystem/LockboxDesignSystem.swift`, `LockboxTabView`, `PeopleView`, `SettingsView`, `RecoveryView`, `ManualLockSheet`) and the previous icon. No new screenshots were taken (owner rule 2026-11-06: no simulator runs without the owner saying so). Before the redesign starts, re-check against the owner's screenshots or an owner-approved UI run.
+
+## 1. Evaluation of the current design
+
+### What works (keep)
+
+- **One small, coherent token set** (`LockboxTheme`): a deep canvas, navy surfaces, lavender, and blue. Almost all screens use it.
+- **Calm, owner-approved Midnight palette.** It suits bedtime, and the contrast is good (secondary text `#ADB3D1` on surface `#131830` is about 8:1).
+- **Rest and focus have their own colours** (lavender for bedtime, blue for focus). That's a good idea; it just isn't used consistently (see below).
+- **Accessibility basics are in place:** system text styles (so Dynamic Type works), 44 pt minimum controls, header traits, accessibility hints, and decorative icons hidden from VoiceOver.
+- **Honest, non-shaming copy rules:** no countdowns, no streaks, "ended early" instead of "failed".
+- **One custom button style** with clear primary, secondary and destructive emphasis, and press feedback.
+
+### What doesn't (fix)
+
+1. **The headline is a tagline, not the current state.** Setup and the unlocked home both open with "A calmer phone, when you need it". The most important fact (am I locked, and until when?) sits lower on the page. The active lock uses mood headlines ("Keep a clear lane") instead of "Locked until 7:00".
+2. **Lavender means everything.** It is the accent, the rest state, every section label, the tint, and the primary button, so it no longer signals anything. Blue focus only appears inside an active focus lock.
+3. **Everything is a card with an uppercase lavender label.** Every block has the same visual weight, so hierarchy comes only from order. Settings-like content (rhythm, wind-down, people lists) would read better as plain grouped rows.
+4. **Too much small explanatory text.** About 90 `.footnote` uses. Many are policy-precise but legalistic ("The end is finite and is checked again when you confirm…", "Unsaved settings edits are not included. The saved policy is frozen…"). They add reading during the moments when the user wants fewest steps.
+5. **Warning colour is ad hoc.** System `.orange` and `.red` are used inline, not as tokens. There is no calm "needs attention" colour, so warnings either shout (red) or drift (orange).
+6. **Times are verbose and inconsistent.** "Nov 6, 2026 at 10:00 PM" appears in the Tonight card, and the bedtime confirmation spells out a full date and time to the second. A time alone, or "Tomorrow 7:00 AM", reads faster.
+7. **The previous icon was a thin outlined phone with a moon.** It read as a "night mode / sleep tracker" app, said nothing about locking, its thin strokes and star dots disappear at home-screen size, and it left large empty margins.
+8. **Light/dark is unresolved.** Production forces dark mode (`preferredColorScheme(.dark)`), which the owner chose. The layout contract says not to make the product purely nocturnal, and Focus time is a daytime feature. This needs an owner decision (see §4).
+9. **Prototype and developer surfaces leak into ordinary screens.** Examples are the People "Prototype" card and developer toggles. That's fine for testing, but the redesign needs to define how they look so they can't be mistaken for real features.
+
+## 2. Principles
+
+1. **State first.** Every screen opens with what's true now, in plain words, with the time as the hero: "Open · Bedtime at 10:00 PM" or "Locked until 7:00 AM".
+2. **One colour, one job.** Colour carries state, not decoration: lavender for rest, blue for focus, amber for "needs attention", red only for destructive actions. Section labels are neutral.
+3. **Fewer containers.** Cards are for things (tonight's lock, the active session, a person). Lists of settings or values use grouped rows.
+4. **One sentence, then details on request.** At most one line of help under a control. Precise policy text moves behind an info disclosure or onto the confirmation screen where it actually matters.
+5. **Calm, not cute.** No countdowns, streaks, confetti or shame. Motion is minimal and respects Reduce Motion.
+6. **Honest by construction.** Never use colour alone to show state, never hide a safety route, and always label prototypes.
+
+## 3. Foundations (tokens)
+
+### Colour — Midnight (current production, refined)
+
+| Token | Hex | Use |
+|---|---|---|
+| `canvas` | `#090C1C` | Page background |
+| `surface` | `#131830` | Cards, grouped rows |
+| `surfaceRaised` | `#1B203D` | Sheets, pressed rows, the active-session hero |
+| `hairline` | `#404773` at 60% | Card borders, dividers |
+| `textPrimary` | `#F2F0FF` | Titles, values |
+| `textSecondary` | `#ADB3D1` | Help text, labels (was lavender for section labels; change to this) |
+| `rest` | `#C2B0FA` | Bedtime state, primary action while unlocked |
+| `focus` | `#75C2FA` | Focus-lock state; primary action inside focus |
+| `attention` | `#F5B661` (new) | Needs a decision, or something isn't working (replaces inline `.orange`) |
+| `destructive` | system red | Destructive actions only |
+| `onAccent` | `#140E29` | Text on rest/focus fills |
+
+- **State tint rule:** the active screen's hero and primary button take the session's colour (rest or focus). When unlocked, primary is `rest`.
+- **Contrast:** check every text pair at ≥ 4.5:1, and ≥ 3:1 for large numerals and icons.
+
+### Type — SF Pro (system), with SF Pro Rounded for time
+
+- **Time hero:** `.system(.largeTitle, design: .rounded).weight(.semibold)` with `monospacedDigit()`, e.g. "7:00 AM". Rounded softens the numbers; monospaced digits keep times from jumping as they change.
+- **Page title:** `.title2.weight(.semibold)`. It names the state, not a slogan.
+- **Body:** `.body`. **Help:** `.subheadline` in `textSecondary`. Reserve `.footnote` for legal or prototype notes.
+- **Section labels:** `.footnote.weight(.semibold)` in `textSecondary`, sentence case. Drop the tracked uppercase lavender.
+- No custom fonts: system fonts get Dynamic Type, accessibility and localisation for free.
+
+### Shape, space, elevation
+
+- Continuous corners: 20 for cards and sheets, 12 for controls, capsule for badges.
+- **Spacing scale:** 4, 8, 12, 16, 20, 24, 32. Page gutter 20; space between cards 16; padding inside cards 16–18.
+- **Elevation:** no shadows in-app. Depth comes from `surface` and `surfaceRaised` plus a hairline.
+- **Motif:** the padlock with a crescent keyhole (the icon). Use it sparingly: the setup hero, the active-lock hero, and the shield.
+
+### Iconography
+
+- SF Symbols only, `.semibold`, at text size. Fixed symbol per concept:
+  - `moon.fill` → bedtime;
+  - `scope` → focus (the current `sparkles` reads as magic or AI);
+  - `lock.fill` → locked;
+  - `person.2` → people;
+  - `exclamationmark.circle` → attention.
+- Icons go with text; they never carry meaning on their own.
+
+### Motion
+
+- State changes cross-fade in 0.2–0.25 s with ease-out. Press feedback stays as is.
+- No looping or ambient animation. Under Reduce Motion, changes are instant.
+
+## 4. Open owner decisions
+
+1. **Light mode:** keep always-dark (the current owner choice), or add a Midnight-derived light "Day" palette used for Focus/daytime and when the system is in light mode? The recommendation is **always dark for now**, re-checked once Focus use grows.
+2. **Accent for unlocked primary actions:** `rest` lavender (recommended, the brand colour), or neutral white?
+3. **Icon:** approve v1 (the crescent-keyhole padlock), or iterate.
+
+## 5. App icon v1
+
+- **Concept:** a padlock whose keyhole is a crescent moon. It says "lock" and "night" at a glance, and it stays legible at 60 px because it uses bold filled shapes with no strokes or star dots.
+- **Construction:**
+  - background is a vertical midnight gradient (`#1D2150` to `#0B0E22`) with a soft lavender glow behind the lock;
+  - the lock is a lavender gradient (`#D9CCFF` to `#A996F2`);
+  - the keyhole is navy (`#12153A`);
+  - a single 1024 px image with no transparency.
+- **Source:** `design/icon/render-app-icon.swift` (CoreGraphics, reproducible). The installed asset is `PhoneLockbox/Assets.xcassets/AppIcon.appiconset/AppIcon.png`.
+- **Rejected concepts:**
+  - the crescent as the shackle read as a handbag;
+  - a lidded box with a clasp read as a camera.
+
+## 6. UX redesign — proposed scope (after sign-off)
+
+Order of work: tokens first, then the Lockbox tab, then the active lock and recovery, then People, then Settings. Behaviour and structure stay as approved; this is a visual and copy pass.
+
+1. **Tokens:** add `attention`, make section labels neutral, add a time-hero style, and replace the inline `.orange` and `.red`.
+2. **Lockbox, unlocked:**
+   - Hero: "Open" plus "Bedtime at 10:00 PM" (or "No bedtime set").
+   - Primary: Lock now.
+   - Tonight: a compact row with Start bedtime now.
+   - Rhythm and wind-down: grouped rows instead of a card.
+3. **Active lock:** a full-width hero card in the session's colour with "Locked until 7:00 AM" as the time hero. Below it sit the origin ("Bedtime" or "Focus"), then recovery and "Ask a trusted person". Mood headlines are removed.
+4. **Copy pass:** one sentence per control. Policy detail moves to confirmation screens or info disclosures. Times use "10:00 PM" or "Tomorrow 7:00 AM".
+5. **People:** a person-centred list with avatar initials in rest colour. Invite becomes one primary action. Prototype items get a dashed outline and a "Prototype" label.
+6. **Settings:** native grouped `Form` styled with the tokens, with Developer last and visually distinct.
+
+Each step goes through the UX review gate (AGENTS.md) on owner-approved screenshots.
