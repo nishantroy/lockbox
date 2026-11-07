@@ -212,7 +212,7 @@ struct PeopleView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.footnote)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(LockboxTheme.attention)
                         if companion.needsRepair {
                             Text("This device's companion key needs to be re-paired: create a new invite or accept one again.")
                                 .font(.footnote)
@@ -349,7 +349,7 @@ private struct PrototypeLabelCard: View {
         LockboxCard {
             HStack(spacing: 10) {
                 Image(systemName: "network.slash")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(LockboxTheme.attention)
                 Text("Prototype")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
@@ -434,7 +434,7 @@ private struct InviteStoreResetCard: View {
             VStack(alignment: .leading, spacing: 13) {
                 Label(CompanionCoordinator.inviteStoreCorruptMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(LockboxTheme.attention)
                     .accessibilityIdentifier("people.inviteStoreCorruptMessage")
                 Button("Reset saved invites", role: .destructive) { showingConfirmation = true }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))

@@ -17,13 +17,15 @@ struct LockboxTabView: View {
     }
 
     var body: some View {
-        Group {
+        // The minute tick re-evaluates which state is shown, so the screen
+        // flips from active to open at the lock's end and across midnight.
+        TimelineView(.everyMinute) { context in
             if !coordinator.isConfigured {
                 SetupView(coordinator: coordinator)
-            } else if coordinator.hasActiveLock {
-                ActiveLockView(coordinator: coordinator)
+            } else if let display = coordinator.activeLockDisplay {
+                ActiveLockView(coordinator: coordinator, display: display, now: context.date)
             } else {
-                UnlockedLockboxView(coordinator: coordinator, companion: companion, showingManualLock: $showingManualLock)
+                UnlockedLockboxView(coordinator: coordinator, companion: companion, showingManualLock: $showingManualLock, now: context.date)
             }
         }
         .lockboxScreen()
@@ -96,24 +98,11 @@ private struct SetupView: View {
 
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: "A calmer phone, when you need it")
-
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 12) {
-                        LockboxIconBadge(systemImage: "moon.stars.fill", color: LockboxTheme.rest)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("A calmer phone at night")
-                                .font(.title3.weight(.semibold))
-                            Text("Keep essentials available while making app-hopping inconvenient during bedtime.")
-                                .font(.subheadline)
-                                .foregroundStyle(LockboxTheme.secondary)
-                        }
-                    }
-                    Text("You can use People and Settings without granting Screen Time access. Access is needed only to save and enforce your own rules.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
-                }
+            VStack(alignment: .leading, spacing: 8) {
+                LockboxPageHeader(title: "Get started")
+                Text("Choose when your phone locks and which apps it affects.")
+                    .font(.subheadline)
+                    .foregroundStyle(LockboxTheme.textSecondary)
             }
 
             LockboxCard {
@@ -123,7 +112,7 @@ private struct SetupView: View {
                         Spacer()
                         LockboxStatusBadge(
                             title: AuthorizationStatusLabel.value(for: coordinator),
-                            color: coordinator.isAuthorized ? LockboxTheme.focus : LockboxTheme.secondary
+                            color: coordinator.isAuthorized ? LockboxTheme.rest : LockboxTheme.textSecondary
                         )
                     }
                     if coordinator.isAuthorized {
@@ -143,9 +132,9 @@ private struct SetupView: View {
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                         .accessibilityHint("Opens Apple's Screen Time authorization prompt")
-                        Text("Bedtime settings and app selection become available after access is granted.")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
+                        Text("Access is used only to apply your own rules. People and Settings work without it.")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.textSecondary)
                     }
                 }
             }
@@ -153,7 +142,7 @@ private struct SetupView: View {
             if let error = coordinator.lastError {
                 LockboxCard {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(LockboxTheme.destructive)
+                        .foregroundStyle(LockboxTheme.attention)
                         .font(.subheadline)
                 }
             }
@@ -161,10 +150,37 @@ private struct SetupView: View {
     }
 }
 
+/// The next saved bedtime occurrence that has not started yet. While a
+/// window is in progress this resolves the one after it, so "Open" never
+/// shows a past start.
+@MainActor
+private func nextBedtimeOccurrence(_ coordinator: ScreenTimeCoordinator, now: Date) -> RuntimeOccurrenceResolver.Occurrence? {
+    guard let occurrence = currentOrNextBedtime(coordinator, after: now) else { return nil }
+    return occurrence.start > now ? occurrence : currentOrNextBedtime(coordinator, after: occurrence.end)
+}
+
+/// True when a saved bedtime window is in progress at `now`.
+@MainActor
+private func isBedtimeWindowInProgress(_ coordinator: ScreenTimeCoordinator, now: Date) -> Bool {
+    guard let occurrence = currentOrNextBedtime(coordinator, after: now) else { return false }
+    return occurrence.start <= now
+}
+
+@MainActor
+private func currentOrNextBedtime(_ coordinator: ScreenTimeCoordinator, after date: Date) -> RuntimeOccurrenceResolver.Occurrence? {
+    RuntimeOccurrenceResolver.currentOrNext(
+        start: RuntimeTime(hour: coordinator.savedStartComponents.hour ?? 22, minute: coordinator.savedStartComponents.minute ?? 0),
+        end: RuntimeTime(hour: coordinator.savedEndComponents.hour ?? 7, minute: coordinator.savedEndComponents.minute ?? 0),
+        enabled: true,
+        after: date
+    )
+}
+
 struct UnlockedLockboxView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
     @Binding var showingManualLock: Bool
+    let now: Date
 
     private var windDownStatusMessage: String {
         if let error = coordinator.ambientError { return error }
@@ -172,16 +188,30 @@ struct UnlockedLockboxView: View {
         guard coordinator.windDownAuthorizationStatus != "Not requested" else {
             return "Allow notifications in Settings to turn this on."
         }
-        return "You’ll be reminded \(coordinator.windDownLeadMinutes) minutes before bedtime."
+        guard coordinator.windDownAuthorizationStatus != "Denied" else {
+            return "Notifications are off. Allow them in Settings."
+        }
+        return "\(coordinator.windDownLeadMinutes) minutes before bedtime"
+    }
+
+    private func bedtimeLine(now: Date) -> String {
+        guard coordinator.recurringEnabledIntent else { return "Bedtime is off" }
+        guard let occurrence = nextBedtimeOccurrence(coordinator, now: now) else { return "No bedtime set" }
+        return "Bedtime \(RuntimeTimeFormat.string(occurrence.start, now: now, style: .atPhrase))"
     }
 
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: "A calmer phone, when you need it")
+            VStack(alignment: .leading, spacing: 4) {
+                LockboxPageHeader(title: "Open")
+                Text(bedtimeLine(now: now))
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(LockboxTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
 
-            VStack(alignment: .leading, spacing: 10) {
-                LockboxSectionLabel("Focus when you need it", systemImage: "sparkles")
-                    .padding(.horizontal, 4)
+            VStack(alignment: .leading, spacing: 8) {
                 Button {
                     showingManualLock = true
                 } label: {
@@ -191,43 +221,53 @@ struct UnlockedLockboxView: View {
                 .disabled(!coordinator.isAuthorized)
                 .accessibilityHint("Choose a finite focus lock duration")
                 Text("Block distractions for 30 minutes, 1 hour, or until a time you choose.")
-                    .font(.footnote)
-                    .foregroundStyle(LockboxTheme.secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(LockboxTheme.textSecondary)
                     .padding(.horizontal, 4)
             }
 
-            TonightCard(coordinator: coordinator)
+            TonightCard(coordinator: coordinator, now: now)
 
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 15) {
-                    LockboxSectionLabel("Your rhythm", systemImage: "waveform.path.ecg")
+            VStack(alignment: .leading, spacing: 8) {
+                LockboxSectionLabel("Your rhythm")
+                    .padding(.horizontal, 4)
+                VStack(alignment: .leading, spacing: 0) {
                     LockboxValueRow(label: "Mode", value: coordinator.savedModeTitle)
+                        .frame(minHeight: 44)
+                    Divider().overlay(LockboxTheme.border.opacity(0.6))
                     LockboxValueRow(label: "Apps & categories", value: "\(coordinator.savedSelectedItemCount) selected")
-                    Divider().overlay(LockboxTheme.border).padding(.vertical, 2)
+                        .frame(minHeight: 44)
+                    Divider().overlay(LockboxTheme.border.opacity(0.6))
                     NavigationLink {
                         SettingsView(coordinator: coordinator, companion: companion)
                     } label: {
-                        HStack(alignment: .top, spacing: 10) {
+                        HStack(alignment: .center, spacing: 10) {
                             Image(systemName: coordinator.windDownEnabled ? "bell.badge" : "bell.slash")
-                                .foregroundStyle(coordinator.ambientError == nil ? LockboxTheme.accent : .orange)
-                            VStack(alignment: .leading, spacing: 4) {
+                                .foregroundStyle(coordinator.ambientError == nil ? LockboxTheme.accent : LockboxTheme.attention)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text("Wind-down")
                                     .font(.subheadline.weight(.semibold))
                                 Text(windDownStatusMessage)
-                                    .font(.footnote)
-                                    .foregroundStyle(coordinator.ambientError == nil ? LockboxTheme.secondary : .orange)
+                                    .font(.subheadline)
+                                    .foregroundStyle(coordinator.ambientError == nil ? LockboxTheme.textSecondary : LockboxTheme.attention)
                                     .multilineTextAlignment(.leading)
                             }
                             Spacer(minLength: 4)
                             Image(systemName: "chevron.right")
                                 .font(.caption.weight(.bold))
-                                .foregroundStyle(LockboxTheme.secondary)
+                                .foregroundStyle(LockboxTheme.textSecondary)
+                                .accessibilityHidden(true)
                         }
+                        .padding(.vertical, 6)
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .background(LockboxTheme.surface, in: RoundedRectangle(cornerRadius: LockboxTheme.cornerRadius, style: .continuous))
             }
 
             OperationalWarning(coordinator: coordinator)
@@ -239,25 +279,15 @@ private struct TonightCard: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @State private var proposedBedtimeEnd: Date?
     @State private var showingBedtimeConfirmation = false
+    let now: Date
 
     var body: some View {
         LockboxCard {
-            VStack(alignment: .leading, spacing: 15) {
-                HStack {
-                    LockboxSectionLabel("Tonight", systemImage: "moon.stars.fill")
-                    Spacer()
-                    if coordinator.recurringEnabledIntent, nextOccurrence != nil {
-                        LockboxStatusBadge(title: "Ready", color: LockboxTheme.rest)
-                    }
-                }
+            VStack(alignment: .leading, spacing: 12) {
+                LockboxSectionLabel(isBedtimeWindowInProgress(coordinator, now: now) ? "Next bedtime" : "Tonight", systemImage: "moon.fill")
                 if coordinator.recurringEnabledIntent, let occurrence = nextOccurrence {
-                    Text("Bedtime lock is set")
-                        .font(.title3.weight(.semibold))
-                    HStack(spacing: 0) {
-                        scheduleTime(title: "Locks at", value: occurrence.start.formatted(date: .abbreviated, time: .shortened))
-                        Divider().frame(height: 38).overlay(LockboxTheme.border)
-                        scheduleTime(title: "Opens at", value: occurrence.end.formatted(date: .abbreviated, time: .shortened))
-                    }
+                    LockboxValueRow(label: "Locks", value: RuntimeTimeFormat.string(occurrence.start, now: now))
+                    LockboxValueRow(label: "Opens", value: RuntimeTimeFormat.string(occurrence.end, now: now))
                     Button {
                         // Freeze the absolute boundary at preview time. The
                         // confirmation submits this same Date unchanged;
@@ -274,11 +304,11 @@ private struct TonightCard: View {
                     .accessibilityLabel("Start bedtime now")
                     .accessibilityHint("Uses your saved bedtime rules and opens at the configured morning time")
                 } else {
-                    Label("Automatic bedtime schedule is off", systemImage: "calendar.badge.exclamationmark")
+                    Label("Bedtime schedule is off", systemImage: "calendar.badge.exclamationmark")
                         .font(.headline)
-                    Text("Save and register a schedule in Settings to turn on automatic sessions.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
+                    Text("Save a schedule in Settings to turn it on.")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.textSecondary)
                 }
             }
         }
@@ -293,116 +323,64 @@ private struct TonightCard: View {
             }
         } message: {
             if let proposedBedtimeEnd {
-                Text("Saved bedtime rules will be used. Your apps will open at \(proposedBedtimeEnd.formatted(date: .complete, time: .complete)). Future nights remain scheduled.")
+                Text("Your apps will open \(RuntimeTimeFormat.string(proposedBedtimeEnd, now: now, style: .atPhrase)). Future nights stay scheduled.")
             } else {
-                Text("Saved bedtime rules will be used, and future nights remain scheduled.")
+                Text("Future nights stay scheduled.")
             }
         }
     }
 
-    private func scheduleTime(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.bold))
-                .tracking(0.9)
-                .foregroundStyle(LockboxTheme.secondary)
-            Text(value)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(LockboxTheme.primary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
-    }
-
     private var nextOccurrence: RuntimeOccurrenceResolver.Occurrence? {
-        RuntimeOccurrenceResolver.currentOrNext(
-            start: RuntimeTime(hour: coordinator.savedStartComponents.hour ?? 22, minute: coordinator.savedStartComponents.minute ?? 0),
-            end: RuntimeTime(hour: coordinator.savedEndComponents.hour ?? 7, minute: coordinator.savedEndComponents.minute ?? 0),
-            enabled: true,
-            after: Date()
-        )
+        nextBedtimeOccurrence(coordinator, now: now)
     }
 }
 
 struct ActiveLockView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
+    let display: RuntimeActiveLockDisplay
+    let now: Date
 
-    private var semanticColor: Color {
-        coordinator.activeLockTitle == "Get some rest" ? LockboxTheme.rest : LockboxTheme.focus
-    }
+    private var semanticColor: Color { display.isBedtime ? LockboxTheme.rest : LockboxTheme.focus }
 
-    private var activePageHeading: String {
-        coordinator.activeLockTitle == "Get some rest" ? "Protect your evening" : "Keep a clear lane"
+    private var heroTime: String {
+        guard let end = coordinator.activeLockEnd else { return "Opening time unavailable" }
+        return "Locked until \(RuntimeTimeFormat.string(end, now: now, style: .phrase))"
     }
 
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: activePageHeading)
-
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 17) {
-                    HStack(spacing: 13) {
-                        LockboxIconBadge(
-                            systemImage: coordinator.activeLockTitle == "Get some rest" ? "moon.stars.fill" : "sparkles",
-                            color: semanticColor
-                        )
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(coordinator.activeLockTitle)
-                                .font(.title2.weight(.semibold))
-                            if let end = coordinator.activeLockEnd {
-                                Text("Your apps will open at \(end.formatted(date: .omitted, time: .shortened)).")
-                                    .font(.subheadline)
-                                    .foregroundStyle(LockboxTheme.secondary)
-                            } else {
-                                Text("The opening time isn’t available.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.orange)
-                            }
-                        }
-                    }
-                    Divider().overlay(LockboxTheme.border)
-                    HStack {
-                        if let end = coordinator.activeLockEnd {
-                            VStack(alignment: .leading, spacing: 4) {
-                                LockboxSectionLabel("Opens")
-                                Text(end.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.headline)
-                            }
-                        } else {
-                            Text("Opening time unavailable")
-                                .foregroundStyle(.orange)
-                        }
-                        Spacer()
-                        Image(systemName: "lock.fill")
-                            .foregroundStyle(semanticColor)
-                            .accessibilityHidden(true)
-                    }
+            VStack(alignment: .leading, spacing: 14) {
+                Label(display.label, systemImage: display.isBedtime ? "moon.fill" : "scope")
+                    .font(.subheadline.weight(.semibold))
+                Text(heroTime)
+                    .lockboxTimeHero()
+                    .multilineTextAlignment(.leading)
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.fill").accessibilityHidden(true)
+                    Text(display.originCopy)
+                        .font(.subheadline)
                 }
+                .opacity(0.85)
             }
+            .foregroundStyle(LockboxTheme.onAccent)
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(semanticColor, in: RoundedRectangle(cornerRadius: LockboxTheme.cornerRadius, style: .continuous))
             .accessibilityElement(children: .combine)
             .accessibilityLabel(activeSummary)
-
-            LockboxCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    LockboxSectionLabel("This lock", systemImage: "checkmark.shield.fill")
-                    if let end = coordinator.activeLockEnd {
-                        LockboxValueRow(label: "Opens", value: end.formatted(date: .abbreviated, time: .shortened))
-                    }
-                    LockboxValueRow(label: "Started by", value: coordinator.activeLockOriginSummary)
-                }
-            }
 
             if let pending = coordinator.pendingChangesSummary {
                 LockboxCard {
                     HStack(alignment: .top, spacing: 11) {
                         Image(systemName: "clock.arrow.circlepath")
-                            .foregroundStyle(LockboxTheme.accent)
+                            .foregroundStyle(semanticColor)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Changes after this lock")
                                 .font(.subheadline.weight(.semibold))
                             Text(pending)
-                                .font(.footnote)
-                                .foregroundStyle(LockboxTheme.secondary)
+                                .font(.subheadline)
+                                .foregroundStyle(LockboxTheme.textSecondary)
                         }
                     }
                 }
@@ -411,9 +389,9 @@ struct ActiveLockView: View {
             LockboxCard {
                 VStack(alignment: .leading, spacing: 12) {
                     LockboxSectionLabel("Need to end early?", systemImage: "arrow.uturn.backward.circle")
-                    Text("Recovery waits 15 minutes, then asks you to confirm. Waiting alone never unlocks your phone.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
+                    Text("Recovery waits 15 minutes, then asks you to confirm.")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.textSecondary)
                     NavigationLink {
                         RecoveryView(coordinator: coordinator)
                     } label: {
@@ -423,7 +401,8 @@ struct ActiveLockView: View {
                             Spacer()
                             Image(systemName: "chevron.right")
                                 .font(.caption.weight(.bold))
-                                .foregroundStyle(LockboxTheme.secondary)
+                                .foregroundStyle(LockboxTheme.textSecondary)
+                                .accessibilityHidden(true)
                         }
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .contentShape(Rectangle())
@@ -437,8 +416,7 @@ struct ActiveLockView: View {
     }
 
     private var activeSummary: String {
-        let end = coordinator.activeLockEnd?.formatted(date: .abbreviated, time: .shortened) ?? "an unavailable time"
-        return "\(coordinator.activeLockTitle). Your protected time is underway. Opens \(end)."
+        "\(display.label). \(heroTime). \(display.originCopy)."
     }
 }
 
@@ -451,7 +429,7 @@ struct OperationalWarning: View {
             LockboxCard {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.subheadline)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(LockboxTheme.attention)
             }
         }
     }

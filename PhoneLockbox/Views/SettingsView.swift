@@ -135,7 +135,7 @@ struct SettingsView: View {
                     if let error = coordinator.ambientError {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.footnote)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
             }
@@ -372,7 +372,7 @@ private struct DeveloperToolsSection: View {
                 if coordinator.legacyRegistrationNeedsReview {
                     Label("Legacy monitoring ownership needs explicit cleanup; do not assume the phone is unlocked.", systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(LockboxTheme.attention)
                 }
 
                 DiagnosticsSection(coordinator: coordinator)
@@ -442,7 +442,7 @@ private struct SettingsNameCard: View {
                     } else if !trimmed.isEmpty {
                         Text("Use 40 characters or fewer, with no special characters.")
                             .font(.footnote)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
                 Text("Trusted people see this name on invites and requests.")

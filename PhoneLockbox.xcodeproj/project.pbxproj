@@ -28,6 +28,7 @@
 		4114E7D6B542B1C01BDEFAA2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 92AA970C1250B549B20A4CC2 /* Assets.xcassets */; };
 		418D431200AFC6DF44F8C009 /* SafetyAssistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */; };
 		41DB07862A1BCD257453E327 /* SafetyAssistantView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */; };
+		49E35480E7FB54C4BC714724 /* RuntimePresentationFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */; };
 		510B03F537735BC5AEE4AC36 /* ShieldActionExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */; };
 		51A9820C991E42AD46629222 /* LockboxLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */; };
 		59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */; };
@@ -52,6 +53,7 @@
 		89BEACFD002B3060099DEEF4 /* CompanionKit in Frameworks */ = {isa = PBXBuildFile; productRef = CA5530289D43786988907320 /* CompanionKit */; };
 		8A983F03BE66358FFF7FB8C5 /* CompanionPrototype.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25549C84BD7B9E98279D4F05 /* CompanionPrototype.swift */; };
 		92A6E33D92356CC70A15EED4 /* RuntimeContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */; };
+		9384D305C15109965CCB7414 /* RuntimePresentationFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */; };
 		98EFB0DC3FE2850EFCE64059 /* QuickActionRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */; };
 		9FF6D3EF0DB2A752649AEE0A /* ShieldConfigurationExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9A2F803B335F1F67F65C48 /* ShieldConfigurationExtension.swift */; };
 		A5041E1560903C6CE7A3BC4C /* GalleryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15617864C3787EEB6026FE8B /* GalleryModel.swift */; };
@@ -208,6 +210,7 @@
 		DAAFE2A2EFA49C4B24EEFF18 /* PhoneLockbox.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PhoneLockbox.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E023311398A901C00301F601 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindDownNotificationScheduler.swift; sourceTree = "<group>"; };
+		E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePresentationFormat.swift; sourceTree = "<group>"; };
 		E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeCoordinator.swift; sourceTree = "<group>"; };
 		E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldConfiguration.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicyTests.swift; sourceTree = "<group>"; };
@@ -377,6 +380,7 @@
 				A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */,
 				63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */,
 				4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */,
+				E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */,
 				D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */,
 				4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */,
 				30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */,
@@ -699,6 +703,7 @@
 				B2F831A7C4E52EAD729F3C94 /* RuntimeFriendRelease.swift in Sources */,
 				2B3F75B0611C6C2B3E834F4A /* RuntimeLifecycle.swift in Sources */,
 				5FE2806A4ED9CC173077DCBD /* RuntimeOccurrence.swift in Sources */,
+				9384D305C15109965CCB7414 /* RuntimePresentationFormat.swift in Sources */,
 				23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */,
 				677800E8B1F6C2E0FE49B285 /* RuntimeStore.swift in Sources */,
 				B8E5C2B192EDAF29362FF438 /* SafetyAssistant.swift in Sources */,
@@ -742,6 +747,7 @@
 				CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */,
 				5E0E4133A5633F9B658EC1B4 /* RuntimeLifecycle.swift in Sources */,
 				833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */,
+				49E35480E7FB54C4BC714724 /* RuntimePresentationFormat.swift in Sources */,
 				17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */,
 				59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */,
 				418D431200AFC6DF44F8C009 /* SafetyAssistant.swift in Sources */,

@@ -65,7 +65,7 @@ public struct CompanionPrototypeView: View {
             }
             Section {
                 Label("Simulated relay", systemImage: "network.slash")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(LockboxTheme.attention)
                 Text("Foreground inbox fetch is the source of truth. APNs/wake delivery and remote unlock are not implemented in this prototype.")
                     .font(.footnote).foregroundStyle(.secondary)
             }

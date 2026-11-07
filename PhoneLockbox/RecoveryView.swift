@@ -26,15 +26,15 @@ struct RecoveryView: View {
                     LockboxCard {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline)
-                            .foregroundStyle(LockboxTheme.destructive)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
 
                 if !coordinator.isAuthorized {
                     LockboxCard {
-                        Label("Screen Time access is unavailable. Protection is not confirmed.", systemImage: "exclamationmark.triangle.fill")
+                        Label("Screen Time access is off. Lock protection isn’t confirmed.", systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline)
-                            .foregroundStyle(LockboxTheme.destructive)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
 
@@ -42,11 +42,11 @@ struct RecoveryView: View {
                     LockboxCard {
                         VStack(alignment: .leading, spacing: 14) {
                             LockboxSectionLabel("Current lock", systemImage: "lock.fill")
-                            Text("Recovery ends the current lock only. It does not disable future bedtime sessions.")
+                            Text("Recovery ends this lock only. Future nights are unchanged.")
                                 .font(.subheadline)
-                                .foregroundStyle(LockboxTheme.secondary)
+                                .foregroundStyle(LockboxTheme.textSecondary)
                             if let end = coordinator.activeLockEnd {
-                                LockboxValueRow(label: "Fixed end", value: end.formatted(date: .abbreviated, time: .shortened))
+                                LockboxValueRow(label: "Opens", value: RuntimeTimeFormat.string(end, now: context.date))
                             }
                         }
                     }
@@ -57,9 +57,9 @@ struct RecoveryView: View {
                         LockboxCard {
                             VStack(alignment: .leading, spacing: 13) {
                                 LockboxSectionLabel("Recovery", systemImage: "arrow.uturn.backward.circle")
-                                Text("Requesting recovery starts a fixed 15-minute wait. You can leave the app; restrictions remain until you confirm release or the lock ends naturally.")
-                                    .font(.footnote)
-                                    .foregroundStyle(LockboxTheme.secondary)
+                                Text("Recovery starts a 15-minute wait. You can leave the app. Your apps stay locked until you confirm or the lock ends.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(LockboxTheme.textSecondary)
                                 Button("Request recovery") {
                                     coordinator.requestRecovery()
                                 }
@@ -73,9 +73,9 @@ struct RecoveryView: View {
                         VStack(alignment: .leading, spacing: 9) {
                             Label("No active session", systemImage: "info.circle")
                                 .font(.headline)
-                            Text("Recovery does not extend the normal end. If apps remain restricted, check operational status. Future scheduled sessions are unchanged.")
-                                .font(.footnote)
-                                .foregroundStyle(LockboxTheme.secondary)
+                            Text("If apps are still restricted, check Settings. Future nights are unchanged.")
+                                .font(.subheadline)
+                                .foregroundStyle(LockboxTheme.textSecondary)
                         }
                     }
                 }
@@ -103,7 +103,7 @@ struct RecoveryView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This releases the targeted active sessions after a final eligibility check. Future bedtime sessions remain enabled.")
+            Text("This ends the current lock. Future nights are unchanged.")
         }
     }
 
@@ -111,11 +111,11 @@ struct RecoveryView: View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 13) {
                 LockboxSectionLabel("Recovery requested", systemImage: "hourglass")
-                Text("Restrictions remain until you confirm release or the lock ends naturally.")
+                Text("Your apps stay locked until you confirm or the lock ends.")
                     .font(.subheadline)
-                    .foregroundStyle(LockboxTheme.secondary)
+                    .foregroundStyle(LockboxTheme.textSecondary)
                 if let eligibleAt = coordinator.recoveryEligibleAt {
-                    LockboxValueRow(label: "Earliest confirmation", value: eligibleAt.formatted(date: .abbreviated, time: .shortened))
+                    LockboxValueRow(label: "You can confirm at", value: RuntimeTimeFormat.string(eligibleAt, now: date))
                     if coordinator.isAuthorized && coordinator.canConfirmRecovery(at: date) {
                         Button("End this lock") {
                             guard coordinator.canConfirmRecovery(at: .now) else { return }
@@ -123,18 +123,20 @@ struct RecoveryView: View {
                         }
                         .buttonStyle(LockboxActionButtonStyle(emphasis: .destructive))
                     } else if date < eligibleAt {
-                        Text("The 15-minute wait is still in progress. Waiting alone never unlocks the phone.")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
+                        Text("The 15-minute wait is still running. Waiting alone never unlocks your phone.")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.textSecondary)
                     } else {
-                        Text("This request cannot release the current lock. Review its status, or cancel and request recovery again.")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
+                        Text(coordinator.isAuthorized
+                             ? "This request can’t end the lock. Cancel it and request recovery again."
+                             : "Turn on Screen Time access in iOS Settings.")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.textSecondary)
                     }
                 } else {
-                    Text("Recovery is being reconciled. Restrictions may remain while the request is checked.")
-                        .font(.footnote)
-                        .foregroundStyle(LockboxTheme.secondary)
+                    Text("Checking your request. Your apps may stay locked meanwhile.")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.textSecondary)
                 }
                 Button("Cancel recovery request", role: .destructive) {
                     coordinator.cancelRecovery()
