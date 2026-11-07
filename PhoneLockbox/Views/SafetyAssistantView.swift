@@ -134,7 +134,7 @@ struct SafetyAssistantView: View {
     private func findingRow(_ finding: SafetyAssistantFinding) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: finding.severity == .action ? "exclamationmark.circle.fill" : "info.circle.fill")
-                .foregroundStyle(finding.severity == .action ? .orange : LockboxTheme.accent)
+                .foregroundStyle(finding.severity == .action ? LockboxTheme.attention : LockboxTheme.accent)
             VStack(alignment: .leading, spacing: 3) {
                 Text(finding.title)
                     .font(.subheadline.weight(.semibold))

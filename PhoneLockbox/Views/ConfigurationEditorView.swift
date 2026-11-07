@@ -80,7 +80,7 @@ struct ConfigurationEditorView: View {
                     if coordinator.mode == .allowOnlySelected && coordinator.selectedItemCount > 0 && !coordinator.canApplySelection {
                         Label("Allow-only mode needs at least one app token.", systemImage: "info.circle")
                             .font(.footnote)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
             }

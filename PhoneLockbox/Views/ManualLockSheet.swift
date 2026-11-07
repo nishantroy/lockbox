@@ -54,9 +54,9 @@ struct ManualLockSheet: View {
                             }
                             customEndAvailabilityLabel
                         }
-                        Text("The end is finite and is checked again when you confirm. A manual lock never silently uses the bedtime end.")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
+                        Text("It ends at the time you choose, never at your bedtime end.")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.textSecondary)
                     }
                 }
 
@@ -64,16 +64,16 @@ struct ManualLockSheet: View {
                     VStack(alignment: .leading, spacing: 14) {
                         LockboxSectionLabel("Review before locking", systemImage: "checkmark.shield")
                         if let proposedEnd {
-                            LockboxValueRow(label: "Immutable proposed end", value: proposedEnd.formatted(date: .abbreviated, time: .shortened))
+                            LockboxValueRow(label: "Ends at", value: LockboxTimeFormat.string(proposedEnd))
                         } else {
                             Label("This end is no longer available.", systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(LockboxTheme.attention)
                         }
                         LockboxValueRow(label: "Restriction", value: coordinator.savedModeTitle)
                         LockboxValueRow(label: "Selection", value: "\(coordinator.savedSelectedItemCount) selected")
-                        Text("Unsaved settings edits are not included. The saved policy is frozen for this lock.")
-                            .font(.footnote)
-                            .foregroundStyle(LockboxTheme.secondary)
+                        Text("Uses your saved settings. Unsaved edits are not included.")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.textSecondary)
                     }
                 }
 

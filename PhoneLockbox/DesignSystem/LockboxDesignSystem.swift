@@ -14,7 +14,10 @@ enum LockboxTheme {
     static let focus = Color(red: 0.46, green: 0.76, blue: 0.98)
     static let border = Color(red: 0.25, green: 0.28, blue: 0.45)
     static let onAccent = Color(red: 0.08, green: 0.055, blue: 0.16)
+    static let attention = Color(red: 0.961, green: 0.714, blue: 0.380) // #F5B661
     static let destructive = Color.red
+    /// Help text and section labels (design language §3).
+    static let textSecondary = secondary
 
     static let cornerRadius: CGFloat = 20
     static let controlCornerRadius: CGFloat = 12
@@ -82,10 +85,32 @@ struct LockboxSectionLabel: View {
                 Text(title)
             }
         }
-        .font(.caption.weight(.bold))
-        .tracking(1.2)
-        .foregroundStyle(LockboxTheme.accent)
-        .textCase(.uppercase)
+        .font(.footnote.weight(.semibold))
+        .foregroundStyle(LockboxTheme.textSecondary)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+extension View {
+    /// Time hero: rounded, large, semibold, fixed-width digits. Wraps rather
+    /// than truncating at large Dynamic Type sizes.
+    func lockboxTimeHero() -> some View {
+        self
+            .font(.system(.largeTitle, design: .rounded).weight(.semibold))
+            .monospacedDigit()
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Short, calm time strings: "10:00 PM", "Tomorrow 7:00 AM", "Sat 7:00 AM".
+enum LockboxTimeFormat {
+    static func string(_ date: Date, now: Date = Date(), calendar: Calendar = .current, inSentence: Bool = false) -> String {
+        let time = date.formatted(date: .omitted, time: .shortened)
+        if calendar.isDate(date, inSameDayAs: now) { return time }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(date, inSameDayAs: tomorrow) {
+            return "\(inSentence ? "tomorrow" : "Tomorrow") \(time)"
+        }
+        return "\(date.formatted(.dateTime.weekday(.abbreviated))) \(time)"
     }
 }
 
