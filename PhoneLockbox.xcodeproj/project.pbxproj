@@ -33,6 +33,7 @@
 		49E35480E7FB54C4BC714724 /* RuntimePresentationFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */; };
 		510B03F537735BC5AEE4AC36 /* ShieldActionExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */; };
 		51A9820C991E42AD46629222 /* LockboxLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */; };
+		597832E6332C73BAFAA93187 /* LockboxGroupedRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D09092936583A6C712EEE38 /* LockboxGroupedRows.swift */; };
 		59CB90B17139395DB570CC18 /* RuntimeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */; };
 		5ADEE07E4890FEAF3B14D23E /* WindDownNotificationScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */; };
 		5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E023311398A901C00301F601 /* ContentView.swift */; };
@@ -53,8 +54,10 @@
 		81CF62C2C3A9B00D6340C077 /* DiagnosticsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9188ECB9FC75CDE19E1D7C66 /* DiagnosticsSection.swift */; };
 		833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */; };
 		83D07AF54EC2BF47C0373B90 /* AmbientPrototypeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8125B6F17596AF6CA2C7E5E3 /* AmbientPrototypeView.swift */; };
+		85BFD3354126BF32C21AD857 /* PeopleDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A7E289694557E8BE16A6FB6 /* PeopleDisplay.swift */; };
 		89BEACFD002B3060099DEEF4 /* CompanionKit in Frameworks */ = {isa = PBXBuildFile; productRef = CA5530289D43786988907320 /* CompanionKit */; };
 		8A983F03BE66358FFF7FB8C5 /* CompanionPrototype.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25549C84BD7B9E98279D4F05 /* CompanionPrototype.swift */; };
+		8C383C805AE1631C70740341 /* LockboxPeopleComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B171C185CF25CB38D3133166 /* LockboxPeopleComponents.swift */; };
 		92A6E33D92356CC70A15EED4 /* RuntimeContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */; };
 		9384D305C15109965CCB7414 /* RuntimePresentationFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */; };
 		98EFB0DC3FE2850EFCE64059 /* QuickActionRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */; };
@@ -80,6 +83,7 @@
 		E4EE663BF81E00D83BB7D66D /* DeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F6EF44BFEBA1EE4A99CD19FD /* DeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E854B4450F9000E678BA44DE /* LockboxPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4CB4D6D238F6AEA6AC0064 /* LockboxPolicyTests.swift */; };
 		EE9DA6E228EF2D19028C2BDB /* FriendReleaseWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */; };
+		EF06EFD04B89EBB77FE93757 /* PeopleDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A7E289694557E8BE16A6FB6 /* PeopleDisplay.swift */; };
 		F0396C945F9466D0DFCC935B /* QuickActionPendingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */; };
 		F234C577D935B71999353749 /* MonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7F44B15683DBC4D4CC9AE5C /* MonitorExtension.swift */; };
 		F282EB9F3E9120ED651BA39C /* CompanionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8018D6A26EC0E688140EDC /* CompanionCoordinator.swift */; };
@@ -174,7 +178,9 @@
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4937C609973AA395FE5785C2 /* LockboxPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPolicy.swift; sourceTree = "<group>"; };
 		4A18DD61A56A0008D92DF852 /* RuntimeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeStore.swift; sourceTree = "<group>"; };
+		4A7E289694557E8BE16A6FB6 /* PeopleDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleDisplay.swift; sourceTree = "<group>"; };
 		4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOccurrence.swift; sourceTree = "<group>"; };
+		4D09092936583A6C712EEE38 /* LockboxGroupedRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxGroupedRows.swift; sourceTree = "<group>"; };
 		4FC89584D6D8DB677376C818 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		544AD899BF38CEE7D2D964D5 /* QuickActionPendingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionPendingStore.swift; sourceTree = "<group>"; };
 		55D8E754AE0F2FE5F835FD7A /* SafetyAssistantView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistantView.swift; sourceTree = "<group>"; };
@@ -205,6 +211,7 @@
 		9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationEditorView.swift; sourceTree = "<group>"; };
 		A7E4A3DF2180D670EB4D4797 /* LockboxLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxLiveActivity.swift; sourceTree = "<group>"; };
 		A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeFriendRelease.swift; sourceTree = "<group>"; };
+		B171C185CF25CB38D3133166 /* LockboxPeopleComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockboxPeopleComponents.swift; sourceTree = "<group>"; };
 		B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEngine.swift; sourceTree = "<group>"; };
 		C3FA67C4DA663F1CF7397DB2 /* QuickActionRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionRoute.swift; sourceTree = "<group>"; };
 		C41183FEBCF8FC46750C86D9 /* PhoneLockboxUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PhoneLockboxUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -313,7 +320,9 @@
 			isa = PBXGroup;
 			children = (
 				17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */,
+				4D09092936583A6C712EEE38 /* LockboxGroupedRows.swift */,
 				73119CE2E65C8A2DA4BA517A /* LockboxLockNowButton.swift */,
+				B171C185CF25CB38D3133166 /* LockboxPeopleComponents.swift */,
 			);
 			path = DesignSystem;
 			sourceTree = "<group>";
@@ -382,6 +391,7 @@
 		668EAC9BEB1B6AC61D66A42B /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				4A7E289694557E8BE16A6FB6 /* PeopleDisplay.swift */,
 				739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */,
 				2CEC9D8444FC84540B265A76 /* RuntimeContracts.swift */,
 				B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */,
@@ -707,6 +717,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F234C577D935B71999353749 /* MonitorExtension.swift in Sources */,
+				EF06EFD04B89EBB77FE93757 /* PeopleDisplay.swift in Sources */,
 				7CD4DC55BA690B9BBCBC0782 /* RecoveryCommitment.swift in Sources */,
 				92A6E33D92356CC70A15EED4 /* RuntimeContracts.swift in Sources */,
 				C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */,
@@ -740,10 +751,13 @@
 				3FE13D97D005D3CE6814399D /* LiveActivityAdapter.swift in Sources */,
 				3B6F59DFB0AF2A3FE981ADA3 /* LockboxActionButtonStyle.swift in Sources */,
 				1E4089EC6B84BBFABE620B5C /* LockboxDesignSystem.swift in Sources */,
+				597832E6332C73BAFAA93187 /* LockboxGroupedRows.swift in Sources */,
 				71712AC150F2B3D3EFF4097F /* LockboxLockNowButton.swift in Sources */,
+				8C383C805AE1631C70740341 /* LockboxPeopleComponents.swift in Sources */,
 				DB438E3AC6D2DF398CE5E6FF /* LockboxPolicy.swift in Sources */,
 				70590D325CF4567FB7A7B12C /* LockboxTabView.swift in Sources */,
 				3BF71E11E36B15B87F3A8489 /* ManualLockSheet.swift in Sources */,
+				85BFD3354126BF32C21AD857 /* PeopleDisplay.swift in Sources */,
 				B3CC6F984D164E57CF206DA4 /* PeopleView.swift in Sources */,
 				1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */,
 				5E3D005538962498B5A980E9 /* PushNotificationSupport.swift in Sources */,
