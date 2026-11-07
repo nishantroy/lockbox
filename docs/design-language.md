@@ -167,4 +167,9 @@ Each step goes through the UX review gate (AGENTS.md) on owner-approved screensh
   - Builder: Claude Sonnet 5.5. Review: Claude Opus 5.5, no P1 or P2. All five P3s handled: the not-determined access path, the disabled VoiceOver hint, a softer halo, icon sizing, and the centred header, which was left for the owner to judge.
   - Validation: compile-only builds, and `swift test` 210/0. No simulator run.
   - Build 26 is installed on the owner's iPhone.
+- **D1c (one-tap Lock now, shared state circle, §6.2b):** merged 2026-11-06.
+  - Builder: Claude Sonnet 5.5. Reviews: Claude Opus 5.5, an initial review and two delta reviews, no P1. The initial review's three P2s were fixed: the missing bedtime-overlap note, a quick action stuck behind the custom-end sheet, and an unexplained disabled "Set end".
+  - Validation: compile-only builds of the app and UI-test targets, and `swift test` 227/0. No simulator run.
+  - Build 27 is installed on the owner's iPhone.
+  - Known cosmetic doubt: the colour change is a cross-fade with `matchedGeometryEffect` between two circles, not one animated fill.
 - **Next:** D2 People, then D3 Settings.
