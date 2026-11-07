@@ -92,6 +92,13 @@ Evidence base: the SwiftUI source (`DesignSystem/LockboxDesignSystem.swift`, `Lo
 1. **Dark mode only.** Production stays always-dark (`preferredColorScheme(.dark)`). This supersedes the layout contract's "preserve system light/dark" line. No light palette.
 2. **Lavender (`rest`) is the primary action colour** while unlocked.
 3. **Icon v1 approved.**
+4. **Session colours confirmed after build 25** (owner hands-on): blue card during focus, lavender during bedtime.
+5. **Lock now becomes a large round button at the centre of the open screen** (owner idea, agent decision 2026-11-06; see §6.2a). It fits the goal: while the phone is open, Lock now is the one deliberate action (bedtime runs by itself), so it should be the clear centre of the screen. Constraints that keep it calm and honest:
+   - the state still comes first: "Open" and "Bedtime at …" sit above the circle;
+   - tapping opens the existing duration sheet, so there is no one-tap or accidental lock and no new step;
+   - the circle is a button, not a timer: no progress ring, countdown or looping glow, before or during a lock;
+   - the active lock keeps the approved full-width session-colour card;
+   - information stacks above and below the circle rather than orbiting it, so it stays readable with large text.
 
 ## 5. App icon v1
 
@@ -116,6 +123,14 @@ Order of work: tokens first, then the Lockbox tab, then the active lock and reco
    - Primary: Lock now.
    - Tonight: a compact row with Start bedtime now.
    - Rhythm and wind-down: grouped rows instead of a card.
+2a. **Lock now hero (D1b):**
+   - A centred circle, about 184 pt (scales with Dynamic Type and never exceeds about 60% of the screen width), filled with `rest`.
+   - Inside: `lock.fill` and the text "Lock now" in `onAccent`. A soft static lavender halo echoes the icon.
+   - Press feedback: a slight scale-down, skipped under Reduce Motion.
+   - Under it: one line, "30 minutes, 1 hour, or until a time you choose."
+   - When Screen Time access is off, it is dimmed and says why, with one line under it pointing to Recovery or Settings.
+   - At accessibility text sizes it falls back to the full-width primary button.
+   - Below it: Tonight and Your rhythm, as now.
 3. **Active lock:** a full-width hero card in the session's colour with "Locked until 7:00 AM" as the time hero. Below it sit the origin ("Bedtime" or "Focus"), then recovery and "Ask a trusted person". Mood headlines are removed.
 4. **Copy pass:** one sentence per control. Policy detail moves to confirmation screens or info disclosures. Times use "10:00 PM" or "Tomorrow 7:00 AM".
 5. **People:** a person-centred list with avatar initials in rest colour. Invite becomes one primary action. Prototype items get a dashed outline and a "Prototype" label.
