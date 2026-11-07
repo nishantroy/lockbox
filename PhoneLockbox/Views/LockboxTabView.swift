@@ -17,13 +17,15 @@ struct LockboxTabView: View {
     }
 
     var body: some View {
-        Group {
+        // The minute tick re-evaluates which state is shown, so the screen
+        // flips from active to open at the lock's end and across midnight.
+        TimelineView(.everyMinute) { context in
             if !coordinator.isConfigured {
                 SetupView(coordinator: coordinator)
-            } else if coordinator.hasActiveLock {
-                ActiveLockView(coordinator: coordinator)
+            } else if let display = coordinator.activeLockDisplay {
+                ActiveLockView(coordinator: coordinator, display: display, now: context.date)
             } else {
-                UnlockedLockboxView(coordinator: coordinator, companion: companion, showingManualLock: $showingManualLock)
+                UnlockedLockboxView(coordinator: coordinator, companion: companion, showingManualLock: $showingManualLock, now: context.date)
             }
         }
         .lockboxScreen()
@@ -153,22 +155,32 @@ private struct SetupView: View {
 /// shows a past start.
 @MainActor
 private func nextBedtimeOccurrence(_ coordinator: ScreenTimeCoordinator, now: Date) -> RuntimeOccurrenceResolver.Occurrence? {
-    func resolve(after date: Date) -> RuntimeOccurrenceResolver.Occurrence? {
-        RuntimeOccurrenceResolver.currentOrNext(
-            start: RuntimeTime(hour: coordinator.savedStartComponents.hour ?? 22, minute: coordinator.savedStartComponents.minute ?? 0),
-            end: RuntimeTime(hour: coordinator.savedEndComponents.hour ?? 7, minute: coordinator.savedEndComponents.minute ?? 0),
-            enabled: true,
-            after: date
-        )
-    }
-    guard let occurrence = resolve(after: now) else { return nil }
-    return occurrence.start > now ? occurrence : resolve(after: occurrence.end)
+    guard let occurrence = currentOrNextBedtime(coordinator, after: now) else { return nil }
+    return occurrence.start > now ? occurrence : currentOrNextBedtime(coordinator, after: occurrence.end)
+}
+
+/// True when a saved bedtime window is in progress at `now`.
+@MainActor
+private func isBedtimeWindowInProgress(_ coordinator: ScreenTimeCoordinator, now: Date) -> Bool {
+    guard let occurrence = currentOrNextBedtime(coordinator, after: now) else { return false }
+    return occurrence.start <= now
+}
+
+@MainActor
+private func currentOrNextBedtime(_ coordinator: ScreenTimeCoordinator, after date: Date) -> RuntimeOccurrenceResolver.Occurrence? {
+    RuntimeOccurrenceResolver.currentOrNext(
+        start: RuntimeTime(hour: coordinator.savedStartComponents.hour ?? 22, minute: coordinator.savedStartComponents.minute ?? 0),
+        end: RuntimeTime(hour: coordinator.savedEndComponents.hour ?? 7, minute: coordinator.savedEndComponents.minute ?? 0),
+        enabled: true,
+        after: date
+    )
 }
 
 struct UnlockedLockboxView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
     @ObservedObject var companion: CompanionCoordinator
     @Binding var showingManualLock: Bool
+    let now: Date
 
     private var windDownStatusMessage: String {
         if let error = coordinator.ambientError { return error }
@@ -189,13 +201,6 @@ struct UnlockedLockboxView: View {
     }
 
     var body: some View {
-        // Re-evaluated every minute so relative days stay correct across midnight.
-        TimelineView(.everyMinute) { context in
-            content(now: context.date)
-        }
-    }
-
-    private func content(now: Date) -> some View {
         LockboxScrollView {
             VStack(alignment: .leading, spacing: 4) {
                 LockboxPageHeader(title: "Open")
@@ -279,7 +284,7 @@ private struct TonightCard: View {
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 12) {
-                LockboxSectionLabel("Tonight", systemImage: "moon.fill")
+                LockboxSectionLabel(isBedtimeWindowInProgress(coordinator, now: now) ? "Next bedtime" : "Tonight", systemImage: "moon.fill")
                 if coordinator.recurringEnabledIntent, let occurrence = nextOccurrence {
                     LockboxValueRow(label: "Locks", value: RuntimeTimeFormat.string(occurrence.start, now: now))
                     LockboxValueRow(label: "Opens", value: RuntimeTimeFormat.string(occurrence.end, now: now))
@@ -332,29 +337,22 @@ private struct TonightCard: View {
 
 struct ActiveLockView: View {
     @ObservedObject var coordinator: ScreenTimeCoordinator
-
-    private var display: RuntimeActiveLockDisplay { coordinator.activeLockDisplay ?? .focus }
+    let display: RuntimeActiveLockDisplay
+    let now: Date
 
     private var semanticColor: Color { display.isBedtime ? LockboxTheme.rest : LockboxTheme.focus }
 
-    private func heroTime(now: Date) -> String {
+    private var heroTime: String {
         guard let end = coordinator.activeLockEnd else { return "Opening time unavailable" }
         return "Locked until \(RuntimeTimeFormat.string(end, now: now, style: .phrase))"
     }
 
     var body: some View {
-        // Re-evaluated every minute so the hero stays correct across midnight.
-        TimelineView(.everyMinute) { context in
-            content(now: context.date)
-        }
-    }
-
-    private func content(now: Date) -> some View {
         LockboxScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Label(display.label, systemImage: display.isBedtime ? "moon.fill" : "scope")
                     .font(.subheadline.weight(.semibold))
-                Text(heroTime(now: now))
+                Text(heroTime)
                     .lockboxTimeHero()
                     .multilineTextAlignment(.leading)
                 HStack(spacing: 6) {
@@ -369,7 +367,7 @@ struct ActiveLockView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(semanticColor, in: RoundedRectangle(cornerRadius: LockboxTheme.cornerRadius, style: .continuous))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(activeSummary(now: now))
+            .accessibilityLabel(activeSummary)
 
             if let pending = coordinator.pendingChangesSummary {
                 LockboxCard {
@@ -417,8 +415,8 @@ struct ActiveLockView: View {
         }
     }
 
-    private func activeSummary(now: Date) -> String {
-        "\(display.label). \(heroTime(now: now)). \(display.originCopy)."
+    private var activeSummary: String {
+        "\(display.label). \(heroTime). \(display.originCopy)."
     }
 }
 

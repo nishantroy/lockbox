@@ -66,7 +66,7 @@ public enum RuntimeActiveLockDisplay: Equatable, Sendable {
         }
     }
 
-    /// Bedtime is the governing (longer) lock whenever it is present.
+    /// Bedtime takes the colour and icon whenever it is present, including overlaps.
     public var isBedtime: Bool { self != .focus }
 
     public var originCopy: String {

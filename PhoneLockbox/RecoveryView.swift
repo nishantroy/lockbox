@@ -129,7 +129,7 @@ struct RecoveryView: View {
                     } else {
                         Text(coordinator.isAuthorized
                              ? "This request can’t end the lock. Cancel it and request recovery again."
-                             : "Screen Time access is off. Turn it back on in Settings.")
+                             : "Turn on Screen Time access in iOS Settings.")
                             .font(.subheadline)
                             .foregroundStyle(LockboxTheme.textSecondary)
                     }
