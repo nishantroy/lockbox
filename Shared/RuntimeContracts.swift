@@ -440,6 +440,8 @@ public struct RuntimeTime: Codable, Equatable, Sendable {
 
 public struct RuntimeConfiguration: Codable, Equatable, Sendable {
     public static let currentSchema = 1
+    /// Apple's DeviceActivity minimum for a recurring window.
+    public static let minimumWindowMinutes = 15
 
     public let schemaVersion: Int
     public let revision: Int
@@ -483,7 +485,7 @@ public struct RuntimeConfiguration: Codable, Equatable, Sendable {
         guard start != end else {
             throw RuntimeValidationError.invalidConfiguration("Choose different start and end times.")
         }
-        guard civilDurationMinutes >= 15 else {
+        guard civilDurationMinutes >= Self.minimumWindowMinutes else {
             throw RuntimeValidationError.intervalTooShort
         }
         guard revision >= 0, !selectionData.isEmpty else {

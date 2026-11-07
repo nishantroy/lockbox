@@ -40,7 +40,8 @@ struct LockboxTabView: View {
                         now: context.date,
                         namespace: stateNamespace,
                         chipBlockHeight: $chipBlockHeight,
-                        onPresentCustomEnd: { sheet = .customEnd($0) }
+                        onPresentCustomEnd: { sheet = .customEnd($0) },
+                        onEditBedtime: { turnOn in if sheet == nil { sheet = .bedtime(turnOn: turnOn) } }
                     )
                     .transition(.opacity)
                 }
@@ -78,6 +79,8 @@ struct LockboxTabView: View {
                         _ = coordinator.acknowledgePresentedQuickAction(presentedFocusAction)
                     }
                 )
+            case .bedtime(let turnOn):
+                BedtimeScheduleSheet(coordinator: coordinator, turnOn: turnOn)
             case .customEnd(let request):
                 CustomEndSheet(
                     coordinator: coordinator,
@@ -133,10 +136,12 @@ struct LockboxTabView: View {
 private enum LockboxSheet: Identifiable {
     case manualLock
     case customEnd(CustomEndRequest)
+    case bedtime(turnOn: Bool)
 
     var id: String {
         switch self {
         case .manualLock: return "manualLock"
+        case .bedtime: return "bedtime"
         case .customEnd(let request): return "customEnd-\(request.id)"
         }
     }
@@ -242,6 +247,8 @@ struct UnlockedLockboxView: View {
     let namespace: Namespace.ID
     @Binding var chipBlockHeight: CGFloat
     let onPresentCustomEnd: (CustomEndRequest) -> Void
+    /// Opens the bedtime editor sheet; the flag opens it with bedtime switched on.
+    let onEditBedtime: (Bool) -> Void
     // Each appearance of the Open screen starts on 30 min (no persistence).
     @State private var choice: LockDurationChoice = .thirtyMinutes
     @State private var customSelection = RuntimeCustomEndSelectionState()
@@ -452,17 +459,18 @@ struct UnlockedLockboxView: View {
             }
             .onPreferenceChange(ChipBlockHeightKey.self) { chipBlockHeight = $0 }
 
-            TonightCard(coordinator: coordinator, now: now)
+            TonightCard(coordinator: coordinator, now: now, onEditBedtime: onEditBedtime)
 
             VStack(alignment: .leading, spacing: 8) {
                 LockboxSectionLabel("Your rhythm")
                     .padding(.horizontal, 4)
                 VStack(alignment: .leading, spacing: 0) {
-                    LockboxValueRow(label: "Mode", value: coordinator.savedModeTitle)
-                        .frame(minHeight: 44)
-                    Divider().overlay(LockboxTheme.border.opacity(0.6))
-                    LockboxValueRow(label: "Apps & categories", value: "\(coordinator.savedSelectedItemCount) selected")
-                        .frame(minHeight: 44)
+                    NavigationLink {
+                        ConfigurationEditorView(coordinator: coordinator, isInitialSetup: false, sections: .restrictions)
+                    } label: {
+                        LockboxNavigationRowLabel(title: "What gets blocked", value: coordinator.savedRestrictionsSummary)
+                    }
+                    .buttonStyle(.plain)
                     Divider().overlay(LockboxTheme.border.opacity(0.6))
                     NavigationLink {
                         SettingsView(coordinator: coordinator, companion: companion)
@@ -544,11 +552,24 @@ private struct TonightCard: View {
     @State private var proposedBedtimeEnd: Date?
     @State private var showingBedtimeConfirmation = false
     let now: Date
+    let onEditBedtime: (Bool) -> Void
 
     var body: some View {
         LockboxCard {
             VStack(alignment: .leading, spacing: 12) {
-                LockboxSectionLabel(isBedtimeWindowInProgress(coordinator, now: now) ? "Next bedtime" : "Tonight", systemImage: "moon.fill")
+                HStack(alignment: .center) {
+                    LockboxSectionLabel(isBedtimeWindowInProgress(coordinator, now: now) ? "Next bedtime" : "Tonight", systemImage: "moon.fill")
+                    Spacer()
+                    if coordinator.recurringEnabledIntent, nextOccurrence != nil {
+                        Button("Edit") { onEditBedtime(false) }
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(LockboxTheme.accent)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Edit bedtime schedule")
+                    }
+                }
                 if coordinator.recurringEnabledIntent, let occurrence = nextOccurrence {
                     LockboxValueRow(label: "Locks", value: RuntimeTimeFormat.string(occurrence.start, now: now))
                     LockboxValueRow(label: "Opens", value: RuntimeTimeFormat.string(occurrence.end, now: now))
@@ -570,9 +591,8 @@ private struct TonightCard: View {
                 } else {
                     Label("Bedtime schedule is off", systemImage: "calendar.badge.exclamationmark")
                         .font(.headline)
-                    Text("Save a schedule in Settings to turn it on.")
-                        .font(.subheadline)
-                        .foregroundStyle(LockboxTheme.textSecondary)
+                    Button("Set bedtime") { onEditBedtime(true) }
+                        .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
                 }
             }
         }

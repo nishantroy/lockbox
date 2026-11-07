@@ -2,14 +2,20 @@ import SwiftUI
 import FamilyControls
 
 struct ConfigurationEditorView: View {
+    enum Sections { case all, restrictions }
+
     @ObservedObject var coordinator: ScreenTimeCoordinator
     let isInitialSetup: Bool
+    /// `.restrictions` shows mode, apps and Save only; the bedtime times live
+    /// in `BedtimeScheduleView`. Initial setup always shows everything.
+    var sections: Sections = .all
     @State private var showingPicker = false
+    @State private var bedtimeOffUntilSaved = false
     @State private var draftSelection = FamilyActivitySelection(includeEntireCategory: true)
 
     var body: some View {
         LockboxScrollView {
-            LockboxPageHeader(title: isInitialSetup ? "Set up bedtime" : "Bedtime rules")
+            LockboxPageHeader(title: isInitialSetup ? "Set up bedtime" : (showsTimes ? "Bedtime rules" : "What gets blocked"))
 
             if isInitialSetup {
                 LockboxCard {
@@ -30,13 +36,14 @@ struct ConfigurationEditorView: View {
                     .pickerStyle(.menu)
                     .disabled(!coordinator.canEditDraft)
                     Text(coordinator.mode == .blockSelected
-                         ? "Selected apps, categories, and websites will be blocked."
-                         : "Everything except selected apps will be blocked. Allow-only mode needs at least one app token.")
-                        .font(.footnote)
+                         ? "Selected apps, categories and websites are blocked."
+                         : "Everything except your selection is blocked, so choose at least one app.")
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
             }
 
+            if showsTimes {
             LockboxCard {
                 VStack(alignment: .leading, spacing: 14) {
                     LockboxSectionLabel("Bedtime window", systemImage: "calendar.badge.clock")
@@ -44,10 +51,11 @@ struct ConfigurationEditorView: View {
                         .disabled(!coordinator.canEditDraft)
                     DatePicker("Ends", selection: endBinding, displayedComponents: .hourAndMinute)
                         .disabled(!coordinator.canEditDraft)
-                    Text("Repeats daily and may cross midnight. The saved window must be at least 15 minutes; the system remains authoritative about delivery.")
-                        .font(.footnote)
+                    Text("Repeats every night and may cross midnight; at least 15 minutes.")
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
+            }
             }
 
             LockboxCard {
@@ -73,9 +81,9 @@ struct ConfigurationEditorView: View {
                     .disabled(!coordinator.canEditDraft)
                     .accessibilityLabel("Choose apps, categories, or websites")
                     Text(coordinator.mode == .blockSelected
-                         ? "Choose individual apps, categories, or websites to block."
-                         : "Choose apps, categories, or websites to allow. Categories are expanded to their apps.")
-                        .font(.footnote)
+                         ? "Choose apps, categories or websites to block."
+                         : "Choose apps, categories or websites to allow.")
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                     if coordinator.mode == .allowOnlySelected && coordinator.selectedItemCount > 0 && !coordinator.canApplySelection {
                         Label("Allow-only mode needs at least one app token.", systemImage: "info.circle")
@@ -87,13 +95,41 @@ struct ConfigurationEditorView: View {
 
             LockboxCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    Button(isInitialSetup ? "Save and register bedtime schedule" : "Save bedtime rules") {
-                        coordinator.saveConfiguration(start: coordinator.startComponents, end: coordinator.endComponents)
+                    Button(isInitialSetup ? "Save and register bedtime schedule" : (showsTimes ? "Save bedtime rules" : "Save")) {
+                        if showsTimes {
+                            coordinator.saveConfiguration(start: coordinator.startComponents, end: coordinator.endComponents)
+                        } else {
+                            // Times are edited elsewhere; keep the last saved ones,
+                            // and never turn bedtime on from here.
+                            let wasOn = coordinator.recurringEnabledIntent
+                            let outcome = coordinator.saveRestrictions()
+                            bedtimeOffUntilSaved = outcome == .failed && wasOn && !coordinator.recurringEnabledIntent
+                        }
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                     .disabled(!coordinator.canApplySelection || !coordinator.isAuthorized)
-                    Text("Saving validates this policy before requesting the OS schedule. A successful request is not proof that every app is blocked or that callbacks arrive on time.")
-                        .font(.footnote)
+                    if coordinator.hasActiveLock {
+                        Text("Changes apply after this lock ends.")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
+                    if let note = locksNowNote {
+                        Text(note)
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
+                    if bedtimeOffUntilSaved && !coordinator.recurringEnabledIntent {
+                        Label("Bedtime is off until this saves.", systemImage: "exclamationmark.circle")
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.attention)
+                    }
+                    if let pending = coordinator.pendingChangesSummary {
+                        Text(pending)
+                            .font(.subheadline)
+                            .foregroundStyle(LockboxTheme.secondary)
+                    }
+                    Text("The system decides when, and whether, apps are blocked.")
+                        .font(.subheadline)
                         .foregroundStyle(LockboxTheme.secondary)
                 }
             }
@@ -153,7 +189,21 @@ struct ConfigurationEditorView: View {
         )
     }
 
+    /// Saving re-registers a running bedtime, which makes the system lock now.
+    private var locksNowNote: String? {
+        guard !showsTimes, coordinator.recurringEnabledIntent, !coordinator.hasActiveLock else { return nil }
+        let now = Date()
+        guard let windowEnd = coordinator.lockingBedtimeEnd(
+            start: LockboxClockTime.runtimeTime(from: coordinator.savedStartComponents),
+            end: LockboxClockTime.runtimeTime(from: coordinator.savedEndComponents),
+            at: now
+        ) else { return nil }
+        return "Bedtime is in progress, so saving locks now until \(RuntimeTimeFormat.string(windowEnd, now: now, style: .phrase))."
+    }
+
+    private var showsTimes: Bool { isInitialSetup || sections == .all }
+
     private func date(from components: DateComponents) -> Date {
-        Calendar.current.date(from: DateComponents(hour: components.hour ?? 0, minute: components.minute ?? 0)) ?? .now
+        LockboxClockTime.date(from: components)
     }
 }
