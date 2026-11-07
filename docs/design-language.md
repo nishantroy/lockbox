@@ -100,6 +100,11 @@ Evidence base: the SwiftUI source (`DesignSystem/LockboxDesignSystem.swift`, `Lo
    - the active lock keeps the approved full-width session-colour card;
    - information stacks above and below the circle rather than orbiting it, so it stays readable with large text.
 
+6. **One-tap Lock now and a shared circle (owner feedback on build 26, 2026-11-06).** The extra tap to pick a duration added friction, and the move from the circle to the blue card felt incoherent. Decided (see §6.2b):
+   - Duration chips sit on the Open screen: **30 min** (preselected), **1 hour**, and **Until…** (custom time).
+   - The circle shows the exact end ("until 11:46 PM") and locks on one tap. The end shown on the button is the confirmation. This supersedes "Lock now opens confirmation" in layout v1 and interaction design for the in-app button. Quick actions and Shortcuts are unchanged.
+   - The active lock reuses the same composition: "Locked" replaces "Open", and the circle stays in place in the session colour with the end time as its hero. The full-width card is retired.
+
 ## 5. App icon v1
 
 - **Concept:** a padlock whose keyhole is a crescent moon. It says "lock" and "night" at a glance, and it stays legible at 60 px because it uses bold filled shapes with no strokes or star dots.
@@ -131,7 +136,19 @@ Order of work: tokens first, then the Lockbox tab, then the active lock and reco
    - When Screen Time access is off, it is dimmed and says why, with one line under it pointing to Recovery or Settings.
    - At accessibility text sizes it falls back to the full-width primary button.
    - Below it: Tonight and Your rhythm, as now.
-3. **Active lock:** a full-width hero card in the session's colour with "Locked until 7:00 AM" as the time hero. Below it sit the origin ("Bedtime" or "Focus"), then recovery and "Ask a trusted person". Mood headlines are removed.
+2b. **One-tap lock and shared circle (D1c):**
+   - **Open:**
+     - title "Open" and the bedtime line;
+     - chips (30 min / 1 hour / Until…);
+     - the circle, reading "Lock now" plus "until 11:46 PM";
+     - the overlap or conflict note, if any;
+     - then Tonight and Your rhythm.
+   - **Locked:**
+     - title "Locked", with the origin line ("Focus · you started it", "Bedtime", "Bedtime + Focus");
+     - a non-interactive circle in the session colour with `lock.fill` and "until" plus the time hero;
+     - then the recovery card and Ask a trusted person, where Tonight was.
+   - **Transition:** a colour and content cross-fade in place, which is instant under Reduce Motion.
+3. **Active lock** (superseded by 2b for layout; copy rules stand): a full-width hero card in the session's colour with "Locked until 7:00 AM" as the time hero. Below it sit the origin ("Bedtime" or "Focus"), then recovery and "Ask a trusted person". Mood headlines are removed.
 4. **Copy pass:** one sentence per control. Policy detail moves to confirmation screens or info disclosures. Times use "10:00 PM" or "Tomorrow 7:00 AM".
 5. **People:** a person-centred list with avatar initials in rest colour. Invite becomes one primary action. Prototype items get a dashed outline and a "Prototype" label.
 6. **Settings:** native grouped `Form` styled with the tokens, with Developer last and visually distinct.
