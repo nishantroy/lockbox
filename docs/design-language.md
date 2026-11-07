@@ -1,6 +1,6 @@
 # Phone Lockbox design language v1 — "Quiet Night"
 
-Status: **proposed 2026-11-06, awaiting owner review.** App icon v1 is implemented from it (`design/icon/render-app-icon.swift`). The UX redesign follows only after owner sign-off. It builds on the owner-selected Midnight Original direction ([design polish](design-polish.md)) and keeps the approved structure ([layout v1](layout-v1-contract.md), [interaction design](interaction-design.md)).
+Status: **owner-approved 2026-11-06** (dark mode only, lavender primary, icon v1 approved). App icon v1 is implemented from it (`design/icon/render-app-icon.swift`). The UX redesign (section 6) is in progress. It builds on the owner-selected Midnight Original direction ([design polish](design-polish.md)) and keeps the approved structure ([layout v1](layout-v1-contract.md), [interaction design](interaction-design.md)).
 
 Evidence base: the SwiftUI source (`DesignSystem/LockboxDesignSystem.swift`, `LockboxTabView`, `PeopleView`, `SettingsView`, `RecoveryView`, `ManualLockSheet`) and the previous icon. No new screenshots were taken (owner rule 2026-11-06: no simulator runs without the owner saying so). Before the redesign starts, re-check against the owner's screenshots or an owner-approved UI run.
 
@@ -87,11 +87,11 @@ Evidence base: the SwiftUI source (`DesignSystem/LockboxDesignSystem.swift`, `Lo
 - State changes cross-fade in 0.2–0.25 s with ease-out. Press feedback stays as is.
 - No looping or ambient animation. Under Reduce Motion, changes are instant.
 
-## 4. Open owner decisions
+## 4. Owner decisions (2026-11-06)
 
-1. **Light mode:** keep always-dark (the current owner choice), or add a Midnight-derived light "Day" palette used for Focus/daytime and when the system is in light mode? The recommendation is **always dark for now**, re-checked once Focus use grows.
-2. **Accent for unlocked primary actions:** `rest` lavender (recommended, the brand colour), or neutral white?
-3. **Icon:** approve v1 (the crescent-keyhole padlock), or iterate.
+1. **Dark mode only.** Production stays always-dark (`preferredColorScheme(.dark)`). This supersedes the layout contract's "preserve system light/dark" line. No light palette.
+2. **Lavender (`rest`) is the primary action colour** while unlocked.
+3. **Icon v1 approved.**
 
 ## 5. App icon v1
 

@@ -35,7 +35,7 @@ Explain trusted-person recovery and permit only honest currently available setup
 
 ## Presentation boundary
 
-Use native semantic structure and accessibility, but no final palette, illustration, typography system or decorative visual direction yet. Preserve system light/dark behavior. Layout language supports both nighttime rest and daytime focus; do not make the entire product intrinsically nocturnal.
+Use native semantic structure and accessibility. The visual direction (palette, type, icon) is the owner-approved [design language](design-language.md). Owner decision 2026-11-06: the app is dark mode only (see [design language](design-language.md)). Copy and colour still support both nighttime rest and daytime focus.
 
 ## Delivery
 
