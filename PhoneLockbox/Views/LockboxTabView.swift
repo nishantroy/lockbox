@@ -213,6 +213,7 @@ struct UnlockedLockboxView: View {
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity)
             .accessibilityElement(children: .combine)
+            .zIndex(1) // keep the halo behind the header text
 
             VStack(spacing: 16) {
                 if dynamicTypeSize >= .accessibility1 {
@@ -223,19 +224,35 @@ struct UnlockedLockboxView: View {
                     }
                     .buttonStyle(LockboxActionButtonStyle(emphasis: .primary))
                     .disabled(!coordinator.isAuthorized)
-                    .accessibilityHint("Choose a finite focus lock duration")
+                    .accessibilityHint(coordinator.isAuthorized ? "Choose a finite focus lock duration" : "Needs Screen Time access")
                 } else {
                     LockboxLockNowButton { showingManualLock = true }
                         .disabled(!coordinator.isAuthorized)
                         .padding(.vertical, 12)
                 }
-                Text(coordinator.isAuthorized
-                     ? "30 minutes, 1 hour, or until a time you choose."
-                     : "Screen Time access is off. Turn it on in iOS Settings to start a lock.")
-                    .font(.subheadline)
-                    .foregroundStyle(coordinator.isAuthorized ? LockboxTheme.textSecondary : LockboxTheme.attention)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
+                if coordinator.isAuthorized {
+                    Text("30 minutes, 1 hour, or until a time you choose.")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                } else if coordinator.authorizationStatus == .denied {
+                    Text("Screen Time access is off. Turn it on in iOS Settings to start a lock.")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.attention)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Text("Screen Time access is needed to start a lock.")
+                        .font(.subheadline)
+                        .foregroundStyle(LockboxTheme.attention)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                    Button("Allow Screen Time access") {
+                        Task { await coordinator.requestAuthorization() }
+                    }
+                    .buttonStyle(LockboxActionButtonStyle(emphasis: .secondary))
+                }
             }
 
             TonightCard(coordinator: coordinator, now: now)
