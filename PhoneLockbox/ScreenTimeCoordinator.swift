@@ -190,6 +190,10 @@ final class ScreenTimeCoordinator: ObservableObject {
         RuntimeLockPresentation.activeTitle(for: enforcementSessions(at: currentDate()))
     }
 
+    var activeLockDisplay: RuntimeActiveLockDisplay? {
+        RuntimeActiveLockDisplay.display(for: enforcementSessions(at: currentDate()))
+    }
+
     var activeLockOriginSummary: String {
         RuntimeLockPresentation.originSummary(for: enforcementSessions(at: currentDate()))
     }

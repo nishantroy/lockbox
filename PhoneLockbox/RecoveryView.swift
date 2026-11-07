@@ -26,7 +26,7 @@ struct RecoveryView: View {
                     LockboxCard {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline)
-                            .foregroundStyle(LockboxTheme.destructive)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
 
@@ -34,7 +34,7 @@ struct RecoveryView: View {
                     LockboxCard {
                         Label("Screen Time access is off. Lock protection isn’t confirmed.", systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline)
-                            .foregroundStyle(LockboxTheme.destructive)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
 
@@ -46,7 +46,7 @@ struct RecoveryView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(LockboxTheme.textSecondary)
                             if let end = coordinator.activeLockEnd {
-                                LockboxValueRow(label: "Opens", value: LockboxTimeFormat.string(end))
+                                LockboxValueRow(label: "Opens", value: RuntimeTimeFormat.string(end, now: context.date))
                             }
                         }
                     }
@@ -115,7 +115,7 @@ struct RecoveryView: View {
                     .font(.subheadline)
                     .foregroundStyle(LockboxTheme.textSecondary)
                 if let eligibleAt = coordinator.recoveryEligibleAt {
-                    LockboxValueRow(label: "You can confirm at", value: LockboxTimeFormat.string(eligibleAt))
+                    LockboxValueRow(label: "You can confirm at", value: RuntimeTimeFormat.string(eligibleAt, now: date))
                     if coordinator.isAuthorized && coordinator.canConfirmRecovery(at: date) {
                         Button("End this lock") {
                             guard coordinator.canConfirmRecovery(at: .now) else { return }
@@ -127,7 +127,9 @@ struct RecoveryView: View {
                             .font(.subheadline)
                             .foregroundStyle(LockboxTheme.textSecondary)
                     } else {
-                        Text("This request can’t end the lock. Cancel it and request recovery again.")
+                        Text(coordinator.isAuthorized
+                             ? "This request can’t end the lock. Cancel it and request recovery again."
+                             : "Screen Time access is off. Turn it back on in Settings.")
                             .font(.subheadline)
                             .foregroundStyle(LockboxTheme.textSecondary)
                     }

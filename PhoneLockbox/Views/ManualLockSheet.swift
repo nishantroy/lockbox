@@ -50,11 +50,11 @@ struct ManualLockSheet: View {
                                 )
                             } else {
                                 Label("No finite end is available at the moment.", systemImage: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(LockboxTheme.destructive)
+                                    .foregroundStyle(LockboxTheme.attention)
                             }
                             customEndAvailabilityLabel
                         }
-                        Text("It ends at the time you choose, never at your bedtime end.")
+                        Text("This lock ends at the time you choose. Bedtime still starts on schedule.")
                             .font(.subheadline)
                             .foregroundStyle(LockboxTheme.textSecondary)
                     }
@@ -64,7 +64,7 @@ struct ManualLockSheet: View {
                     VStack(alignment: .leading, spacing: 14) {
                         LockboxSectionLabel("Review before locking", systemImage: "checkmark.shield")
                         if let proposedEnd {
-                            LockboxValueRow(label: "Ends at", value: LockboxTimeFormat.string(proposedEnd))
+                            LockboxValueRow(label: "Ends at", value: RuntimeTimeFormat.string(proposedEnd, now: referenceDate))
                         } else {
                             Label("This end is no longer available.", systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(LockboxTheme.attention)
@@ -81,7 +81,7 @@ struct ManualLockSheet: View {
                     LockboxCard {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline)
-                            .foregroundStyle(LockboxTheme.destructive)
+                            .foregroundStyle(LockboxTheme.attention)
                     }
                 }
             }
@@ -172,13 +172,13 @@ struct ManualLockSheet: View {
             EmptyView()
         case .unavailable:
             Label("Choose a finite custom end before confirming.", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(LockboxTheme.destructive)
+                .foregroundStyle(LockboxTheme.attention)
         case .tooSoon:
             Label("This end is too soon. Choose one at least 15 minutes from now.", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(LockboxTheme.destructive)
+                .foregroundStyle(LockboxTheme.attention)
         case .tooLate:
             Label("This end is too late. Choose one within seven days.", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(LockboxTheme.destructive)
+                .foregroundStyle(LockboxTheme.attention)
         }
     }
 }

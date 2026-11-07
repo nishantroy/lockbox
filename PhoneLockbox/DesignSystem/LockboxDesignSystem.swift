@@ -102,18 +102,6 @@ extension View {
     }
 }
 
-/// Short, calm time strings: "10:00 PM", "Tomorrow 7:00 AM", "Sat 7:00 AM".
-enum LockboxTimeFormat {
-    static func string(_ date: Date, now: Date = Date(), calendar: Calendar = .current, inSentence: Bool = false) -> String {
-        let time = date.formatted(date: .omitted, time: .shortened)
-        if calendar.isDate(date, inSameDayAs: now) { return time }
-        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(date, inSameDayAs: tomorrow) {
-            return "\(inSentence ? "tomorrow" : "Tomorrow") \(time)"
-        }
-        return "\(date.formatted(.dateTime.weekday(.abbreviated))) \(time)"
-    }
-}
-
 struct LockboxValueRow: View {
     let label: String
     let value: String
