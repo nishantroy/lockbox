@@ -529,6 +529,18 @@ final class ScreenTimeCoordinator: ObservableObject {
         RuntimeManualLockDecision.proposedEnd(after: duration, at: date)
     }
 
+    /// True when the runtime will skip this saved occurrence (for example
+    /// bedtime that was started early and then released). Mirrors the
+    /// suppression check in the manual-lock transaction.
+    func isScheduledOccurrenceSuppressed(_ occurrence: RuntimeOccurrenceResolver.Occurrence) -> Bool {
+        RuntimeLifecycle.shouldSuppressScheduledOccurrence(
+            document,
+            start: occurrence.start,
+            end: occurrence.end,
+            calendar: Calendar.current
+        )
+    }
+
     func manualLockCustomRange(at date: Date = Date()) -> ClosedRange<Date>? {
         RuntimeManualLockDecision.customEndRange(at: date, calendar: Calendar.current)
     }

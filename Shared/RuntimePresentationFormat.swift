@@ -23,6 +23,37 @@ public enum RuntimeTimeFormat {
         locale: Locale = .current,
         style: Style = .standalone
     ) -> String {
+        let (time, day, days) = resolve(date, now: now, calendar: calendar, locale: locale, style: style)
+        switch (style, day) {
+        case (.standalone, nil): return time
+        case (.phrase, nil): return time
+        case (.atPhrase, nil): return "at \(time)"
+        case (.standalone, let day?):
+            // Short dates read "Fri, Nov 13, 3:00 PM"; named days read "Tomorrow 7:00 AM".
+            return days >= 6 || days < -1 ? "\(day), \(time)" : "\(day) \(time)"
+        case (_, let day?): return "\(day) at \(time)"
+        }
+    }
+
+    /// The standalone day name (nil for today) and the time, for layouts that
+    /// stack them: ("Tomorrow", "7:00 AM"), (nil, "10:00 PM").
+    public static func parts(
+        _ date: Date,
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        locale: Locale = .current
+    ) -> (day: String?, time: String) {
+        let (time, day, _) = resolve(date, now: now, calendar: calendar, locale: locale, style: .standalone)
+        return (day, time)
+    }
+
+    private static func resolve(
+        _ date: Date,
+        now: Date,
+        calendar: Calendar,
+        locale: Locale,
+        style: Style
+    ) -> (time: String, day: String?, days: Int) {
         let time = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, calendar: calendar, timeZone: calendar.timeZone))
         let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
 
@@ -36,16 +67,7 @@ public enum RuntimeTimeFormat {
         default:
             day = date.formatted(Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone).weekday(.abbreviated).month(.abbreviated).day())
         }
-
-        switch (style, day) {
-        case (.standalone, nil): return time
-        case (.phrase, nil): return time
-        case (.atPhrase, nil): return "at \(time)"
-        case (.standalone, let day?):
-            // Short dates read "Fri, Nov 13, 3:00 PM"; named days read "Tomorrow 7:00 AM".
-            return days >= 6 || days < -1 ? "\(day), \(time)" : "\(day) \(time)"
-        case (_, let day?): return "\(day) at \(time)"
-        }
+        return (time, day, days)
     }
 }
 
@@ -71,11 +93,16 @@ public enum RuntimeActiveLockDisplay: Equatable, Sendable {
 
     public var originCopy: String {
         switch self {
-        case .scheduledBedtime: return "Scheduled bedtime"
-        case .manualBedtime: return "You started bedtime"
-        case .focus: return "You started focus"
-        case .bedtimeAndFocus: return "Bedtime and focus overlap"
+        case .scheduledBedtime: return "Bedtime"
+        case .manualBedtime: return "Bedtime · you started it"
+        case .focus: return "Focus · you started it"
+        case .bedtimeAndFocus: return "Bedtime + Focus"
         }
+    }
+
+    /// `originCopy` as a spoken phrase: "Focus, you started it".
+    public var spokenOriginCopy: String {
+        originCopy.replacingOccurrences(of: " · ", with: ", ")
     }
 
     public static func display(for sessions: [RuntimeSession]) -> RuntimeActiveLockDisplay? {

@@ -24,6 +24,20 @@ final class RuntimeTimeFormatTests: XCTestCase {
         XCTAssertTrue(fmt(date(6, 22), now: now, .atPhrase).hasPrefix("at 10:00"))
     }
 
+    func testPartsSplitDayFromTime() {
+        let now = date(6, 20)
+        let today = RuntimeTimeFormat.parts(date(6, 22), now: now, calendar: calendar, locale: locale)
+        XCTAssertNil(today.day)
+        XCTAssertTrue(today.time.hasPrefix("10:00"))
+        let tomorrow = RuntimeTimeFormat.parts(date(7, 7), now: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(tomorrow.day, "Tomorrow")
+        XCTAssertTrue(tomorrow.time.hasPrefix("7:00"))
+        XCTAssertEqual(
+            "\(tomorrow.day ?? "") \(tomorrow.time)",
+            fmt(date(7, 7), now: now, .standalone)
+        )
+    }
+
     func testTomorrowIsNamedWithCorrectCasing() {
         let now = date(6, 20)
         XCTAssertTrue(fmt(date(7, 7), now: now, .standalone).hasPrefix("Tomorrow 7:00"))
@@ -93,21 +107,22 @@ final class RuntimeActiveLockDisplayTests: XCTestCase {
         let d = RuntimeActiveLockDisplay.display(for: [session(.scheduled)])
         XCTAssertEqual(d, .scheduledBedtime)
         XCTAssertEqual(d?.label, "Bedtime")
-        XCTAssertEqual(d?.originCopy, "Scheduled bedtime")
+        XCTAssertEqual(d?.originCopy, "Bedtime")
         XCTAssertEqual(d?.isBedtime, true)
     }
 
     func testManualBedtime() {
         let d = RuntimeActiveLockDisplay.display(for: [session(.manual, purpose: .bedtime)])
         XCTAssertEqual(d, .manualBedtime)
-        XCTAssertEqual(d?.originCopy, "You started bedtime")
+        XCTAssertEqual(d?.originCopy, "Bedtime · you started it")
     }
 
     func testManualFocus() {
         let d = RuntimeActiveLockDisplay.display(for: [session(.manual)])
         XCTAssertEqual(d, .focus)
         XCTAssertEqual(d?.label, "Focus")
-        XCTAssertEqual(d?.originCopy, "You started focus")
+        XCTAssertEqual(d?.originCopy, "Focus · you started it")
+        XCTAssertEqual(d?.spokenOriginCopy, "Focus, you started it")
         XCTAssertEqual(d?.isBedtime, false)
     }
 
@@ -115,7 +130,7 @@ final class RuntimeActiveLockDisplayTests: XCTestCase {
         let d = RuntimeActiveLockDisplay.display(for: [session(.scheduled), session(.manual)])
         XCTAssertEqual(d, .bedtimeAndFocus)
         XCTAssertEqual(d?.label, "Bedtime + Focus")
-        XCTAssertEqual(d?.originCopy, "Bedtime and focus overlap")
+        XCTAssertEqual(d?.originCopy, "Bedtime + Focus")
         XCTAssertEqual(d?.isBedtime, true)
     }
 

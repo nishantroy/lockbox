@@ -10,8 +10,10 @@
 		088C033D0B032FBAB0FD8661 /* CompanionKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7BC707BB36F96F1716EB6078 /* CompanionKit */; };
 		08DDC0508DE485E4D352B1A1 /* PushWakeup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 109C1D957A28EED24028771F /* PushWakeup.swift */; };
 		0C189D58217CC2903569661C /* TaskUnlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA87B2C4F7AA2CCAB95B4C8E /* TaskUnlock.swift */; };
+		1142FCBAD7848F41104ED94D /* RuntimeLockNowEnd.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4DAC39A24D55EBC011ECF17 /* RuntimeLockNowEnd.swift */; };
 		11E547E2AC773D395AB1A8B0 /* AmbientKit in Frameworks */ = {isa = PBXBuildFile; productRef = E7F924562C1BF347810FB1E2 /* AmbientKit */; };
 		127ADDDC4FEA5FDBC2DD4FE4 /* WeekendSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8620579F40C3F2C5B6160203 /* WeekendSchedule.swift */; };
+		166CDFBC59FEBF8288E52730 /* CustomEndSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36FC3E650007B7AFDA249484 /* CustomEndSheet.swift */; };
 		17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */; };
 		1AA470923E10947EB3C5AF9D /* PhoneLockboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097B1B604D6CC97CDE159FF4 /* PhoneLockboxApp.swift */; };
 		1E4089EC6B84BBFABE620B5C /* LockboxDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17880F10A8F27005118FB199 /* LockboxDesignSystem.swift */; };
@@ -68,6 +70,7 @@
 		BB7637BA2C018430BA4867D6 /* RecoveryCommitment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 739B65DCD465C19A238A19BC /* RecoveryCommitment.swift */; };
 		C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */; };
 		CC7FACFAFEEBA8A8C4901727 /* GalleryTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84197D5D974050762C5DC97 /* GalleryTheme.swift */; };
+		CC90D618CF96569563C9FA4A /* RuntimeLockNowEnd.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4DAC39A24D55EBC011ECF17 /* RuntimeLockNowEnd.swift */; };
 		CE64409932253EE99055B4B3 /* CompanionLocalRelayFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */; };
 		CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */; };
 		D5B2284D818113D61BF8D5D8 /* IssuedInviteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64231289C6D39E0A1CBB6D2B /* IssuedInviteStore.swift */; };
@@ -165,6 +168,7 @@
 		30ECFB33D4B08F012D159089 /* SafetyAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyAssistant.swift; sourceTree = "<group>"; };
 		3143467B1C6F67079D068218 /* PushNotificationSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationSupport.swift; sourceTree = "<group>"; };
 		35B60D69EAC39EAF9AEB813E /* QuickActionDeliveryGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionDeliveryGate.swift; sourceTree = "<group>"; };
+		36FC3E650007B7AFDA249484 /* CustomEndSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomEndSheet.swift; sourceTree = "<group>"; };
 		42E93866048FAF912545941E /* CompanionPairingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingUITests.swift; sourceTree = "<group>"; };
 		4650F26E0577E9256ABF1BD4 /* FriendReleaseWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendReleaseWiringTests.swift; sourceTree = "<group>"; };
 		46D1BDB824396E786A66CAEE /* ShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -212,6 +216,7 @@
 		DAAFE2A2EFA49C4B24EEFF18 /* PhoneLockbox.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PhoneLockbox.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E023311398A901C00301F601 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		E026C5A8D42118813801A7BD /* WindDownNotificationScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindDownNotificationScheduler.swift; sourceTree = "<group>"; };
+		E4DAC39A24D55EBC011ECF17 /* RuntimeLockNowEnd.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeLockNowEnd.swift; sourceTree = "<group>"; };
 		E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePresentationFormat.swift; sourceTree = "<group>"; };
 		E580F79F1272AAA3D31EA339 /* ScreenTimeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeCoordinator.swift; sourceTree = "<group>"; };
 		E59EB47F2955DAEC4044A8AC /* ShieldConfiguration.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ShieldConfiguration.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -382,6 +387,7 @@
 				B313DF1E9CA9394B7726F7D2 /* RuntimeEngine.swift */,
 				A8BC534F2BEB0290BAFBA119 /* RuntimeFriendRelease.swift */,
 				63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */,
+				E4DAC39A24D55EBC011ECF17 /* RuntimeLockNowEnd.swift */,
 				4C17F5E249F0DE069410A50E /* RuntimeOccurrence.swift */,
 				E4F207CA09C5F6003C1CAE26 /* RuntimePresentationFormat.swift */,
 				D7952793659070B46EBB45F9 /* RuntimeReconciliation.swift */,
@@ -406,6 +412,7 @@
 			isa = PBXGroup;
 			children = (
 				9746913D93B7318DD03F296D /* ConfigurationEditorView.swift */,
+				36FC3E650007B7AFDA249484 /* CustomEndSheet.swift */,
 				9188ECB9FC75CDE19E1D7C66 /* DiagnosticsSection.swift */,
 				826324CE63A62A4F09367CED /* LockboxActionButtonStyle.swift */,
 				0D9DB33B46E0F54F4E879C95 /* LockboxTabView.swift */,
@@ -705,6 +712,7 @@
 				C3B35F44F0F294482788153D /* RuntimeEngine.swift in Sources */,
 				B2F831A7C4E52EAD729F3C94 /* RuntimeFriendRelease.swift in Sources */,
 				2B3F75B0611C6C2B3E834F4A /* RuntimeLifecycle.swift in Sources */,
+				1142FCBAD7848F41104ED94D /* RuntimeLockNowEnd.swift in Sources */,
 				5FE2806A4ED9CC173077DCBD /* RuntimeOccurrence.swift in Sources */,
 				9384D305C15109965CCB7414 /* RuntimePresentationFormat.swift in Sources */,
 				23C86DA2E9CB4F4C0E6BCDD4 /* RuntimeReconciliation.swift in Sources */,
@@ -722,6 +730,7 @@
 				8A983F03BE66358FFF7FB8C5 /* CompanionPrototype.swift in Sources */,
 				B55944F134064144A9BB1053 /* ConfigurationEditorView.swift in Sources */,
 				5BA2378DAE132105F1E06BB4 /* ContentView.swift in Sources */,
+				166CDFBC59FEBF8288E52730 /* CustomEndSheet.swift in Sources */,
 				81CF62C2C3A9B00D6340C077 /* DiagnosticsSection.swift in Sources */,
 				F928AA64045DED8055DF1333 /* GalleryComponents.swift in Sources */,
 				A5041E1560903C6CE7A3BC4C /* GalleryModel.swift in Sources */,
@@ -750,6 +759,7 @@
 				A6B54197F91197D40CA7C41A /* RuntimeEngine.swift in Sources */,
 				CEC52204197EB5875102907F /* RuntimeFriendRelease.swift in Sources */,
 				5E0E4133A5633F9B658EC1B4 /* RuntimeLifecycle.swift in Sources */,
+				CC90D618CF96569563C9FA4A /* RuntimeLockNowEnd.swift in Sources */,
 				833EC0F23301FBB0DB10E7A4 /* RuntimeOccurrence.swift in Sources */,
 				49E35480E7FB54C4BC714724 /* RuntimePresentationFormat.swift in Sources */,
 				17598B5B002980E995147F58 /* RuntimeReconciliation.swift in Sources */,
