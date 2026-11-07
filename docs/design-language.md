@@ -152,6 +152,13 @@ Order of work: tokens first, then the Lockbox tab, then the active lock and reco
 4. **Copy pass:** one sentence per control. Policy detail moves to confirmation screens or info disclosures. Times use "10:00 PM" or "Tomorrow 7:00 AM".
 5. **People:** a person-centred list with avatar initials in rest colour. Invite becomes one primary action. Prototype items get a dashed outline and a "Prototype" label.
 6. **Settings:** native grouped `Form` styled with the tokens, with Developer last and visually distinct.
+7. **Bedtime schedule is easy to reach** (owner feedback, 2026-11-07: the schedule was too hard to find).
+   - The bedtime times get their own focused editor: on/off, Starts, Ends and Save, with the same validation, the same queued-during-lock rule, and the same OS registration path.
+   - The editor opens from:
+     - an **Edit** action on the Lockbox tab's Tonight card;
+     - a **Set bedtime** action when bedtime is off;
+     - the first row of Settings, "Bedtime · 9:30 PM – 8:05 AM".
+   - "What gets blocked" (mode and apps) is a separate row in Settings, also reachable from the Your rhythm rows on the Lockbox tab.
 
 Each step goes through the UX review gate (AGENTS.md) on owner-approved screenshots.
 
