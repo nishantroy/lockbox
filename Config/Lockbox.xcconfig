@@ -1,0 +1,14 @@
+// Shared build settings for every target (wired in through project.yml's
+// `configFiles`). Machine- or deployment-specific values live in the
+// gitignored Config/Local.xcconfig; copy Config/Local.example.xcconfig to
+// create it. See docs/development.md ("Local build configuration").
+
+// Apple Developer team used for signing. Empty here: set it in Local.xcconfig
+// (or pick a team in Xcode) for device builds.
+DEVELOPMENT_TEAM =
+
+// Default companion relay, written into Info.plist as `LockboxRelayBaseURL`.
+// `$()` keeps xcconfig from reading `//` as a comment.
+LOCKBOX_RELAY_BASE_URL = https:/$()/relay.example.com
+
+#include? "Local.xcconfig"

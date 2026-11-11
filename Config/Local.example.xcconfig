@@ -1,0 +1,11 @@
+// Copy to Config/Local.xcconfig (gitignored) and fill in your values.
+// No `xcodegen generate` is needed after editing it; just rebuild.
+
+// Your Apple Developer Team ID (Xcode > Settings > Accounts, or the
+// Membership page of developer.apple.com).
+DEVELOPMENT_TEAM =  // e.g. ABCDE12345
+
+// Your deployed relay (see relay/README.md). `$()` keeps xcconfig from
+// reading `//` as a comment. Leave unset to keep the placeholder, and point
+// the app at a relay from Settings > Developer instead.
+LOCKBOX_RELAY_BASE_URL = https:/$()/relay.example.com

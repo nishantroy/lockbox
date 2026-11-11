@@ -1,4 +1,7 @@
 name: PhoneLockbox
+configFiles:
+  Debug: Config/Lockbox.xcconfig
+  Release: Config/Lockbox.xcconfig
 options:
   bundleIdPrefix: com.phone-lockbox
   deploymentTarget:
@@ -11,7 +14,6 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "0.1"
     CURRENT_PROJECT_VERSION: "28"
-    DEVELOPMENT_TEAM: ""
 packages:
   AmbientKit:
     path: AmbientKit
@@ -51,6 +53,7 @@ targets:
               - phone-lockbox-companion
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        LockboxRelayBaseURL: $(LOCKBOX_RELAY_BASE_URL)
     dependencies:
       - sdk: AppIntents.framework
       - package: AmbientKit
@@ -110,7 +113,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.app.monitor
-        DEVELOPMENT_TEAM: ""
         CODE_SIGN_ENTITLEMENTS: Extensions/DeviceActivityMonitor/PhoneLockboxMonitor.entitlements
         INFOPLIST_FILE: Extensions/DeviceActivityMonitor/Info.plist
         SKIP_INSTALL: YES
@@ -122,7 +124,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.app.shield-configuration
-        DEVELOPMENT_TEAM: ""
         CODE_SIGN_ENTITLEMENTS: Extensions/ShieldConfiguration/PhoneLockboxShieldConfiguration.entitlements
         INFOPLIST_FILE: Extensions/ShieldConfiguration/Info.plist
         SKIP_INSTALL: YES
@@ -134,7 +135,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.phone-lockbox.app.shield-action
-        DEVELOPMENT_TEAM: ""
         CODE_SIGN_ENTITLEMENTS: Extensions/ShieldAction/PhoneLockboxShieldAction.entitlements
         INFOPLIST_FILE: Extensions/ShieldAction/Info.plist
         SKIP_INSTALL: YES

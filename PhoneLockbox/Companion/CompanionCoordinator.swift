@@ -192,7 +192,23 @@ final class CompanionCoordinator: ObservableObject {
     private static let ownerIdentityDefaultsKey = "com.phone-lockbox.companion.identity.owner.v1"
     private static let approverIdentityDefaultsKey = "com.phone-lockbox.companion.identity.approver.v1"
     private static let relayBaseURLDefaultsKey = "com.phone-lockbox.companion.relayBaseURL.v1"
-    static let defaultRelayBaseURLString = "https://relay.example.com"
+    /// Used when the build sets no relay (see `Config/Lockbox.xcconfig`).
+    static let placeholderRelayBaseURLString = "https://relay.example.com"
+    /// The relay this build talks to by default: Info.plist's
+    /// `LockboxRelayBaseURL`, fed from `LOCKBOX_RELAY_BASE_URL` in the
+    /// gitignored `Config/Local.xcconfig` (docs/development.md). Falls back to
+    /// the placeholder when unset or not an absolute http(s) URL. Settings →
+    /// Developer can still override it per device.
+    static let defaultRelayBaseURLString: String = {
+        let configured = (Bundle.main.object(forInfoDictionaryKey: "LockboxRelayBaseURL") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let url = URL(string: configured),
+              let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              url.host?.isEmpty == false else {
+            return placeholderRelayBaseURLString
+        }
+        return configured
+    }()
     /// Builds 16–17 defaulted to the local development relay. A stored value
     /// equal to it is treated as "never customised" and follows the default.
     static let legacyLocalRelayBaseURLString = "http://127.0.0.1:8002"

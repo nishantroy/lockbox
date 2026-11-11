@@ -8,3 +8,4 @@ xcuserdata/
 .pi/
 .DS_Store
 .claude/worktrees/
+Config/Local.xcconfig

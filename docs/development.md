@@ -17,7 +17,23 @@
 
 Current deployment target: iOS 17, Swift 6. Build 22 (from `r5-relay` at 12bc414, 2026-10-31) is the latest QA candidate: pairing v3 — a ~50-character invite link, the friend taps Accept and is paired (no owner confirm, no permission switches), real names, a one-time "‹Name› joined" notice, People auto-refresh, and a checkmark list for Ask to end early. The production relay runs v3; builds ≤21 can no longer pair. R5 friend-approval release stays developer-gated. App unit/UI suites for this build were not run (compile-only; they run before the next push).
 
-Development signing uses the paid team already specified in `project.yml`. App Group: `group.com.phone-lockbox`. App bundle: `com.phone-lockbox.app`; three extension identifiers are specified in YAML. Do not change identifiers casually—this can invalidate the device test baseline and storage/provisioning assumptions.
+Development signing uses the team set in the gitignored `Config/Local.xcconfig` (see [Local build configuration](#local-build-configuration)). App Group: `group.com.phone-lockbox`. App bundle: `com.phone-lockbox.app`; three extension identifiers are specified in YAML. Do not change identifiers casually—this can invalidate the device test baseline and storage/provisioning assumptions.
+
+## Local build configuration
+
+Machine- and deployment-specific build values are kept out of the repository:
+
+- `Config/Lockbox.xcconfig` (committed) is the base configuration of every target, wired in by `configFiles` in `project.yml`. It leaves `DEVELOPMENT_TEAM` empty and sets `LOCKBOX_RELAY_BASE_URL` to the placeholder `https://relay.example.com`, then optionally includes `Config/Local.xcconfig`.
+- `Config/Local.xcconfig` (gitignored) holds your values. Create it from the example:
+
+  ```bash
+  cp Config/Local.example.xcconfig Config/Local.xcconfig
+  # then set DEVELOPMENT_TEAM and LOCKBOX_RELAY_BASE_URL
+  ```
+
+  Write URLs as `https:/$()/your-relay.example` because xcconfig treats `//` as a comment. No `xcodegen generate` is needed after editing it; rebuild.
+- `LOCKBOX_RELAY_BASE_URL` reaches the app as the Info.plist key `LockboxRelayBaseURL`. `CompanionCoordinator.defaultRelayBaseURLString` reads it and falls back to the placeholder when it is unset or not an absolute http(s) URL. Settings → Developer can still override the relay per device.
+- Without a team, compile-only builds (`CODE_SIGNING_ALLOWED=NO`) still work; signed simulator and device builds need `DEVELOPMENT_TEAM` (or a team picked in Xcode).
 
 ## Build and test
 

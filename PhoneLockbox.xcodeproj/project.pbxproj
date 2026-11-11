@@ -191,6 +191,7 @@
 		5757EE1107DB6E18920EE73D /* CompanionLocalRelayFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionLocalRelayFlowTests.swift; sourceTree = "<group>"; };
 		58A23323CA52C8F731F9C7A5 /* ShieldActionExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldActionExtension.swift; sourceTree = "<group>"; };
 		5A49845AEC0FC73B3304327A /* GalleryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryViews.swift; sourceTree = "<group>"; };
+		5E4B15BB963F5AFDBC0FF280 /* Lockbox.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Lockbox.xcconfig; sourceTree = "<group>"; };
 		63CC80C4BE9B395563C2E8F3 /* RuntimeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeLifecycle.swift; sourceTree = "<group>"; };
 		64231289C6D39E0A1CBB6D2B /* IssuedInviteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IssuedInviteStore.swift; sourceTree = "<group>"; };
 		65A0B225BE4252E6CF870F25 /* CompanionPairingV3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionPairingV3Tests.swift; sourceTree = "<group>"; };
@@ -338,6 +339,7 @@
 		39F4C57E8A4CA54532DC99BA = {
 			isa = PBXGroup;
 			children = (
+				51BFC70D3063244502A1FBE6 /* Config */,
 				A2E4B0392F525B9F4E4FDF46 /* Extensions */,
 				3D690A013CC84A9707CF502B /* Packages */,
 				1E576EE0A7803C3DC49958D3 /* PhoneLockbox */,
@@ -382,6 +384,14 @@
 				71235E9EB67E16A1A111F82F /* PhoneLockboxMonitor.entitlements */,
 			);
 			path = DeviceActivityMonitor;
+			sourceTree = "<group>";
+		};
+		51BFC70D3063244502A1FBE6 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				5E4B15BB963F5AFDBC0FF280 /* Lockbox.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 		5A805F511DE7EFE8BF45461A /* PhoneLockboxTests */ = {
@@ -903,7 +913,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Extensions/DeviceActivityMonitor/PhoneLockboxMonitor.entitlements;
-				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Extensions/DeviceActivityMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -921,7 +930,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Extensions/ShieldConfiguration/PhoneLockboxShieldConfiguration.entitlements;
-				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Extensions/ShieldConfiguration/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -939,7 +947,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Extensions/ShieldAction/PhoneLockboxShieldAction.entitlements;
-				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Extensions/ShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -991,7 +998,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Extensions/ShieldAction/PhoneLockboxShieldAction.entitlements;
-				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Extensions/ShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1031,6 +1037,7 @@
 		};
 		972561B0DC388BA913F4A390 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 5E4B15BB963F5AFDBC0FF280 /* Lockbox.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1065,7 +1072,6 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 28;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -1110,7 +1116,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Extensions/ShieldConfiguration/PhoneLockboxShieldConfiguration.entitlements;
-				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Extensions/ShieldConfiguration/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1150,6 +1155,7 @@
 		};
 		C5B726D6C673B4453C4161DD /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 5E4B15BB963F5AFDBC0FF280 /* Lockbox.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1184,7 +1190,6 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 28;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -1253,7 +1258,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Extensions/DeviceActivityMonitor/PhoneLockboxMonitor.entitlements;
-				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Extensions/DeviceActivityMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
